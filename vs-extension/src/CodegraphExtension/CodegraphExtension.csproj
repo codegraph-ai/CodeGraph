@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <RootNamespace>CodegraphExtension</RootNamespace>
+    <AssemblyName>CodegraphExtension</AssemblyName>
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <IncludeDebugSymbolsInVSIXContainer>false</IncludeDebugSymbolsInVSIXContainer>
+    <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
+    <CreateVsixContainer>true</CreateVsixContainer>
+    <DeployExtension>false</DeployExtension>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Core VS SDK -->
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.12.*" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.12.*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
+
+    <!-- LSP Client + JSON pulled transitively by VS SDK -->
+    <!-- Newtonsoft.Json also pulled by VS SDK -->
+  </ItemGroup>
+
+  <!-- VSIX manifest -->
+  <ItemGroup>
+    <None Include="source.extension.vsixmanifest" />
+  </ItemGroup>
+
+  <!-- Ship the Rust server binary inside the VSIX -->
+  <ItemGroup>
+    <Content Include="server\codegraph-server.exe" Condition="Exists('server\codegraph-server.exe')">
+      <IncludeInVSIX>true</IncludeInVSIX>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="server\onnxruntime.dll" Condition="Exists('server\onnxruntime.dll')">
+      <IncludeInVSIX>true</IncludeInVSIX>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

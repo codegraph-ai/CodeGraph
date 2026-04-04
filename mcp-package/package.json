@@ -1,0 +1,45 @@
+{
+  "name": "@astudioplus/codegraph-mcp",
+  "version": "0.13.0",
+  "mcpName": "io.github.codegraph-ai/codegraph",
+  "description": "CodeGraph MCP server — cross-language code intelligence with 28 tools, 17 languages",
+  "author": "Andrey Vasilevsky <anvanster@gmail.com>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codegraph-ai/CodeGraph"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "code-intelligence",
+    "code-graph",
+    "ai",
+    "claude",
+    "cursor",
+    "copilot"
+  ],
+  "bin": {
+    "codegraph-mcp": "./bin/codegraph-mcp.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "server.json"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "scripts": {
+    "postinstall": "node bin/postinstall.js"
+  }
+}

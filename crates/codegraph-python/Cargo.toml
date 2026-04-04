@@ -1,0 +1,64 @@
+# Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-python"
+version = "0.4.3"
+edition.workspace = true
+rust-version = "1.75"
+authors.workspace = true
+license.workspace = true
+repository = "https://github.com/anvanster/codegraph-python"
+description = "Python parser plugin for CodeGraph - extracts code entities and relationships from Python source files"
+keywords = ["parser", "python", "code-analysis", "ast", "graph"]
+categories = ["development-tools", "parsing"]
+
+[dependencies]
+# Core graph database
+codegraph.workspace = true
+
+# Parser API
+codegraph-parser-api.workspace = true
+
+# Python parser - tree-sitter based
+tree-sitter = "0.22"
+tree-sitter-python = "0.21"
+
+# Error handling
+thiserror.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# File system utilities
+walkdir = "2.0"
+
+# Parallel processing
+rayon = "1.10"
+
+# Structured logging
+tracing = "0.1"
+
+[dev-dependencies]
+# Benchmarking
+criterion = "0.5"
+
+# Temporary files for testing
+tempfile = "3.0"
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[lib]
+name = "codegraph_python"
+path = "src/lib.rs"
+
+[[example]]
+name = "basic_parse"
+path = "examples/basic_parse.rs"
+
+[[example]]
+name = "parse_project"
+path = "examples/parse_project.rs"

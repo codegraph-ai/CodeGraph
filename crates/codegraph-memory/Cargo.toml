@@ -1,0 +1,67 @@
+# Copyright 2025-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Persistent memory layer for CodeGraph with semantic search"
+
+[lib]
+name = "codegraph_memory"
+path = "src/lib.rs"
+
+[dependencies]
+# Storage
+rocksdb = { version = "0.22", features = ["multi-threaded-cf"] }
+
+# HNSW index for O(log n) semantic search
+instant-distance = "0.6"
+
+# Concurrent data structures
+dashmap.workspace = true
+parking_lot = "0.12"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+bincode = "1.3"
+rmp-serde = "1.1"
+
+# Identifiers
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Temporal handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async runtime
+tokio.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow = "1.0"
+
+# Logging
+log = "0.4"
+
+# Embeddings - fastembed with BGE-Small-EN-v1.5
+# macOS/Linux: static link ONNX Runtime (ort-download-binaries)
+# Windows: load onnxruntime DLL at runtime (ort-load-dynamic, avoids CRT /MT vs /MD mismatch)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+fastembed = { version = "4", default-features = false, features = ["ort-download-binaries", "hf-hub-rustls-tls"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+fastembed = { version = "4", default-features = false, features = ["ort-load-dynamic", "hf-hub-rustls-tls"] }
+ureq = { version = "2.9", features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3.0"
+criterion = "0.5"
+tokio-test = "0.4"
+
+[[bench]]
+name = "memory_bench"
+harness = false

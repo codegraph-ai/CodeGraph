@@ -1,0 +1,42 @@
+# Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-fortran"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Fortran parser for CodeGraph - extracts code entities and relationships from Fortran source files"
+keywords = ["fortran", "parser", "tree-sitter", "static-analysis"]
+categories = ["parser-implementations", "development-tools"]
+
+[dependencies]
+codegraph.workspace = true
+codegraph-parser-api.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+tree-sitter = "0.22"
+rayon = "1.10"
+
+[build-dependencies]
+cc = "1.0"
+# tree-sitter-fortran is listed here so cargo downloads its source to the registry.
+# It uses the newer tree-sitter-language API incompatible with tree-sitter 0.22.
+# We compile parser.c and scanner.c directly via extern C pattern.
+tree-sitter-fortran = "0.5.1"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.0"
+criterion = "0.5"
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[lib]
+name = "codegraph_fortran"
+path = "src/lib.rs"

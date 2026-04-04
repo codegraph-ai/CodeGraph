@@ -1,0 +1,2 @@
+# No platform-specific overrides needed.
+# libz-sys pinned to 1.1.25 in Cargo.toml (vendored zlib works on all platforms).

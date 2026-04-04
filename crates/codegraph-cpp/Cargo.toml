@@ -1,0 +1,38 @@
+# Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-cpp"
+version = "0.2.3"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "C++ parser for CodeGraph - extracts code entities and relationships from C++ source files"
+keywords = ["cpp", "c++", "parser", "code-analysis", "tree-sitter"]
+categories = ["parser-implementations", "development-tools"]
+
+[dependencies]
+# Workspace dependencies
+codegraph.workspace = true
+codegraph-parser-api.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+# C++ parser
+tree-sitter = "0.22"
+tree-sitter-cpp = "0.22"
+rayon = "1.10"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.0"
+criterion = "0.5"
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[lib]
+name = "codegraph_cpp"
+path = "src/lib.rs"

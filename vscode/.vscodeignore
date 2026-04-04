@@ -1,0 +1,54 @@
+# Include only what the extension needs:
+#   package.json, README.md, CHANGELOG.md, LICENSE
+#   out/extension.js (compiled TS)
+#   bin/* (platform binaries)
+#   images/* (icons)
+
+# Exclude everything else
+**/.git/**
+**/.github/**
+**/.gitignore
+**/.gitattributes
+**/.vscode/**
+**/.cargo/**
+**/.claude/**
+**/.overstory/**
+**/.smelt/**
+**/.stellarion/**
+**/.mcp.json
+
+# Rust source and build
+server/**
+codegraph-memory/**
+Cargo.toml
+Cargo.lock
+target/**
+prebuilt/**
+
+# TypeScript source
+src/**
+tsconfig.json
+esbuild.js
+vitest.config.ts
+.eslintrc*
+tests/**
+
+# Dev/build files
+scripts/**
+docs/**
+mcp-package/**
+node_modules/**
+
+# Documentation/dev files not needed in extension
+BUILD.md
+PROGRESS.md
+TODO.md
+test_scenarios.md
+test_results_*.md
+log.md
+vsforge.config.json
+
+# Package artifacts
+*.vsix
+*.tgz
+examples/

@@ -1,0 +1,38 @@
+# Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-ruby"
+version = "0.2.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ruby parser for CodeGraph - extracts code entities and relationships from Ruby source files"
+keywords = ["ruby", "parser", "code-analysis"]
+categories = ["parser-implementations", "development-tools"]
+
+[dependencies]
+# Workspace dependencies
+codegraph.workspace = true
+codegraph-parser-api.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+# Ruby parser
+tree-sitter = "0.22"
+tree-sitter-ruby = "0.21"
+rayon = "1.10"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.0"
+criterion = "0.5"
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[lib]
+name = "codegraph_ruby"
+path = "src/lib.rs"

@@ -1,0 +1,67 @@
+# Copyright 2025-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CodeGraph MCP/LSP server — cross-language code intelligence"
+
+[[bin]]
+name = "codegraph-server"
+path = "src/main.rs"
+
+[lib]
+name = "codegraph_server"
+path = "src/lib.rs"
+
+[dependencies]
+# LSP framework
+tower-lsp.workspace = true
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Utilities
+thiserror.workspace = true
+dashmap.workspace = true
+notify.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+lru.workspace = true
+regex.workspace = true
+globset.workspace = true
+
+# CodeGraph ecosystem
+codegraph.workspace = true
+codegraph-parser-api.workspace = true
+codegraph-python.workspace = true
+codegraph-rust.workspace = true
+codegraph-typescript.workspace = true
+codegraph-go.workspace = true
+codegraph-c.workspace = true
+codegraph-java.workspace = true
+codegraph-cpp.workspace = true
+codegraph-kotlin.workspace = true
+codegraph-csharp.workspace = true
+codegraph-php.workspace = true
+codegraph-ruby.workspace = true
+codegraph-swift.workspace = true
+codegraph-tcl.workspace = true
+codegraph-verilog.workspace = true
+codegraph-cobol.workspace = true
+codegraph-fortran.workspace = true
+
+# Memory layer
+codegraph-memory.workspace = true
+
+# CLI
+clap.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"

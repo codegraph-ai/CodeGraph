@@ -1,0 +1,39 @@
+# Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-rust"
+version = "0.2.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rust parser for CodeGraph - extracts code entities and relationships from Rust source files"
+keywords = ["rust", "parser", "code-analysis", "ast"]
+categories = ["parser-implementations", "development-tools"]
+
+[dependencies]
+# Workspace dependencies
+codegraph.workspace = true
+codegraph-parser-api.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+# Rust parser - tree-sitter based (0.22 aligned across all codegraph parsers)
+# Pin tree-sitter-rust to 0.20.3 exactly: 0.20.4 pulls in tree-sitter 0.20 causing duplicate symbols
+tree-sitter = "0.22"
+tree-sitter-rust = "=0.20.3"
+rayon = "1.10"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.0"
+criterion = "0.5"
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[lib]
+name = "codegraph_rust"
+path = "src/lib.rs"

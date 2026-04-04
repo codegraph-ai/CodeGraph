@@ -1,0 +1,1676 @@
+{
+    "name": "codegraph",
+    "displayName": "CodeGraph",
+    "description": "Cross-language code intelligence powered by graph analysis",
+    "version": "0.13.0",
+    "publisher": "aStudioPlus",
+    "author": "Andrey Vasilevsky <anvanster@gmail.com>",
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/codegraph-ai/codegraph"
+    },
+    "engines": {
+        "vscode": "^1.90.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "Linters",
+        "AI",
+        "Chat",
+        "Testing",
+        "Visualization"
+    ],
+    "keywords": [
+        "code intelligence",
+        "cross-language",
+        "code graph",
+        "navigation",
+        "AI"
+    ],
+    "icon": "images/icon.png",
+    "activationEvents": [
+        "onStartupFinished",
+        "onLanguage:python",
+        "onLanguage:rust",
+        "onLanguage:typescript",
+        "onLanguage:javascript",
+        "onLanguage:go",
+        "onLanguage:c",
+        "onLanguage:java",
+        "onLanguage:cpp",
+        "onLanguage:kotlin",
+        "onLanguage:csharp"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "codegraph.showDependencyGraph",
+                "title": "Show Dependency Graph",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.showCallGraph",
+                "title": "Show Call Graph",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.analyzeImpact",
+                "title": "Analyze Impact",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.showMetrics",
+                "title": "Show Parser Metrics",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.openAIChat",
+                "title": "Open AI Assistant",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.reindex",
+                "title": "Reindex Workspace",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.debugTools",
+                "title": "Debug Language Model Tools",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.refreshMemories",
+                "title": "Refresh Memories",
+                "category": "CodeGraph",
+                "icon": "$(refresh)"
+            },
+            {
+                "command": "codegraph.searchMemories",
+                "title": "Search Memories",
+                "category": "CodeGraph",
+                "icon": "$(search)"
+            },
+            {
+                "command": "codegraph.clearMemorySearch",
+                "title": "Clear Memory Search",
+                "category": "CodeGraph",
+                "icon": "$(clear-all)"
+            },
+            {
+                "command": "codegraph.toggleInvalidatedMemories",
+                "title": "Toggle Invalidated Memories",
+                "category": "CodeGraph",
+                "icon": "$(filter)"
+            },
+            {
+                "command": "codegraph.storeMemory",
+                "title": "Store Memory",
+                "category": "CodeGraph",
+                "icon": "$(add)"
+            },
+            {
+                "command": "codegraph.showMemory",
+                "title": "Show Memory Details",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.invalidateMemory",
+                "title": "Invalidate Memory",
+                "category": "CodeGraph",
+                "icon": "$(trash)"
+            },
+            {
+                "command": "codegraph.memoryStats",
+                "title": "Memory Statistics",
+                "category": "CodeGraph",
+                "icon": "$(graph)"
+            },
+            {
+                "command": "codegraph.mineGitHistory",
+                "title": "Mine Git History for Memories",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.indexDirectory",
+                "title": "Index Directory",
+                "category": "CodeGraph"
+            }
+        ],
+        "configuration": {
+            "title": "CodeGraph",
+            "properties": {
+                "codegraph.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Enable CodeGraph extension"
+                },
+                "codegraph.languages": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "python",
+                        "rust",
+                        "typescript",
+                        "javascript",
+                        "go",
+                        "c",
+                        "java",
+                        "cpp",
+                        "kotlin",
+                        "csharp",
+                        "php",
+                        "ruby",
+                        "swift",
+                        "tcl"
+                    ],
+                    "scope": "resource",
+                    "description": "Languages to index"
+                },
+                "codegraph.indexOnStartup": {
+                    "type": "boolean",
+                    "default": false,
+                    "scope": "resource",
+                    "description": "Index workspace on startup. When false, use 'Index Directory' command to index specific folders on demand."
+                },
+                "codegraph.maxFileSizeKB": {
+                    "type": "number",
+                    "default": 1024,
+                    "scope": "resource",
+                    "description": "Maximum file size to index (KB)"
+                },
+                "codegraph.excludePatterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "**/node_modules/**",
+                        "**/target/**",
+                        "**/__pycache__/**",
+                        "**/dist/**",
+                        "**/build/**",
+                        "**/.git/**",
+                        "**/vendor/**",
+                        "**/DerivedData/**",
+                        "**/tmp/**"
+                    ],
+                    "scope": "resource",
+                    "description": "Glob patterns for files to exclude"
+                },
+                "codegraph.indexPaths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "scope": "resource",
+                    "description": "Specific directories to index. When empty and indexOnStartup is true, all workspace folders are indexed. Use 'Index Directory' command to add paths interactively."
+                },
+                "codegraph.includePrivate": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Include private/internal symbols"
+                },
+                "codegraph.includeTests": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Include test files and functions"
+                },
+                "codegraph.ai.maxContextTokens": {
+                    "type": "number",
+                    "default": 4000,
+                    "scope": "resource",
+                    "description": "Maximum tokens for AI context"
+                },
+                "codegraph.ai.contextStrategy": {
+                    "type": "string",
+                    "enum": [
+                        "minimal",
+                        "smart",
+                        "maximum"
+                    ],
+                    "default": "smart",
+                    "scope": "resource",
+                    "description": "AI context selection strategy"
+                },
+                "codegraph.debug": {
+                    "type": "boolean",
+                    "default": false,
+                    "scope": "resource",
+                    "description": "Enable debug output channel with detailed initialization and config diagnostics"
+                },
+                "codegraph.embeddingModel": {
+                    "type": "string",
+                    "enum": [
+                        "bge-small",
+                        "jina-code-v2"
+                    ],
+                    "default": "bge-small",
+                    "scope": "resource",
+                    "enumDescriptions": [
+                        "BGE-Small-EN-v1.5 (384d) \u2014 fast, good quality with full-body embeddings. ~127MB download.",
+                        "Jina Code V2 (768d) \u2014 6x slower indexing, no quality advantage with full-body embeddings. ~642MB download."
+                    ],
+                    "description": "Embedding model for semantic search and code similarity"
+                },
+                "codegraph.fullBodyEmbedding": {
+                    "type": "boolean",
+                    "default": false,
+                    "scope": "resource",
+                    "description": "Embed full function body (first ~50 lines) instead of just name+signature. Better quality for NL search and clone detection, ~3x slower indexing. Requires reindex after changing."
+                },
+                "codegraph.visualization.defaultDepth": {
+                    "type": "number",
+                    "default": 3,
+                    "scope": "resource",
+                    "description": "Default depth for graph visualizations"
+                },
+                "codegraph.cache.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable query caching"
+                },
+                "codegraph.cache.maxSizeMB": {
+                    "type": "number",
+                    "default": 500,
+                    "description": "Maximum cache size (MB)"
+                },
+                "codegraph.parallelParsing": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable parallel file parsing"
+                },
+                "codegraph.trace.server": {
+                    "type": "string",
+                    "enum": [
+                        "off",
+                        "messages",
+                        "verbose"
+                    ],
+                    "default": "off",
+                    "description": "Trace communication with the language server"
+                },
+                "codegraph.memory.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable the memory layer for storing project knowledge"
+                },
+                "codegraph.memory.autoInvalidate": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically invalidate memories when linked code changes"
+                },
+                "codegraph.memory.showInvalidated": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Show invalidated memories in the tree view by default"
+                },
+                "codegraph.memory.gitMining.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable mining memories from git history"
+                },
+                "codegraph.memory.gitMining.maxCommits": {
+                    "type": "number",
+                    "default": 500,
+                    "description": "Maximum number of commits to process when mining git history"
+                },
+                "codegraph.memory.gitMining.minConfidence": {
+                    "type": "number",
+                    "default": 0.7,
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Minimum confidence score (0-1) for creating memories from commits"
+                }
+            }
+        },
+        "languageModelTools": [
+            {
+                "name": "codegraph_get_dependency_graph",
+                "displayName": "Get Dependency Graph",
+                "description": "Retrieve the dependency graph for a source file showing imports and dependencies",
+                "modelDescription": "Analyzes file import/dependency relationships. USE WHEN: understanding module architecture, finding circular dependencies, planning refactoring, or tracing import chains. RETURNS: Graph with nodes (files/modules) and edges (import relationships). Set direction='importedBy' to find reverse dependencies. EXAMPLE: To see what imports utils.ts, call with uri='file:///path/to/utils.ts' and direction='importedBy'. LIMITATIONS: External packages shown only with includeExternal=true.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "dependency_graph",
+                "userDescription": "Analyzes file dependencies and import relationships in your codebase",
+                "tags": [
+                    "code-analysis",
+                    "dependencies",
+                    "architecture",
+                    "imports",
+                    "modules"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "The file URI to analyze (e.g., file:///path/to/file.ts)"
+                        },
+                        "depth": {
+                            "type": "number",
+                            "description": "How many levels of dependencies to traverse (1-10, default: 3)",
+                            "default": 3
+                        },
+                        "includeExternal": {
+                            "type": "boolean",
+                            "description": "Whether to include external dependencies from node_modules/packages",
+                            "default": false
+                        },
+                        "direction": {
+                            "type": "string",
+                            "enum": [
+                                "imports",
+                                "importedBy",
+                                "both"
+                            ],
+                            "description": "Direction to analyze: 'imports' (what this file uses), 'importedBy' (what uses this file), or 'both'",
+                            "default": "both"
+                        },
+                        "summary": {
+                            "type": "boolean",
+                            "description": "Return a condensed summary for large graphs",
+                            "default": false
+                        }
+                    },
+                    "required": [
+                        "uri"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_get_call_graph",
+                "displayName": "Get Call Graph",
+                "description": "Retrieve the call graph for a function showing callers and callees",
+                "modelDescription": "Maps function call relationships showing callers and callees. USE WHEN: tracing execution flow, understanding function usage, finding dead code, or debugging. RETURNS: Graph with caller/callee nodes and call-site locations. Use direction='callers' for 'who calls this?' or direction='callees' for 'what does this call?'. EXAMPLE: To find all functions calling handleRequest, use uri+line pointing to handleRequest with direction='callers'. LIMITATIONS: Tracks static calls only; dynamic dispatch and callbacks may be incomplete.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "call_graph",
+                "userDescription": "Shows function call relationships and execution flow in your code",
+                "tags": [
+                    "code-analysis",
+                    "functions",
+                    "call-graph",
+                    "debugging",
+                    "execution-flow"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "The file URI containing the function"
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "Line number of the function (0-indexed)"
+                        },
+                        "character": {
+                            "type": "number",
+                            "description": "Character position in the line (0-indexed)",
+                            "default": 0
+                        },
+                        "depth": {
+                            "type": "number",
+                            "description": "How many levels deep to traverse the call graph",
+                            "default": 3
+                        },
+                        "direction": {
+                            "type": "string",
+                            "enum": [
+                                "callers",
+                                "callees",
+                                "both"
+                            ],
+                            "description": "Direction: 'callers' (who calls this), 'callees' (what this calls), or 'both'",
+                            "default": "both"
+                        },
+                        "summary": {
+                            "type": "boolean",
+                            "description": "Return a condensed summary for large call graphs",
+                            "default": false
+                        }
+                    },
+                    "required": [
+                        "uri",
+                        "line"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_analyze_impact",
+                "displayName": "Analyze Change Impact",
+                "description": "Analyze the impact of modifying, deleting, or renaming a symbol",
+                "modelDescription": "Predicts blast radius of code changes before making them. USE WHEN: planning refactoring, renaming symbols, deleting code, or assessing risk. RETURNS: Direct impacts (immediate usages) and indirect impacts (transitive dependencies) with file locations and risk scores. EXAMPLE: Before renaming validateUser, call with changeType='rename' to see all affected files. ALWAYS USE THIS before modifying public APIs or shared utilities. LIMITATIONS: May miss dynamic references or reflection-based usage.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "impact_analysis",
+                "userDescription": "Analyzes the impact of code changes before you make them",
+                "tags": [
+                    "code-analysis",
+                    "refactoring",
+                    "impact",
+                    "risk-assessment",
+                    "planning"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "The file URI containing the symbol"
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "Line number of the symbol (0-indexed)"
+                        },
+                        "character": {
+                            "type": "number",
+                            "description": "Character position (0-indexed)",
+                            "default": 0
+                        },
+                        "changeType": {
+                            "type": "string",
+                            "enum": [
+                                "modify",
+                                "delete",
+                                "rename"
+                            ],
+                            "description": "Type of change to analyze",
+                            "default": "modify"
+                        },
+                        "summary": {
+                            "type": "boolean",
+                            "description": "Return a condensed summary when many impacts are found",
+                            "default": false
+                        }
+                    },
+                    "required": [
+                        "uri",
+                        "line"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_get_ai_context",
+                "displayName": "Get AI Context",
+                "description": "Get comprehensive code context optimized for AI analysis",
+                "modelDescription": "Gathers comprehensive code context optimized for AI understanding. USE WHEN: explaining code, planning modifications, debugging issues, or writing tests. THIS IS YOUR PRIMARY TOOL for understanding unfamiliar code. RETURNS: primaryContext (source code), relatedSymbols (full source or signature-only), imports (file-level modules), siblingFunctions (other functions in same file), debugHints (complexity, branches, exceptions \u2014 debug intent only), architecture (module, layer). Intent controls priority: 'explain' = dependencies + siblings, 'modify' = tests + callers, 'debug' = call chain + control flow hints, 'test' = example tests + mockable deps. Token budget fills high-priority sections first, then adds signature-only symbols for maximum coverage.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "ai_context",
+                "userDescription": "Provides rich code context for AI analysis and understanding",
+                "tags": [
+                    "code-analysis",
+                    "ai",
+                    "context",
+                    "understanding",
+                    "primary-tool"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "The file URI to get context for"
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "Line number (0-indexed)"
+                        },
+                        "character": {
+                            "type": "number",
+                            "description": "Character position (0-indexed)",
+                            "default": 0
+                        },
+                        "intent": {
+                            "type": "string",
+                            "enum": [
+                                "explain",
+                                "modify",
+                                "debug",
+                                "test"
+                            ],
+                            "description": "What you plan to do with the context. Affects which related code is selected.",
+                            "default": "explain"
+                        },
+                        "maxTokens": {
+                            "type": "number",
+                            "description": "Maximum tokens of context to return",
+                            "default": 4000
+                        }
+                    },
+                    "required": [
+                        "uri",
+                        "line"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_get_edit_context",
+                "displayName": "Get Edit Context",
+                "description": "Assembles everything needed to edit code at a specific location in one call",
+                "modelDescription": "Assembles everything needed to edit code at a specific location in a single call. USE WHEN: you are about to modify, refactor, or fix code and need full context before making changes. PREFER THIS over codegraph_get_ai_context when you are about to write or modify code \u2014 it includes callers (impact), tests (what to update), and git history (recent context) that get_ai_context does not. Use get_ai_context instead when you only need to understand or explain code. RETURNS 5 sections: (1) symbol \u2014 full source code of the function/method, (2) callers \u2014 functions that call this symbol (to assess impact), (3) tests \u2014 related test functions (to know what to update/run), (4) memories \u2014 relevant debug notes and architectural decisions, (5) recentChanges \u2014 recent git commits touching this file. EXAMPLE: Before modifying a function's signature, call this to see all callers that would break, tests that need updating, and whether someone recently changed this code.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "edit_context",
+                "userDescription": "Gets comprehensive context for editing code: source, callers, tests, memories, and git history",
+                "tags": [
+                    "code-analysis",
+                    "editing",
+                    "context",
+                    "primary-tool"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "The file URI of the code being edited"
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "Line number being edited (0-indexed)"
+                        },
+                        "maxTokens": {
+                            "type": "number",
+                            "description": "Maximum tokens of context to return",
+                            "default": 8000
+                        }
+                    },
+                    "required": [
+                        "uri",
+                        "line"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_get_curated_context",
+                "displayName": "Get Curated Context",
+                "description": "Discovers and assembles cross-codebase context for a natural language query",
+                "modelDescription": "Discovers and assembles context across the entire codebase for a natural language query. USE WHEN: you need to understand a concept, pattern, or subsystem that spans multiple files \u2014 e.g., 'how does authentication work?', 'what handles database connections?', 'error handling patterns'. Unlike codegraph_get_ai_context (single symbol) or codegraph_get_edit_context (single location), this searches the whole codebase and curates cross-cutting context. Pipeline: searches for relevant symbols, resolves source code, walks dependencies to find related modules, fetches relevant memories, and curates within token budget. EXAMPLE: query='authentication middleware' returns the auth function source, its callers (routes), its dependencies (token verification), and architectural notes about auth.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "curated_context",
+                "userDescription": "Searches the codebase and assembles context for a concept or question",
+                "tags": [
+                    "code-analysis",
+                    "search",
+                    "context",
+                    "cross-cutting",
+                    "primary-tool"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural language description of the context needed, or a symbol/module name"
+                        },
+                        "uri": {
+                            "type": "string",
+                            "description": "Optional file URI to anchor the search \u2014 results from this file are prioritized"
+                        },
+                        "maxTokens": {
+                            "type": "number",
+                            "description": "Maximum tokens of context to return",
+                            "default": 8000
+                        },
+                        "maxSymbols": {
+                            "type": "number",
+                            "description": "Maximum number of primary symbols to include",
+                            "default": 5
+                        }
+                    },
+                    "required": [
+                        "query"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_find_related_tests",
+                "displayName": "Find Related Tests",
+                "description": "Find test files and test functions related to a code location",
+                "modelDescription": "Discovers test files and functions that exercise specific code. USE WHEN: modifying code to know which tests to run/update, debugging to find test cases that reproduce issues, or assessing test coverage. RETURNS: List of test functions with file locations and relevance scores. EXAMPLE: Before refactoring UserService, call this to find all tests that exercise UserService methods. Works with Jest, Pytest, Rust tests, Go tests, and more.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "related_tests",
+                "userDescription": "Finds tests related to your code for testing and debugging",
+                "tags": [
+                    "testing",
+                    "code-analysis",
+                    "quality",
+                    "debugging",
+                    "coverage"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "The file URI to find tests for"
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "Line number (0-indexed)",
+                            "default": 0
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum number of related tests to return",
+                            "default": 10
+                        }
+                    },
+                    "required": [
+                        "uri"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_get_symbol_info",
+                "displayName": "Get Symbol Information",
+                "description": "Get detailed information about a symbol (function, class, variable, etc.)",
+                "modelDescription": "Gets quick metadata about any symbol (function, class, variable, type). USE WHEN: you need to quickly understand what a symbol is, check its signature, or see usage count. RETURNS: Name, kind, signature, documentation, location, visibility, and reference count. FASTER than codegraph_get_ai_context when you only need basic info. Set includeReferences=true to get all usage locations (slower). Falls back to nearest symbol if line is blank.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "symbol_info",
+                "userDescription": "Shows detailed information about code symbols and their usage",
+                "tags": [
+                    "code-analysis",
+                    "symbols",
+                    "documentation",
+                    "quick-lookup",
+                    "metadata"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "The file URI containing the symbol"
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "Line number of the symbol (0-indexed)"
+                        },
+                        "character": {
+                            "type": "number",
+                            "description": "Character position (0-indexed)",
+                            "default": 0
+                        },
+                        "includeReferences": {
+                            "type": "boolean",
+                            "description": "Whether to include all references to the symbol. Can be slow on large workspaces.",
+                            "default": false
+                        }
+                    },
+                    "required": [
+                        "uri",
+                        "line"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_analyze_complexity",
+                "displayName": "Analyze Complexity",
+                "description": "Analyze cyclomatic and cognitive complexity of code",
+                "modelDescription": "Measures code complexity metrics for refactoring decisions. USE WHEN: identifying functions that need simplification, reviewing code quality, or prioritizing technical debt. RETURNS: Cyclomatic complexity, cognitive complexity, nesting depth, and lines of code. Omit line parameter to analyze entire file and rank functions by complexity. EXAMPLE: To find the most complex functions in auth.ts, call with just uri. Scores >10 typically indicate refactoring candidates.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "complexity",
+                "userDescription": "Analyzes code complexity metrics to identify areas needing refactoring",
+                "tags": [
+                    "code-analysis",
+                    "complexity",
+                    "quality",
+                    "refactoring",
+                    "metrics"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "The file URI to analyze"
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "Optional line number to analyze a specific function (0-indexed)"
+                        },
+                        "threshold": {
+                            "type": "number",
+                            "description": "Complexity threshold for flagging (default: 10)",
+                            "default": 10
+                        },
+                        "summary": {
+                            "type": "boolean",
+                            "description": "Return a condensed summary",
+                            "default": false
+                        }
+                    },
+                    "required": [
+                        "uri"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_symbol_search",
+                "displayName": "Search Symbols",
+                "description": "Search for symbols (functions, classes, variables) in the codebase using natural language or pattern matching",
+                "modelDescription": "Searches codebase for symbols by name or pattern. USE WHEN: finding function/class implementations, exploring unfamiliar code, or locating specific functionality. RETURNS: Ranked results with name, kind, location, and relevance scores. Supports fuzzy matching. EXAMPLE: Search 'validate user' to find validateUser, userValidation, etc. Use symbolType='function' to filter. THIS IS YOUR STARTING POINT when you don't know where code is located.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "symbol_search",
+                "userDescription": "Search for functions, classes, and variables by name or description",
+                "tags": [
+                    "search",
+                    "symbols",
+                    "code-navigation",
+                    "discovery",
+                    "primary-tool"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query - can be a symbol name, partial name, or descriptive text"
+                        },
+                        "symbolType": {
+                            "type": "string",
+                            "enum": [
+                                "function",
+                                "class",
+                                "method",
+                                "variable",
+                                "interface",
+                                "type",
+                                "module",
+                                "any"
+                            ],
+                            "description": "Filter results by symbol type",
+                            "default": "any"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum number of results to return",
+                            "default": 20
+                        },
+                        "includePrivate": {
+                            "type": "boolean",
+                            "description": "Include private/internal symbols in results",
+                            "default": true
+                        }
+                    },
+                    "required": [
+                        "query"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_find_by_imports",
+                "displayName": "Find By Imports",
+                "description": "Find code that imports or uses specific modules, packages, or libraries",
+                "modelDescription": "Finds all files importing a specific module or package. USE WHEN: planning library migrations, finding all React component usages, or discovering internal module consumers. RETURNS: Files that import the module with import statements and locations. EXAMPLE: To find all lodash usage before migration, search moduleName='lodash'. Use matchMode='prefix' to find 'lodash/map', 'lodash/filter', etc.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "find_imports",
+                "userDescription": "Find all code that imports or uses a specific module or package",
+                "tags": [
+                    "search",
+                    "imports",
+                    "dependencies",
+                    "migration",
+                    "library-usage"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "moduleName": {
+                            "type": "string",
+                            "description": "Name of the module/package to search for (e.g., 'lodash', 'react', './utils')"
+                        },
+                        "matchMode": {
+                            "type": "string",
+                            "enum": [
+                                "exact",
+                                "prefix",
+                                "contains",
+                                "fuzzy"
+                            ],
+                            "description": "How to match the module name",
+                            "default": "contains"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum number of results",
+                            "default": 50
+                        }
+                    },
+                    "required": [
+                        "moduleName"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_find_entry_points",
+                "displayName": "Find Entry Points",
+                "description": "Find application entry points like main functions, HTTP handlers, CLI commands, and event handlers",
+                "modelDescription": "Discovers application entry points and execution starting points. USE WHEN: understanding app architecture, tracing request flow, or finding where to start debugging. RETURNS: main() functions, HTTP handlers (Express/FastAPI/Actix), CLI commands, event handlers, and tests. EXAMPLE: Use entryType='http_handler' to map all API endpoints. Use framework='express' to filter to Express routes only. START HERE when exploring unfamiliar backend applications.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "entry_points",
+                "userDescription": "Discover main functions, HTTP handlers, CLI commands, and other entry points",
+                "tags": [
+                    "architecture",
+                    "entry-points",
+                    "code-navigation",
+                    "api",
+                    "routing"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entryType": {
+                            "type": "string",
+                            "enum": [
+                                "main",
+                                "http_handler",
+                                "cli_command",
+                                "event_handler",
+                                "test",
+                                "all"
+                            ],
+                            "description": "Type of entry point to find",
+                            "default": "all"
+                        },
+                        "framework": {
+                            "type": "string",
+                            "description": "Filter by framework (e.g., 'express', 'fastapi', 'actix')"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum number of results",
+                            "default": 50
+                        }
+                    }
+                }
+            },
+            {
+                "name": "codegraph_traverse_graph",
+                "displayName": "Traverse Code Graph",
+                "description": "Traverse the code graph from a starting point following specific relationship types",
+                "modelDescription": "Advanced graph traversal for complex code exploration. USE WHEN: specialized analysis requiring custom traversal (not covered by get_callers/get_callees/get_dependency_graph). Specify edgeTypes=['calls','imports'] to follow specific relationships. RETURNS: Nodes at each depth with relationship paths. Falls back to nearest symbol if line is blank. PREFER simpler tools (get_callers, get_dependency_graph) for common cases; use this for custom multi-edge-type traversals.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "traverse",
+                "userDescription": "Explore code relationships by traversing the code graph",
+                "tags": [
+                    "graph",
+                    "traversal",
+                    "code-analysis",
+                    "advanced",
+                    "relationships"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "File URI (e.g., file:///path/to/file.ts). Use with line to identify the starting symbol."
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "0-based line number of the symbol. Use with uri to identify the starting symbol."
+                        },
+                        "startNodeId": {
+                            "type": "string",
+                            "description": "Internal node ID from symbol_search. Alternative to uri+line."
+                        },
+                        "direction": {
+                            "type": "string",
+                            "enum": [
+                                "outgoing",
+                                "incoming",
+                                "both"
+                            ],
+                            "description": "Direction to traverse edges",
+                            "default": "outgoing"
+                        },
+                        "edgeTypes": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Types of edges to follow (e.g., ['calls', 'imports'])"
+                        },
+                        "nodeTypes": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Filter results to specific node types"
+                        },
+                        "maxDepth": {
+                            "type": "number",
+                            "description": "Maximum traversal depth",
+                            "default": 3
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum number of nodes to return",
+                            "default": 100
+                        }
+                    }
+                }
+            },
+            {
+                "name": "codegraph_get_callers",
+                "displayName": "Get Function Callers",
+                "description": "Get all functions that call a specific function",
+                "modelDescription": "Finds all functions that call a target function (reverse call graph). USE WHEN: understanding function usage, finding all invocation sites, or assessing change impact. RETURNS: List of calling functions with file locations and call sites. Use depth>1 to find transitive callers (callers of callers). Falls back to nearest symbol if line is blank. SIMPLER than traverse_graph for this common use case.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "callers",
+                "userDescription": "Find all functions that call a specific function",
+                "tags": [
+                    "call-graph",
+                    "functions",
+                    "references",
+                    "usage",
+                    "impact"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "File URI (e.g., file:///path/to/file.ts). Use with line to identify the function."
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "0-based line number of the function. Use with uri to identify the function."
+                        },
+                        "nodeId": {
+                            "type": "string",
+                            "description": "Internal node ID from symbol_search. Alternative to uri+line."
+                        },
+                        "depth": {
+                            "type": "number",
+                            "description": "Depth of caller chain to traverse (default: 1)",
+                            "default": 1
+                        }
+                    }
+                }
+            },
+            {
+                "name": "codegraph_get_callees",
+                "displayName": "Get Function Callees",
+                "description": "Get all functions that a specific function calls",
+                "modelDescription": "Finds all functions called by a target function (forward call graph). USE WHEN: understanding function dependencies, tracing execution flow, or analyzing what code a function touches. RETURNS: List of called functions with file locations. Use depth>1 to find transitive callees (functions called by callees). Falls back to nearest symbol if line is blank. SIMPLER than traverse_graph for this common use case.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "callees",
+                "userDescription": "Find all functions that a specific function calls",
+                "tags": [
+                    "call-graph",
+                    "functions",
+                    "dependencies",
+                    "execution-flow",
+                    "tracing"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "File URI (e.g., file:///path/to/file.ts). Use with line to identify the function."
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "0-based line number of the function. Use with uri to identify the function."
+                        },
+                        "nodeId": {
+                            "type": "string",
+                            "description": "Internal node ID from symbol_search. Alternative to uri+line."
+                        },
+                        "depth": {
+                            "type": "number",
+                            "description": "Depth of callee chain to traverse (default: 1)",
+                            "default": 1
+                        }
+                    }
+                }
+            },
+            {
+                "name": "codegraph_get_detailed_symbol",
+                "displayName": "Get Detailed Symbol Info",
+                "description": "Get comprehensive information about a specific symbol including source code, documentation, and relationships",
+                "modelDescription": "Gets comprehensive symbol details including source code and relationships. USE WHEN: you need full context about a symbol - source code, callers, callees, complexity, and metadata together. RETURNS: Source code, signature, documentation, callers list, callees list, complexity score, and visibility. MORE COMPLETE than get_symbol_info but heavier. Falls back to nearest symbol if line is blank. Use includeCallers/includeCallees=false for faster results.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "symbol_details",
+                "userDescription": "Get complete details about a function, class, or variable",
+                "tags": [
+                    "symbols",
+                    "documentation",
+                    "code-analysis",
+                    "comprehensive",
+                    "source-code"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "File URI (e.g., file:///path/to/file.ts). Use with line to identify the symbol."
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "0-based line number of the symbol. Use with uri to identify the symbol."
+                        },
+                        "nodeId": {
+                            "type": "string",
+                            "description": "Internal node ID from symbol_search. Alternative to uri+line."
+                        },
+                        "includeSource": {
+                            "type": "boolean",
+                            "description": "Include full source code of the symbol",
+                            "default": true
+                        },
+                        "includeCallers": {
+                            "type": "boolean",
+                            "description": "Include list of callers",
+                            "default": true
+                        },
+                        "includeCallees": {
+                            "type": "boolean",
+                            "description": "Include list of callees",
+                            "default": true
+                        }
+                    }
+                }
+            },
+            {
+                "name": "codegraph_find_by_signature",
+                "displayName": "Find By Signature",
+                "description": "Find functions by their signature pattern - parameter count, return type, or modifiers",
+                "modelDescription": "Finds functions matching signature patterns. USE WHEN: searching by structural characteristics rather than names - parameter count, return types, or modifiers. RETURNS: Functions matching the pattern with signatures and locations. EXAMPLE: Find all async handlers with modifiers=['async'] and namePattern='*Handler'. Find functions taking 3+ params with minParams=3. Combine returnType='Promise' with modifiers=['async'] for async functions.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "find_signature",
+                "userDescription": "Find functions by parameter count, return type, or modifiers",
+                "tags": [
+                    "search",
+                    "functions",
+                    "signatures",
+                    "patterns",
+                    "structural-search"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namePattern": {
+                            "type": "string",
+                            "description": "Pattern to match function names (supports wildcards like 'get*', '*Handler')"
+                        },
+                        "paramCount": {
+                            "type": "number",
+                            "description": "Exact number of parameters"
+                        },
+                        "minParams": {
+                            "type": "number",
+                            "description": "Minimum number of parameters"
+                        },
+                        "maxParams": {
+                            "type": "number",
+                            "description": "Maximum number of parameters"
+                        },
+                        "returnType": {
+                            "type": "string",
+                            "description": "Return type to match (e.g., 'Promise', 'Result<T>', 'void')"
+                        },
+                        "modifiers": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Required modifiers (e.g., ['async'], ['static', 'public'])"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum number of results",
+                            "default": 50
+                        }
+                    }
+                }
+            },
+            {
+                "name": "codegraph_memory_store",
+                "displayName": "Store Memory",
+                "description": "Store a memory for future retrieval - debug contexts, architectural decisions, known issues, or conventions",
+                "modelDescription": "Persists knowledge for future sessions. USE WHEN: discovering important context worth remembering - debugging insights, architectural decisions, known issues, coding conventions, or project-specific knowledge. RETURNS: Memory ID for retrieval. KIND OPTIONS: 'debug_context' (problem+solution), 'architectural_decision' (decision+rationale), 'known_issue' (description+severity), 'convention' (pattern to follow), 'project_context' (general knowledge). EXAMPLE: After solving a tricky bug, store with kind='debug_context' so future sessions benefit. LINK TO CODE with codeLinks for automatic relevance scoring.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "memory_store",
+                "userDescription": "Store knowledge for future AI sessions - debug insights, decisions, issues, and conventions",
+                "tags": [
+                    "memory",
+                    "persistence",
+                    "knowledge",
+                    "context",
+                    "learning"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "debug_context",
+                                "architectural_decision",
+                                "known_issue",
+                                "convention",
+                                "project_context"
+                            ],
+                            "description": "Type of memory being stored"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Short descriptive title for the memory"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Main content of the memory"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Tags for categorization and search"
+                        },
+                        "codeLinks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "nodeId": {
+                                        "type": "string"
+                                    },
+                                    "nodeType": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "description": "Links to related code graph nodes for relevance scoring"
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "description": "Confidence level 0.0-1.0 (default: 1.0)",
+                            "default": 1
+                        },
+                        "problem": {
+                            "type": "string",
+                            "description": "For debug_context: describe the problem encountered"
+                        },
+                        "solution": {
+                            "type": "string",
+                            "description": "For debug_context: describe the solution found"
+                        },
+                        "decision": {
+                            "type": "string",
+                            "description": "For architectural_decision: the decision made"
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": "For architectural_decision: reasoning behind the decision"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "For known_issue/convention/project_context: detailed description"
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": [
+                                "critical",
+                                "high",
+                                "medium",
+                                "low"
+                            ],
+                            "description": "For known_issue: severity level"
+                        }
+                    },
+                    "required": [
+                        "kind",
+                        "title",
+                        "content"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_memory_search",
+                "displayName": "Search Memories",
+                "description": "Search stored memories using hybrid semantic and keyword search",
+                "modelDescription": "Searches memories with hybrid BM25 + semantic + graph proximity. USE WHEN: recalling past knowledge - previous debugging sessions, architectural decisions, known issues. RETURNS: Ranked memories with relevance scores. Pass codeContext (node IDs) to boost memories linked to current code. EXAMPLE: When debugging auth, search 'authentication issues' with codeContext pointing to auth functions. ALWAYS SEARCH before starting complex tasks to leverage past knowledge.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "memory_search",
+                "userDescription": "Search for stored memories, debug contexts, and project knowledge",
+                "tags": [
+                    "memory",
+                    "search",
+                    "knowledge",
+                    "recall",
+                    "context"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query - supports natural language"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum results to return",
+                            "default": 10
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Filter by tags"
+                        },
+                        "kinds": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Filter by memory kinds"
+                        },
+                        "currentOnly": {
+                            "type": "boolean",
+                            "description": "Only return non-invalidated memories",
+                            "default": true
+                        },
+                        "codeContext": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Code node IDs for proximity boosting"
+                        }
+                    },
+                    "required": [
+                        "query"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_memory_get",
+                "displayName": "Get Memory",
+                "description": "Retrieve a specific memory by its ID",
+                "modelDescription": "Retrieves full memory details by ID. USE WHEN: you have a memory ID from search results and need complete content. RETURNS: Full memory with all fields, code links, and metadata. Use after memory_search to get complete details of relevant memories.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "memory_get",
+                "userDescription": "Get full details of a specific memory by ID",
+                "tags": [
+                    "memory",
+                    "retrieval",
+                    "details"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Memory ID to retrieve"
+                        }
+                    },
+                    "required": [
+                        "id"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_memory_context",
+                "displayName": "Get Memory Context",
+                "description": "Get memories relevant to a specific code location",
+                "modelDescription": "Finds memories relevant to current code location. USE WHEN: starting work on a file/function to see past context. RETURNS: Memories linked to or semantically related to the code location, with relevance explanations. EXAMPLE: When opening auth.ts, call with uri to see past debugging sessions, known issues, and decisions about that code. THIS SHOULD BE YOUR FIRST CALL when starting work on unfamiliar code.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "memory_context",
+                "userDescription": "Find memories relevant to your current code location",
+                "tags": [
+                    "memory",
+                    "context",
+                    "relevance",
+                    "code-aware"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "File URI to find relevant memories for"
+                        },
+                        "line": {
+                            "type": "number",
+                            "description": "Optional line number for more specific context"
+                        },
+                        "character": {
+                            "type": "number",
+                            "description": "Optional character position"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum memories to return",
+                            "default": 5
+                        },
+                        "kinds": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Filter by memory kinds"
+                        }
+                    },
+                    "required": [
+                        "uri"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_memory_invalidate",
+                "displayName": "Invalidate Memory",
+                "description": "Mark a memory as no longer current/valid",
+                "modelDescription": "Marks memory as outdated without deleting. USE WHEN: knowledge is superseded, bugs are fixed, decisions are reversed. RETURNS: Success status. Invalidated memories are hidden by default but retained for history. EXAMPLE: After fixing a bug documented in memory, invalidate that debug_context. This maintains history while preventing outdated info from surfacing.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "memory_invalidate",
+                "userDescription": "Mark a memory as outdated or no longer applicable",
+                "tags": [
+                    "memory",
+                    "management",
+                    "invalidation"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Memory ID to invalidate"
+                        }
+                    },
+                    "required": [
+                        "id"
+                    ]
+                }
+            },
+            {
+                "name": "codegraph_memory_list",
+                "displayName": "List Memories",
+                "description": "List memories with optional filtering by kind and tags",
+                "modelDescription": "Lists memories with filtering and pagination. USE WHEN: browsing available memories or auditing stored knowledge. RETURNS: Paginated list with summary info. Use to discover what project knowledge exists before starting work.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "memory_list",
+                "userDescription": "Browse stored memories with filtering options",
+                "tags": [
+                    "memory",
+                    "list",
+                    "browse",
+                    "management"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "kinds": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Filter by memory kinds"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Filter by tags"
+                        },
+                        "currentOnly": {
+                            "type": "boolean",
+                            "description": "Only show non-invalidated memories",
+                            "default": true
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum results per page",
+                            "default": 20
+                        },
+                        "offset": {
+                            "type": "number",
+                            "description": "Offset for pagination",
+                            "default": 0
+                        }
+                    }
+                }
+            },
+            {
+                "name": "codegraph_memory_stats",
+                "displayName": "Memory Statistics",
+                "description": "Get statistics about stored memories",
+                "modelDescription": "Returns memory store statistics. USE WHEN: understanding what knowledge is stored, checking memory health, or debugging memory issues. RETURNS: Counts by kind, tag distributions, current vs invalidated ratios.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "memory_stats",
+                "userDescription": "View statistics about your stored memories",
+                "tags": [
+                    "memory",
+                    "statistics",
+                    "management"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "codegraph_reindex_workspace",
+                "displayName": "Reindex Workspace",
+                "description": "Reindex the workspace to refresh the code graph",
+                "modelDescription": "Clears and rebuilds the entire code graph by re-parsing all workspace files. USE WHEN: graph data seems stale, files have been added/removed outside the editor, or after parser updates. RETURNS: Status with count of files indexed. WARNING: This is a heavy operation that temporarily clears all graph data.",
+                "canBeReferencedInPrompt": true,
+                "toolReferenceName": "reindex_workspace",
+                "userDescription": "Rebuild the code graph by re-parsing all workspace files",
+                "tags": [
+                    "admin",
+                    "indexing",
+                    "maintenance"
+                ],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "codegraph_find_implementors",
+                "displayName": "Find Implementors",
+                "description": "Find all functions registered as ops struct callbacks (e.g., who implements ndo_open in net_device_ops)",
+                "modelDescription": "Find functions registered as struct field callbacks via designated initializers. Use for vtable/ops struct dispatch patterns in C/C++/Go/Rust.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "structType": {
+                            "type": "string",
+                            "description": "Filter by struct type name"
+                        },
+                        "field": {
+                            "type": "string",
+                            "description": "Filter by field name"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum results (default 50)"
+                        }
+                    }
+                },
+                "toolReferenceName": "find_implementors",
+                "userDescription": "Find all functions registered as struct field callbacks (vtable/ops dispatch)",
+                "tags": [
+                    "navigation",
+                    "vtable",
+                    "callbacks",
+                    "code-analysis"
+                ],
+                "canBeReferencedInPrompt": true
+            },
+            {
+                "name": "codegraph_index_files",
+                "displayName": "Index Files",
+                "description": "Add or update specific files in the code graph without full reindex",
+                "modelDescription": "Incrementally add or update specific files in the code graph. Use after creating or modifying files that need to be in the graph.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "File paths to index"
+                        }
+                    },
+                    "required": [
+                        "files"
+                    ]
+                },
+                "toolReferenceName": "index_files",
+                "userDescription": "Add or update specific files in the code graph",
+                "tags": [
+                    "indexing",
+                    "workspace"
+                ],
+                "canBeReferencedInPrompt": true
+            },
+            {
+                "name": "codegraph_index_directory",
+                "displayName": "Index Directory",
+                "description": "Add a directory to the code graph alongside existing data",
+                "modelDescription": "Add all supported files in a directory to the code graph. Use to expand the indexed scope.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Directory path to index"
+                        },
+                        "embed": {
+                            "type": "boolean",
+                            "description": "Build embeddings (default true)"
+                        }
+                    },
+                    "required": [
+                        "path"
+                    ]
+                },
+                "toolReferenceName": "index_directory",
+                "userDescription": "Add a directory to the code graph",
+                "tags": [
+                    "indexing",
+                    "workspace"
+                ],
+                "canBeReferencedInPrompt": true
+            }
+        ],
+        "menus": {
+            "editor/context": [
+                {
+                    "command": "codegraph.showCallGraph",
+                    "group": "codegraph",
+                    "when": "editorTextFocus"
+                },
+                {
+                    "command": "codegraph.analyzeImpact",
+                    "group": "codegraph",
+                    "when": "editorTextFocus"
+                }
+            ],
+            "view/title": [
+                {
+                    "command": "codegraph.refreshMemories",
+                    "when": "view == codegraphMemories",
+                    "group": "navigation@1"
+                },
+                {
+                    "command": "codegraph.searchMemories",
+                    "when": "view == codegraphMemories",
+                    "group": "navigation@2"
+                },
+                {
+                    "command": "codegraph.storeMemory",
+                    "when": "view == codegraphMemories",
+                    "group": "navigation@3"
+                },
+                {
+                    "command": "codegraph.toggleInvalidatedMemories",
+                    "when": "view == codegraphMemories",
+                    "group": "navigation@4"
+                },
+                {
+                    "command": "codegraph.memoryStats",
+                    "when": "view == codegraphMemories",
+                    "group": "navigation@5"
+                }
+            ],
+            "view/item/context": [
+                {
+                    "command": "codegraph.invalidateMemory",
+                    "when": "view == codegraphMemories && viewItem == memory-current",
+                    "group": "inline"
+                }
+            ]
+        },
+        "views": {
+            "explorer": [
+                {
+                    "id": "codegraphSymbols",
+                    "name": "CodeGraph Symbols",
+                    "when": "codegraph.enabled"
+                },
+                {
+                    "id": "codegraphMemories",
+                    "name": "CodeGraph Memories",
+                    "when": "codegraph.enabled"
+                }
+            ]
+        },
+        "viewsWelcome": [
+            {
+                "view": "codegraphMemories",
+                "contents": "No memories stored yet.\n[Store Memory](command:codegraph.storeMemory)\n[Mine Git History](command:codegraph.mineGitHistory)"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run esbuild-base -- --production",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "esbuild-base": "node esbuild.js",
+        "esbuild": "npm run esbuild-base -- --sourcemap",
+        "esbuild-watch": "npm run esbuild-base -- --sourcemap --watch",
+        "build-server": "cargo build --release -p codegraph-server",
+        "build-webview": "cd webview && npm run build",
+        "package": "vsce package",
+        "lint": "eslint src --ext ts",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:e2e": "npm run compile && node ./out/test/runTest.js"
+    },
+    "devDependencies": {
+        "@types/node": "^20.10.0",
+        "@types/vscode": "^1.85.0",
+        "@typescript-eslint/eslint-plugin": "^8.57.1",
+        "@typescript-eslint/parser": "^8.57.1",
+        "@vitest/coverage-v8": "^4.1.0",
+        "@vscode/vsce": "^2.22.0",
+        "@vsforge/config": "file:../vsforge/packages/@vsforge/config",
+        "@vsforge/shim": "file:../vsforge/packages/@vsforge/shim",
+        "@vsforge/test": "file:../vsforge/packages/@vsforge/test",
+        "esbuild": "^0.27.1",
+        "eslint": "^8.55.0",
+        "typescript": "^5.3.0",
+        "vitest": "^4.1.0"
+    },
+    "dependencies": {
+        "vscode-languageclient": "^9.0.1"
+    }
+}

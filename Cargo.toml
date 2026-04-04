@@ -1,0 +1,92 @@
+# Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "2"
+
+members = [
+    # Graph engine
+    "crates/codegraph",
+    "crates/codegraph-parser-api",
+
+    # Language parsers (17)
+    "crates/codegraph-python",
+    "crates/codegraph-rust",
+    "crates/codegraph-typescript",
+    "crates/codegraph-go",
+    "crates/codegraph-c",
+    "crates/codegraph-cpp",
+    "crates/codegraph-java",
+    "crates/codegraph-kotlin",
+    "crates/codegraph-csharp",
+    "crates/codegraph-php",
+    "crates/codegraph-ruby",
+    "crates/codegraph-swift",
+    "crates/codegraph-tcl",
+    "crates/codegraph-verilog",
+    "crates/codegraph-cobol",
+    "crates/codegraph-fortran",
+
+    # Memory layer
+    "crates/codegraph-memory",
+
+    # MCP/LSP server
+    "crates/codegraph-server",
+]
+
+[workspace.package]
+version = "0.13.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/codegraph-ai/codegraph"
+authors = ["Andrey Vasilevsky <anvanster@gmail.com>"]
+
+[workspace.dependencies]
+# Shared across parser crates
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+rocksdb = "0.22"
+# Pin libz-sys to 1.1.25 — v1.1.26 has broken vendored zlib build on macOS/Windows
+libz-sys = "=1.1.25"
+log = "0.4"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Server dependencies
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+dashmap = "5"
+notify = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+lru = "0.12"
+regex = "1"
+glob = "0.3"
+globset = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+# Internal crates
+codegraph = { path = "crates/codegraph", version = "0.2.0" }
+codegraph-parser-api = { path = "crates/codegraph-parser-api", version = "0.2.1" }
+codegraph-python = { path = "crates/codegraph-python" }
+codegraph-rust = { path = "crates/codegraph-rust" }
+codegraph-typescript = { path = "crates/codegraph-typescript" }
+codegraph-go = { path = "crates/codegraph-go" }
+codegraph-c = { path = "crates/codegraph-c" }
+codegraph-cpp = { path = "crates/codegraph-cpp" }
+codegraph-java = { path = "crates/codegraph-java" }
+codegraph-kotlin = { path = "crates/codegraph-kotlin" }
+codegraph-csharp = { path = "crates/codegraph-csharp" }
+codegraph-php = { path = "crates/codegraph-php" }
+codegraph-ruby = { path = "crates/codegraph-ruby" }
+codegraph-swift = { path = "crates/codegraph-swift" }
+codegraph-tcl = { path = "crates/codegraph-tcl" }
+codegraph-verilog = { path = "crates/codegraph-verilog" }
+codegraph-cobol = { path = "crates/codegraph-cobol" }
+codegraph-fortran = { path = "crates/codegraph-fortran" }
+codegraph-memory = { path = "crates/codegraph-memory" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

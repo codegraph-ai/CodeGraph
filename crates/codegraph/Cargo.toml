@@ -1,0 +1,48 @@
+# Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "A fast, reliable, and flexible graph database optimized for storing and querying code relationships"
+readme = "../../README.md"
+keywords = ["graph", "code-analysis", "database", "ast", "relationships"]
+categories = ["database-implementations", "data-structures", "development-tools"]
+
+[features]
+default = ["rocksdb-backend"]
+rocksdb-backend = ["dep:rocksdb"]
+
+[dependencies]
+# Storage backend
+rocksdb = { workspace = true, optional = true }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+log.workspace = true
+
+# Utilities
+uuid.workspace = true
+
+[dev-dependencies]
+# Testing utilities
+criterion = "0.5"
+tempfile = "3.0"
+
+[lib]
+name = "codegraph"
+path = "src/lib.rs"
+
+[[bench]]
+name = "graph_operations"
+harness = false
