@@ -90,6 +90,9 @@ pub struct CodeGraphBackend {
 
     /// Indexing configuration from VS Code settings.
     pub config: Arc<RwLock<CodeGraphConfig>>,
+
+    /// Extension point for pro LSP commands (community uses NoopProCommandProvider).
+    pub pro_commands: Arc<dyn crate::lsp_pro_hooks::ProCommandProvider>,
 }
 
 impl CodeGraphBackend {
@@ -112,7 +115,18 @@ impl CodeGraphBackend {
             file_watcher: Arc::new(Mutex::new(None)),
             branch_watcher: Arc::new(Mutex::new(None)),
             config: Arc::new(RwLock::new(CodeGraphConfig::default())),
+            pro_commands: Arc::new(crate::lsp_pro_hooks::NoopProCommandProvider),
         }
+    }
+
+    /// Create a backend with a custom pro command provider for LSP.
+    pub fn with_pro_commands(
+        client: Client,
+        pro_commands: Arc<dyn crate::lsp_pro_hooks::ProCommandProvider>,
+    ) -> Self {
+        let mut backend = Self::new(client);
+        backend.pro_commands = pro_commands;
+        backend
     }
 
     /// Create a backend for testing with a pre-configured graph and query engine.
@@ -138,6 +152,7 @@ impl CodeGraphBackend {
             file_watcher: Arc::new(Mutex::new(None)),
             branch_watcher: Arc::new(Mutex::new(None)),
             config: Arc::new(RwLock::new(CodeGraphConfig::default())),
+            pro_commands: Arc::new(crate::lsp_pro_hooks::NoopProCommandProvider),
         }
     }
 
@@ -988,7 +1003,9 @@ impl LanguageServer for CodeGraphBackend {
                         "codegraph.indexDirectory".to_string(),
                         // Configuration
                         "codegraph.updateConfiguration".to_string(),
-                    ],
+                    ].into_iter()
+                    .chain(self.pro_commands.commands().into_iter())
+                    .collect(),
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 }),
                 ..Default::default()
@@ -2054,7 +2071,28 @@ impl LanguageServer for CodeGraphBackend {
                 Ok(Some(serde_json::json!({"status": "ok"})))
             }
 
-            _ => Err(tower_lsp::jsonrpc::Error::method_not_found()),
+            other => {
+                // Fall through to pro command provider
+                let args = params
+                    .arguments
+                    .first()
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                let ctx = crate::lsp_pro_hooks::ProCommandContext {
+                    graph: Arc::clone(&self.graph),
+                    query_engine: Arc::clone(&self.query_engine),
+                    memory_manager: Arc::clone(&self.memory_manager),
+                    workspace_folders: self.workspace_folders.read().await.clone(),
+                };
+                if let Some(future) = self.pro_commands.handle_command(other, args, ctx) {
+                    match future.await {
+                        Ok(result) => Ok(result),
+                        Err(e) => Err(tower_lsp::jsonrpc::Error::invalid_params(e)),
+                    }
+                } else {
+                    Err(tower_lsp::jsonrpc::Error::method_not_found())
+                }
+            }
         }
     }
 }

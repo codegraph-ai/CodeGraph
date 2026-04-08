@@ -14,6 +14,7 @@
 
 pub mod ai_query;
 pub mod backend;
+pub mod lsp_pro_hooks;
 pub mod branch_watcher;
 pub mod cache;
 pub mod custom_requests;
