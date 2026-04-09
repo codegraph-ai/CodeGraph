@@ -11,6 +11,7 @@
 use codegraph_parser_api::{
     CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, Parameter,
     BODY_PREFIX_MAX_CHARS,
+    truncate_body_prefix,
 };
 use tree_sitter::Node;
 
@@ -470,11 +471,7 @@ impl<'a> TclVisitor<'a> {
             .ok()
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
         self.functions.push(func);
@@ -541,11 +538,7 @@ impl<'a> TclVisitor<'a> {
             .ok()
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
         let class = ClassEntity {
@@ -689,11 +682,7 @@ impl<'a> TclVisitor<'a> {
             .ok()
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
         self.functions.push(func);
@@ -866,11 +855,7 @@ impl<'a> TclVisitor<'a> {
             .ok()
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
         let class = ClassEntity {

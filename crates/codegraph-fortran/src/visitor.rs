@@ -10,6 +10,7 @@
 use codegraph_parser_api::{
     CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
     ImportRelation, Parameter, BODY_PREFIX_MAX_CHARS,
+    truncate_body_prefix,
 };
 use tree_sitter::Node;
 
@@ -175,11 +176,7 @@ impl<'a> FortranVisitor<'a> {
             .and_then(|n| n.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
         let entity = ClassEntity {
@@ -220,11 +217,7 @@ impl<'a> FortranVisitor<'a> {
             .and_then(|n| n.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
         let entity = ClassEntity {
@@ -276,11 +269,7 @@ impl<'a> FortranVisitor<'a> {
             .and_then(|n| n.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
         let func = FunctionEntity {
@@ -340,11 +329,7 @@ impl<'a> FortranVisitor<'a> {
             .and_then(|n| n.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
         let func = FunctionEntity {

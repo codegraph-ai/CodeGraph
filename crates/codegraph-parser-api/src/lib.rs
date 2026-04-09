@@ -77,7 +77,8 @@ pub mod traits;
 pub use complexity::{ComplexityBuilder, ComplexityMetrics};
 pub use config::ParserConfig;
 pub use entities::{
-    ClassEntity, Field, FunctionEntity, ModuleEntity, Parameter, TraitEntity, BODY_PREFIX_MAX_CHARS,
+    truncate_body_prefix, ClassEntity, Field, FunctionEntity, ModuleEntity, Parameter, TraitEntity,
+    BODY_PREFIX_MAX_CHARS,
 };
 pub use errors::{ParserError, ParserResult};
 pub use ir::CodeIR;

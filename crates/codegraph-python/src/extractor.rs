@@ -12,6 +12,7 @@ use codegraph_parser_api::{
     CallRelation, ClassEntity, CodeIR, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
     ImportRelation, InheritanceRelation, ModuleEntity, Parameter, TraitEntity,
     BODY_PREFIX_MAX_CHARS,
+    truncate_body_prefix,
 };
 use std::path::Path;
 use tree_sitter::{Node, Parser};
@@ -251,11 +252,7 @@ fn extract_function(
         .and_then(|b| b.utf8_text(source).ok())
         .filter(|t| !t.is_empty())
         .map(|t| {
-            if t.len() > BODY_PREFIX_MAX_CHARS {
-                &t[..BODY_PREFIX_MAX_CHARS]
-            } else {
-                t
-            }
+            truncate_body_prefix(t)
         })
         .map(|t| t.to_string());
 
@@ -525,11 +522,7 @@ fn extract_class(source: &[u8], node: Node, config: &ParserConfig) -> Option<Cla
         .and_then(|b| b.utf8_text(source).ok())
         .filter(|t| !t.is_empty())
         .map(|t| {
-            if t.len() > BODY_PREFIX_MAX_CHARS {
-                &t[..BODY_PREFIX_MAX_CHARS]
-            } else {
-                t
-            }
+            truncate_body_prefix(t)
         })
         .map(|t| t.to_string());
 

@@ -7,6 +7,22 @@ use serde::{Deserialize, Serialize};
 /// Maximum characters to capture for function body prefix embeddings.
 pub const BODY_PREFIX_MAX_CHARS: usize = 1024;
 
+/// Truncate a string to at most `BODY_PREFIX_MAX_CHARS` bytes,
+/// ensuring the cut happens at a valid UTF-8 character boundary.
+/// Prevents panics on multi-byte characters (e.g., Chinese, emoji).
+#[inline]
+pub fn truncate_body_prefix(text: &str) -> &str {
+    if text.len() <= BODY_PREFIX_MAX_CHARS {
+        return text;
+    }
+    // Find the largest char boundary <= BODY_PREFIX_MAX_CHARS
+    let mut end = BODY_PREFIX_MAX_CHARS;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// Represents a function parameter
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Parameter {

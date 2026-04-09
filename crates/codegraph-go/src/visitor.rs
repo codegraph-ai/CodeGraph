@@ -6,6 +6,7 @@
 use codegraph_parser_api::{
     CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
     ImportRelation, Parameter, TraitEntity, TypeReference, BODY_PREFIX_MAX_CHARS,
+    truncate_body_prefix,
 };
 use tree_sitter::Node;
 
@@ -118,11 +119,7 @@ impl<'a> GoVisitor<'a> {
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
 
@@ -203,11 +200,7 @@ impl<'a> GoVisitor<'a> {
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
             .map(|t| {
-                if t.len() > BODY_PREFIX_MAX_CHARS {
-                    &t[..BODY_PREFIX_MAX_CHARS]
-                } else {
-                    t
-                }
+                truncate_body_prefix(t)
             })
             .map(|t| t.to_string());
 
@@ -532,11 +525,7 @@ impl<'a> GoVisitor<'a> {
                                 .ok()
                                 .filter(|t| !t.is_empty())
                                 .map(|t| {
-                                    if t.len() > BODY_PREFIX_MAX_CHARS {
-                                        &t[..BODY_PREFIX_MAX_CHARS]
-                                    } else {
-                                        t
-                                    }
+                                    truncate_body_prefix(t)
                                 })
                                 .map(|t| t.to_string());
 
