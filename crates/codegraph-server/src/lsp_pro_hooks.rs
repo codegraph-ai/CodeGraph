@@ -38,6 +38,13 @@ pub trait ProCommandProvider: Send + Sync + 'static {
     fn edition(&self) -> &str {
         "community"
     }
+
+    /// Return the command namespace prefix (e.g., "codegraph" or "stellarion").
+    /// All LSP commands will use this prefix: "{prefix}.getDependencyGraph", etc.
+    /// Default: "codegraph"
+    fn command_prefix(&self) -> &str {
+        "codegraph"
+    }
 }
 
 /// Default implementation — no premium commands.

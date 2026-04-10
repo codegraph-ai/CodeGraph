@@ -93,6 +93,9 @@ pub struct CodeGraphBackend {
 
     /// Extension point for pro LSP commands (community uses NoopProCommandProvider).
     pub pro_commands: Arc<dyn crate::lsp_pro_hooks::ProCommandProvider>,
+
+    /// Command namespace prefix for LSP commands (e.g., "codegraph" or "stellarion").
+    command_prefix: String,
 }
 
 impl CodeGraphBackend {
@@ -116,16 +119,20 @@ impl CodeGraphBackend {
             branch_watcher: Arc::new(Mutex::new(None)),
             config: Arc::new(RwLock::new(CodeGraphConfig::default())),
             pro_commands: Arc::new(crate::lsp_pro_hooks::NoopProCommandProvider),
+            command_prefix: "codegraph".to_string(),
         }
     }
 
     /// Create a backend with a custom pro command provider for LSP.
+    /// The command prefix is taken from the provider (e.g., "stellarion").
     pub fn with_pro_commands(
         client: Client,
         pro_commands: Arc<dyn crate::lsp_pro_hooks::ProCommandProvider>,
     ) -> Self {
+        let prefix = pro_commands.command_prefix().to_string();
         let mut backend = Self::new(client);
         backend.pro_commands = pro_commands;
+        backend.command_prefix = prefix;
         backend
     }
 
@@ -153,6 +160,7 @@ impl CodeGraphBackend {
             branch_watcher: Arc::new(Mutex::new(None)),
             config: Arc::new(RwLock::new(CodeGraphConfig::default())),
             pro_commands: Arc::new(crate::lsp_pro_hooks::NoopProCommandProvider),
+            command_prefix: "codegraph".to_string(),
         }
     }
 
@@ -964,48 +972,47 @@ impl LanguageServer for CodeGraphBackend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec![
-                        "codegraph.getDependencyGraph".to_string(),
-                        "codegraph.getCallGraph".to_string(),
-                        "codegraph.analyzeImpact".to_string(),
-                        "codegraph.getParserMetrics".to_string(),
-                        "codegraph.reindexWorkspace".to_string(),
-                        "codegraph.getAIContext".to_string(),
-                        "codegraph.getEditContext".to_string(),
-                        "codegraph.getCuratedContext".to_string(),
-                        "codegraph.findRelatedTests".to_string(),
-                        "codegraph.getNodeLocation".to_string(),
-                        "codegraph.getWorkspaceSymbols".to_string(),
-                        "codegraph.analyzeComplexity".to_string(),
-                        // AI Agent Query Primitives
-                        "codegraph.symbolSearch".to_string(),
-                        "codegraph.findByImports".to_string(),
-                        "codegraph.findEntryPoints".to_string(),
-                        "codegraph.traverseGraph".to_string(),
-                        "codegraph.getCallers".to_string(),
-                        "codegraph.getCallees".to_string(),
-                        "codegraph.getDetailedSymbolInfo".to_string(),
-                        "codegraph.findBySignature".to_string(),
-                        // Memory Layer Commands
-                        "codegraph.memoryStore".to_string(),
-                        "codegraph.memorySearch".to_string(),
-                        "codegraph.memoryGet".to_string(),
-                        "codegraph.memoryInvalidate".to_string(),
-                        "codegraph.memoryList".to_string(),
-                        "codegraph.memoryUpdate".to_string(),
-                        "codegraph.memoryContext".to_string(),
-                        "codegraph.memoryStats".to_string(),
-                        // Git mining commands
-                        "codegraph.mineGitHistory".to_string(),
-                        "codegraph.mineGitHistoryForFile".to_string(),
-                        "codegraph.searchGitHistory".to_string(),
-                        // On-demand indexing
-                        "codegraph.indexDirectory".to_string(),
-                        // Configuration
-                        "codegraph.updateConfiguration".to_string(),
-                    ].into_iter()
-                    .chain(self.pro_commands.commands().into_iter())
-                    .collect(),
+                    commands: {
+                        let p = &self.command_prefix;
+                        let base_commands = vec![
+                            format!("{p}.getDependencyGraph"),
+                            format!("{p}.getCallGraph"),
+                            format!("{p}.analyzeImpact"),
+                            format!("{p}.getParserMetrics"),
+                            format!("{p}.reindexWorkspace"),
+                            format!("{p}.getAIContext"),
+                            format!("{p}.getEditContext"),
+                            format!("{p}.getCuratedContext"),
+                            format!("{p}.findRelatedTests"),
+                            format!("{p}.getNodeLocation"),
+                            format!("{p}.getWorkspaceSymbols"),
+                            format!("{p}.analyzeComplexity"),
+                            format!("{p}.symbolSearch"),
+                            format!("{p}.findByImports"),
+                            format!("{p}.findEntryPoints"),
+                            format!("{p}.traverseGraph"),
+                            format!("{p}.getCallers"),
+                            format!("{p}.getCallees"),
+                            format!("{p}.getDetailedSymbolInfo"),
+                            format!("{p}.findBySignature"),
+                            format!("{p}.memoryStore"),
+                            format!("{p}.memorySearch"),
+                            format!("{p}.memoryGet"),
+                            format!("{p}.memoryInvalidate"),
+                            format!("{p}.memoryList"),
+                            format!("{p}.memoryUpdate"),
+                            format!("{p}.memoryContext"),
+                            format!("{p}.memoryStats"),
+                            format!("{p}.mineGitHistory"),
+                            format!("{p}.mineGitHistoryForFile"),
+                            format!("{p}.searchGitHistory"),
+                            format!("{p}.indexDirectory"),
+                            format!("{p}.updateConfiguration"),
+                        ];
+                        base_commands.into_iter()
+                            .chain(self.pro_commands.commands().into_iter())
+                            .collect()
+                    },
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 }),
                 ..Default::default()
@@ -1652,7 +1659,15 @@ impl LanguageServer for CodeGraphBackend {
     ) -> Result<Option<serde_json::Value>> {
         tracing::info!("Executing command: {}", params.command);
 
-        match params.command.as_str() {
+        // Remap incoming command prefix to "codegraph." for internal dispatch.
+        // e.g., "stellarion.getDependencyGraph" → "codegraph.getDependencyGraph"
+        let canonical_command = if self.command_prefix != "codegraph" {
+            params.command.replacen(&self.command_prefix, "codegraph", 1)
+        } else {
+            params.command.clone()
+        };
+
+        match canonical_command.as_str() {
             "codegraph.getDependencyGraph" => {
                 let args = params.arguments.first().ok_or_else(|| {
                     tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")
