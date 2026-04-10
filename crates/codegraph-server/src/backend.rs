@@ -1009,9 +1009,11 @@ impl LanguageServer for CodeGraphBackend {
                             format!("{p}.indexDirectory"),
                             format!("{p}.updateConfiguration"),
                         ];
-                        base_commands.into_iter()
-                            .chain(self.pro_commands.commands().into_iter())
-                            .collect()
+                        // Note: pro commands are NOT advertised here to avoid
+                        // vscode-languageclient auto-registering them as VS Code commands
+                        // (conflicts with toolManager registrations). Pro commands work
+                        // via the execute_command fallthrough to ProCommandProvider.
+                        base_commands
                     },
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 }),
