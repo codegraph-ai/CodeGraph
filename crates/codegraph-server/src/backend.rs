@@ -96,6 +96,12 @@ pub struct CodeGraphBackend {
 
     /// Command namespace prefix for LSP commands (e.g., "codegraph" or "stellarion").
     command_prefix: String,
+
+    /// Persistent index state for incremental indexing across restarts.
+    index_state: Arc<Mutex<crate::index_state::IndexState>>,
+
+    /// Shared indexer for directory walking and file parsing.
+    pub indexer: Arc<crate::indexer::Indexer>,
 }
 
 impl CodeGraphBackend {
@@ -105,11 +111,18 @@ impl CodeGraphBackend {
             CodeGraph::in_memory().expect("Failed to create in-memory graph"),
         ));
 
+        let parsers = Arc::new(ParserRegistry::new());
+        let index_state = Arc::new(Mutex::new(crate::index_state::IndexState::new("")));
+        let indexer = Arc::new(crate::indexer::Indexer::new(
+            Arc::clone(&parsers),
+            Arc::clone(&index_state),
+        ));
+
         Self {
             client,
             query_engine: Arc::new(QueryEngine::new(Arc::clone(&graph))),
             graph,
-            parsers: Arc::new(ParserRegistry::new()),
+            parsers,
             file_cache: Arc::new(DashMap::new()),
             query_cache: Arc::new(QueryCache::new(1000)),
             symbol_index: Arc::new(SymbolIndex::new()),
@@ -120,6 +133,8 @@ impl CodeGraphBackend {
             config: Arc::new(RwLock::new(CodeGraphConfig::default())),
             pro_commands: Arc::new(crate::lsp_pro_hooks::NoopProCommandProvider),
             command_prefix: "codegraph".to_string(),
+            index_state,
+            indexer,
         }
     }
 
@@ -146,11 +161,18 @@ impl CodeGraphBackend {
         let (service, _socket) = LspService::new(Self::new);
         let dummy_client = service.inner().client.clone();
 
+        let parsers = Arc::new(ParserRegistry::new());
+        let index_state = Arc::new(Mutex::new(crate::index_state::IndexState::new("")));
+        let indexer = Arc::new(crate::indexer::Indexer::new(
+            Arc::clone(&parsers),
+            Arc::clone(&index_state),
+        ));
+
         Self {
             client: dummy_client,
             query_engine,
             graph,
-            parsers: Arc::new(ParserRegistry::new()),
+            parsers,
             file_cache: Arc::new(DashMap::new()),
             query_cache: Arc::new(QueryCache::new(1000)),
             symbol_index: Arc::new(SymbolIndex::new()),
@@ -161,6 +183,8 @@ impl CodeGraphBackend {
             config: Arc::new(RwLock::new(CodeGraphConfig::default())),
             pro_commands: Arc::new(crate::lsp_pro_hooks::NoopProCommandProvider),
             command_prefix: "codegraph".to_string(),
+            index_state,
+            indexer,
         }
     }
 
@@ -298,206 +322,32 @@ impl CodeGraphBackend {
         self.symbol_index.remove_file(path);
     }
 
-    /// Maximum recursion depth for directory traversal. Prevents runaway
-    /// indexing into deeply nested result/log directory trees.
-    const MAX_INDEX_DEPTH: u32 = 20;
-
-    /// Maximum number of files to index per workspace. Acts as a safety valve
-    /// so the server cannot OOM on huge directory trees.
-    const MAX_INDEXED_FILES: usize = 5_000;
-
-    /// Directories that should be skipped during indexing.
-    const SKIP_DIRECTORIES: &'static [&'static str] = &[
-        "node_modules",
-        "target",
-        "dist",
-        "build",
-        "out",
-        ".git",
-        "__pycache__",
-        "vendor",
-        "DerivedData",
-        "tmp",
-        "coverage",
-        "htmlcov",
-        "results",
-        "logs",
-    ];
-
-    /// Build a `GlobSet` from user-configured exclude patterns.
-    /// Uses the `globset` crate which properly supports `**` (globstar).
-    /// Logs warnings for any patterns that fail to compile.
-    fn build_exclude_set(patterns: &[String]) -> globset::GlobSet {
-        let mut builder = globset::GlobSetBuilder::new();
-        for pattern in patterns {
-            match globset::Glob::new(pattern) {
-                Ok(g) => {
-                    builder.add(g);
-                }
-                Err(e) => {
-                    tracing::warn!("Invalid exclude pattern '{}': {}", pattern, e);
-                }
-            }
+    /// Build an [`IndexConfig`](crate::indexer::IndexConfig) from the current
+    /// LSP configuration.
+    fn index_config_from_lsp(config: &CodeGraphConfig) -> crate::indexer::IndexConfig {
+        crate::indexer::IndexConfig {
+            exclude_dirs: crate::indexer::IndexConfig::default_exclude_dirs(),
+            exclude_patterns: config.exclude_patterns.clone(),
+            max_file_size_bytes: config.max_file_size_kb * 1024,
+            ..crate::indexer::IndexConfig::default()
         }
-        builder.build().unwrap_or_else(|e| {
-            tracing::warn!("Failed to build exclude GlobSet: {}", e);
-            globset::GlobSet::empty()
-        })
     }
 
-    /// Index all supported files in a directory
+    /// Index all supported files in a directory, delegating to the shared
+    /// [`Indexer`](crate::indexer::Indexer).
     pub fn index_directory<'a>(
         &'a self,
         dir: &'a std::path::Path,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send + 'a>> {
-        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        self.index_directory_inner(dir, 0, counter)
-    }
-
-    /// Inner recursive implementation with depth tracking and a shared file counter.
-    fn index_directory_inner<'a>(
-        &'a self,
-        dir: &'a std::path::Path,
-        depth: u32,
-        total_files: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send + 'a>> {
         Box::pin(async move {
-            use std::fs;
-            use std::sync::atomic::Ordering;
-
-            if depth > Self::MAX_INDEX_DEPTH {
-                tracing::warn!(
-                    "Skipping {:?}: exceeded max indexing depth of {}",
-                    dir,
-                    Self::MAX_INDEX_DEPTH
-                );
-                return 0;
-            }
-
-            if total_files.load(Ordering::Relaxed) >= Self::MAX_INDEXED_FILES {
-                return 0;
-            }
-
-            // Read config for exclude patterns and max file size
             let config = self.config.read().await.clone();
-            let max_file_size = config.max_file_size_kb * 1024;
-            let exclude_set = Self::build_exclude_set(&config.exclude_patterns);
-
-            let mut indexed_count = 0;
-            let supported_extensions = self.parsers.supported_extensions();
-
-            tracing::info!("Indexing directory: {:?}", dir);
-
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    if total_files.load(Ordering::Relaxed) >= Self::MAX_INDEXED_FILES {
-                        tracing::warn!(
-                            "Reached max indexed file limit of {}; stopping",
-                            Self::MAX_INDEXED_FILES
-                        );
-                        break;
-                    }
-
-                    let path = entry.path();
-
-                    // Skip hidden files and directories
-                    if let Some(name) = path.file_name() {
-                        if name.to_string_lossy().starts_with('.') {
-                            continue;
-                        }
-                    }
-
-                    if path.is_dir() {
-                        let dir_name = path.file_name().unwrap().to_string_lossy();
-
-                        // Skip hardcoded default directories
-                        if Self::SKIP_DIRECTORIES
-                            .iter()
-                            .any(|&s| s == dir_name.as_ref())
-                        {
-                            continue;
-                        }
-
-                        // Skip directories matching user-configured exclude globs
-                        let path_str = path.to_string_lossy();
-                        if exclude_set.is_match(path_str.as_ref())
-                            || exclude_set.is_match(dir_name.as_ref())
-                        {
-                            tracing::info!("Skipping {:?}: matched exclude pattern", path);
-                            continue;
-                        }
-
-                        // Recursively index subdirectories
-                        indexed_count += self
-                            .index_directory_inner(&path, depth + 1, total_files.clone())
-                            .await;
-                    } else if path.is_file() {
-                        // Skip files matching exclude globs
-                        let path_str = path.to_string_lossy();
-                        if exclude_set.is_match(path_str.as_ref()) {
-                            continue;
-                        }
-
-                        // Skip files that exceed the configurable size limit
-                        if let Ok(metadata) = fs::metadata(&path) {
-                            if metadata.len() > max_file_size {
-                                tracing::info!(
-                                    "Skipping {:?}: file size {} exceeds limit of {}",
-                                    path,
-                                    metadata.len(),
-                                    max_file_size
-                                );
-                                continue;
-                            }
-                        }
-
-                        // Check if file has supported extension
-                        if let Some(ext) = path.extension() {
-                            let ext_str = ext.to_string_lossy();
-                            if supported_extensions
-                                .iter()
-                                .any(|&e| e.trim_start_matches('.') == ext_str)
-                            {
-                                // Parse the file using parse_file (which updates metrics)
-                                if let Some(parser) = self.parsers.parser_for_path(&path) {
-                                    let mut graph = self.graph.write().await;
-
-                                    // Remove old nodes for this file to prevent duplicates on re-index
-                                    let path_str = path.to_string_lossy().to_string();
-                                    if let Ok(old_nodes) =
-                                        graph.query().property("path", path_str).execute()
-                                    {
-                                        for old_id in old_nodes {
-                                            let _ = graph.delete_node(old_id);
-                                        }
-                                    }
-
-                                    match parser.parse_file(&path, &mut graph) {
-                                        Ok(file_info) => {
-                                            self.symbol_index.add_file(
-                                                path.clone(),
-                                                &file_info,
-                                                &graph,
-                                            );
-                                            self.file_cache.insert(
-                                                Url::from_file_path(&path).unwrap(),
-                                                file_info,
-                                            );
-                                            indexed_count += 1;
-                                            total_files.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("Failed to parse {:?}: {}", path, e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            indexed_count
+            let idx_config = Self::index_config_from_lsp(&config);
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (total, _parsed, _skipped) = self
+                .indexer
+                .index_directory(&self.graph, dir, &idx_config, 0, counter)
+                .await;
+            total
         })
     }
 
@@ -952,6 +802,17 @@ impl LanguageServer for CodeGraphBackend {
                     workspace_folders.push(path);
                 }
             }
+
+            // Initialize index state with project slug from first workspace
+            if let Some(first) = workspace_folders.first() {
+                let slug = crate::memory::project_slug(first);
+                let mut state = self.index_state.lock().await;
+                *state = crate::index_state::IndexState::new(&slug);
+                let loaded = state.load();
+                if loaded > 0 {
+                    tracing::info!("Loaded previous index state ({} files)", loaded);
+                }
+            }
         }
 
         Ok(InitializeResult {
@@ -1195,7 +1056,7 @@ impl LanguageServer for CodeGraphBackend {
         }
 
         // Skip files matching exclude patterns
-        let exclude_set = Self::build_exclude_set(&config.exclude_patterns);
+        let exclude_set = Self::index_config_from_lsp(&config).build_exclude_set();
         let path_str = path.to_string_lossy();
         if exclude_set.is_match(path_str.as_ref()) {
             tracing::info!("Skipping did_open for {:?}: matched exclude pattern", path);
@@ -1725,6 +1586,12 @@ impl LanguageServer for CodeGraphBackend {
                 self.file_cache.clear();
                 self.query_cache.invalidate_all();
 
+                // Clear index state so all files are re-parsed
+                {
+                    let mut state = self.index_state.lock().await;
+                    state.clear();
+                }
+
                 self.client
                     .log_message(MessageType::INFO, "Reindexing workspace...")
                     .await;
@@ -1740,19 +1607,14 @@ impl LanguageServer for CodeGraphBackend {
                         .map(std::path::PathBuf::from)
                         .collect()
                 };
-                let mut total_indexed = 0;
 
-                for folder in paths_to_index {
-                    tracing::info!("Indexing folder: {:?}", folder);
-                    let count = self.index_directory(&folder).await;
-                    total_indexed += count;
-                }
+                let idx_config = Self::index_config_from_lsp(&config);
+                let result = self
+                    .indexer
+                    .index_workspace(&self.graph, &paths_to_index, &idx_config)
+                    .await;
 
-                // Resolve cross-file imports and calls before building indexes
-                {
-                    let mut graph = self.graph.write().await;
-                    GraphUpdater::resolve_cross_file_imports(&mut graph);
-                }
+                let total_indexed = result.total_files;
 
                 // Rebuild AI query engine indexes
                 self.query_engine.build_indexes().await;

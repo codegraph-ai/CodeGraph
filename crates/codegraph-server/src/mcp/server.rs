@@ -11,13 +11,15 @@ use super::tools::get_all_tools;
 use super::transport::AsyncStdioTransport;
 use crate::ai_query::QueryEngine;
 use crate::domain::node_props;
+use crate::index_state::IndexState;
+use crate::indexer::{IndexConfig, Indexer};
 use crate::memory::{self, MemoryManager};
 use crate::parser_registry::ParserRegistry;
 use codegraph::{CodeGraph, NamespacedBackend, RocksDBBackend, StorageBackend};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "codegraph";
@@ -37,8 +39,10 @@ pub struct McpBackend {
     pub exclude_dirs: Vec<String>,
     /// Maximum number of files to index
     pub max_files: usize,
-    /// File content hashes for incremental indexing (path → hash)
-    file_hashes: Arc<tokio::sync::RwLock<std::collections::HashMap<PathBuf, u64>>>,
+    /// Shared indexer for directory walking and file parsing
+    pub indexer: Arc<Indexer>,
+    /// Index state for hash persistence (shared with indexer)
+    index_state: Arc<Mutex<IndexState>>,
 }
 
 impl McpBackend {
@@ -87,27 +91,22 @@ impl McpBackend {
         let query_engine = QueryEngine::new(Arc::clone(&graph));
         query_engine.set_full_body_embedding(full_body_embedding);
 
+        let parsers = Arc::new(ParserRegistry::new());
+        let index_state = Arc::new(Mutex::new(IndexState::new(&slug)));
+        let indexer = Arc::new(Indexer::new(Arc::clone(&parsers), Arc::clone(&index_state)));
+
         Self {
             query_engine: Arc::new(query_engine),
             graph,
-            parsers: Arc::new(ParserRegistry::new()),
+            parsers,
             memory_manager: Arc::new(MemoryManager::with_model(extension_path, embedding_model)),
             workspace_folders: workspaces,
             project_slug: slug,
             exclude_dirs,
             max_files,
-            file_hashes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            indexer,
+            index_state,
         }
-    }
-
-    /// Compute a fast content hash (FNV-1a 64-bit).
-    fn hash_content(content: &[u8]) -> u64 {
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for &byte in content {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash
     }
 
     /// Open the shared graph database with project-scoped namespacing.
@@ -466,40 +465,56 @@ impl McpBackend {
         })
     }
 
+    /// Save current file hashes to disk for persistence across restarts.
+    pub async fn save_index_state(&self) {
+        let state = self.index_state.lock().await;
+        state.save();
+    }
+
+    /// Load saved file hashes from disk. Returns true if state was loaded.
+    pub async fn load_index_state(&self) -> bool {
+        let mut state = self.index_state.lock().await;
+        let count = state.load();
+        count > 0
+    }
+
+    /// Check if there is a saved index state (has been indexed before).
+    pub fn has_index_state(&self) -> bool {
+        IndexState::new(&self.project_slug).exists_on_disk()
+    }
+
+    /// Build an [`IndexConfig`] from this backend's settings.
+    fn index_config(&self) -> IndexConfig {
+        let mut exclude_dirs = IndexConfig::default_exclude_dirs();
+        for dir in &self.exclude_dirs {
+            if !exclude_dirs.contains(dir) {
+                exclude_dirs.push(dir.clone());
+            }
+        }
+        IndexConfig {
+            exclude_dirs,
+            max_files: self.max_files,
+            ..IndexConfig::default()
+        }
+    }
+
     /// Index the workspace. Returns (total_files, files_actually_parsed).
     pub async fn index_workspace(&self) -> (usize, usize) {
-        let hashes_before = self.file_hashes.read().await.clone();
-        let mut total = 0;
-        for folder in &self.workspace_folders {
-            total += self.index_directory(folder).await;
+        let config = self.index_config();
 
-            // Initialize memory manager with workspace path
+        // Initialize memory manager for each workspace folder
+        for folder in &self.workspace_folders {
             if let Err(e) = self.memory_manager.initialize(folder).await {
                 tracing::warn!("Failed to initialize memory manager: {:?}", e);
             }
         }
 
-        // Resolve cross-file imports and calls before building indexes
-        {
-            let mut graph = self.graph.write().await;
-            crate::watcher::GraphUpdater::resolve_cross_file_imports(&mut graph);
-        }
-
-        // Detect runtime dependencies: HTTP routes and client calls
-        {
-            let mut graph = self.graph.write().await;
-            let routes = crate::runtime_deps::detect_route_handlers(&mut graph);
-            let clients = crate::runtime_deps::detect_http_client_calls(&mut graph);
-            if routes > 0 || clients > 0 {
-                let edges = crate::runtime_deps::create_runtime_call_edges(&mut graph);
-                tracing::info!(
-                    "Runtime deps: {} routes, {} clients, {} edges",
-                    routes,
-                    clients,
-                    edges
-                );
-            }
-        }
+        // Delegate to the shared Indexer (handles dir walk, hashing, cross-file
+        // imports, runtime deps, and index state persistence)
+        let result = self
+            .indexer
+            .index_workspace(&self.graph, &self.workspace_folders, &config)
+            .await;
 
         // Persist graph to shared database
         {
@@ -509,21 +524,8 @@ impl McpBackend {
             }
         }
 
-        // Count files that were actually parsed by comparing hash maps
-        let hashes_after = self.file_hashes.read().await;
-        let parsed = if hashes_before.is_empty() {
-            hashes_after.len() // First run
-        } else {
-            // Count entries that are new or have different hashes
-            hashes_after
-                .iter()
-                .filter(|(path, hash)| hashes_before.get(*path) != Some(hash))
-                .count()
-        };
-        drop(hashes_after);
-
         // Only rebuild indexes if something was actually parsed
-        if parsed > 0 {
+        if result.files_parsed > 0 {
             self.query_engine.build_indexes().await;
 
             if let Some(engine) = self.memory_manager.get_vector_engine().await {
@@ -536,115 +538,7 @@ impl McpBackend {
             tracing::info!("No files changed — skipping index rebuild");
         }
 
-        (total, parsed)
-    }
-
-    /// Index a directory recursively
-    async fn index_directory(&self, dir: &std::path::Path) -> usize {
-        use std::fs;
-
-        let mut indexed_count = 0;
-        let supported_extensions = self.parsers.supported_extensions();
-
-        tracing::info!("Indexing directory: {:?}", dir);
-        tracing::debug!("Supported extensions: {:?}", supported_extensions);
-
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-
-                // Skip hidden files/directories and common exclusions
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('.')
-                        || matches!(
-                            name,
-                            "node_modules"
-                                | "target"
-                                | "__pycache__"
-                                | ".git"
-                                | "dist"
-                                | "build"
-                                | "out"
-                                | "vendor"
-                                | "DerivedData"
-                                | "tmp"
-                                | "coverage"
-                                | "logs"
-                        )
-                        || self.exclude_dirs.iter().any(|e| name == e.as_str())
-                    {
-                        continue;
-                    }
-                }
-
-                if path.is_dir() {
-                    // Check file limit before recursing
-                    let current = self.graph.read().await.node_count();
-                    if current >= self.max_files * 10 {
-                        // Rough heuristic: ~10 nodes per file
-                        tracing::warn!(
-                            "Approaching max file limit ({} nodes, max_files={}), stopping",
-                            current,
-                            self.max_files
-                        );
-                        break;
-                    }
-                    indexed_count += Box::pin(self.index_directory(&path)).await;
-                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    // supported_extensions includes the dot (e.g., ".rs"), but path.extension() doesn't
-                    let ext_with_dot = format!(".{}", ext);
-                    let is_supported = supported_extensions
-                        .iter()
-                        .any(|e| *e == ext || *e == ext_with_dot);
-                    if is_supported {
-                        match self.index_file(&path).await {
-                            Ok(parsed) => {
-                                indexed_count += 1;
-                                if !parsed {
-                                    tracing::trace!("Skipped unchanged: {:?}", path);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to index {:?}: {}", path, e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        indexed_count
-    }
-
-    /// Index a single file. Returns Ok(true) if parsed, Ok(false) if skipped (unchanged).
-    async fn index_file(&self, path: &std::path::Path) -> Result<bool, String> {
-        // Compute content hash for change detection
-        let content = std::fs::read(path).map_err(|e| format!("Read error: {e}"))?;
-        let hash = Self::hash_content(&content);
-
-        // Check if file content has changed since last index
-        {
-            let hashes = self.file_hashes.read().await;
-            if let Some(&cached_hash) = hashes.get(path) {
-                if cached_hash == hash {
-                    return Ok(false); // Unchanged
-                }
-            }
-        }
-
-        // File is new or changed — parse it
-        let mut graph = self.graph.write().await;
-        match self.parsers.parse_file(path, &mut graph) {
-            Ok(_file_info) => {
-                drop(graph);
-                self.file_hashes
-                    .write()
-                    .await
-                    .insert(path.to_path_buf(), hash);
-                Ok(true)
-            }
-            Err(e) => Err(format!("{:?}", e)),
-        }
+        (result.total_files, result.files_parsed)
     }
 
     /// Add or update specific files in the index without full reindex.
@@ -701,7 +595,7 @@ impl McpBackend {
                 }
             }
 
-            match self.index_file(path).await {
+            match self.indexer.index_file(&self.graph, path).await {
                 Ok(_) => {
                     tracing::info!("Indexed: {:?}", path);
                     indexed += 1;
@@ -722,7 +616,9 @@ impl McpBackend {
                 dep_count
             );
             for dep_path in &dependent_files {
-                // Remove old nodes for dependent
+                // Remove old nodes for dependent (index_file already removes old
+                // nodes, but we do it explicitly here in case the file was not
+                // previously indexed via the Indexer)
                 {
                     let mut graph = self.graph.write().await;
                     let path_str = dep_path.to_string_lossy().to_string();
@@ -734,7 +630,7 @@ impl McpBackend {
                         }
                     }
                 }
-                if self.index_file(dep_path).await.is_ok() {
+                if self.indexer.index_file(&self.graph, dep_path).await.is_ok() {
                     indexed += 1;
                 }
             }
@@ -766,9 +662,14 @@ impl McpBackend {
             return 0;
         }
 
-        let count = self.index_directory(dir).await;
+        let config = self.index_config();
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (total, _parsed, _skipped) = self
+            .indexer
+            .index_directory(&self.graph, dir, &config, 0, counter)
+            .await;
 
-        if count > 0 {
+        if total > 0 {
             // Resolve cross-file imports
             {
                 let mut graph = self.graph.write().await;
@@ -785,12 +686,12 @@ impl McpBackend {
             tracing::info!(
                 "Added directory {:?}: {} files indexed (embed={})",
                 dir,
-                count,
+                total,
                 embed
             );
         }
 
-        count
+        total
     }
 }
 
@@ -853,6 +754,13 @@ impl McpServer {
             return;
         }
         self.indexed = true;
+
+        // Load saved index state from previous session for incremental indexing
+        let had_previous_state = self.backend.load_index_state().await;
+        if had_previous_state {
+            tracing::info!("Resuming from previous index state — incremental reindex");
+        }
+
         tracing::info!("Indexing workspace: {:?}", self.backend.workspace_folders);
         let (total, parsed) = self.backend.index_workspace().await;
         tracing::info!(
@@ -2631,7 +2539,7 @@ impl McpServer {
                         *graph = codegraph::CodeGraph::in_memory()
                             .map_err(|e| format!("Failed to create new graph: {}", e))?;
                     }
-                    self.backend.file_hashes.write().await.clear();
+                    self.backend.index_state.lock().await.clear();
                 }
                 // else: incremental — index_file skips unchanged files via hash cache
 
