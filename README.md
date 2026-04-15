@@ -135,13 +135,13 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 
 ## Languages
 
-17 languages parsed via tree-sitter — functions, imports, call graph, complexity metrics, dependency graphs, symbol search, impact analysis, and HTTP handler detection:
+31 languages parsed via tree-sitter — functions, imports, call graph, complexity metrics, dependency graphs, symbol search, impact analysis, and HTTP handler detection:
 
 HTTP handler detection for security analysis: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java (Spring/JAX-RS), Go (stdlib/Gin/Echo/Fiber), C# (ASP.NET), Ruby (Rails), PHP (Laravel/Symfony).
 
 All languages support:
 
-TypeScript/JS, Python, Rust, Go, C, C++, Java, Kotlin, C#, PHP, Ruby, Swift, Tcl, Verilog/SystemVerilog, COBOL, Fortran
+Bash, C, C++, C#, COBOL, Dart, Elixir, Fortran, Go, Groovy, Haskell, HCL/Terraform, Java, Julia, Kotlin, Lua, OCaml, Perl, PHP, Python, R, Ruby, Rust, Scala, Swift, Tcl, TOML, TypeScript/JS, Verilog/SystemVerilog, YAML, Zig
 
 ---
 
@@ -157,7 +157,7 @@ MCP Client (Claude, Cursor, ...)        VS Code Extension
             ┌─────────────────────────────┐
             │       codegraph-server      │
             ├─────────────────────────────┤
-            │  17 tree-sitter parsers     │
+            │  31 tree-sitter parsers     │
             │  Semantic graph engine      │
             │  AI query engine (BM25)     │
             │  Memory layer (RocksDB)     │
