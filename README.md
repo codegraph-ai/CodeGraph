@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **28 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. AI agents get structured code understanding instead of grepping through files.
+CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **39 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **31 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ The server indexes the current working directory automatically.
 Install the VSIX:
 
 ```bash
-code --install-extension codegraph-0.13.1.vsix
+code --install-extension codegraph-0.14.0.vsix
 ```
 
 The extension starts the server automatically and registers all tools as Language Model Tools for Copilot.
@@ -135,13 +135,21 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 
 ## Languages
 
-31 languages parsed via tree-sitter — functions, imports, call graph, complexity metrics, dependency graphs, symbol search, impact analysis, and HTTP handler detection:
+31 languages parsed via tree-sitter — functions, classes, imports, call graph, complexity metrics, dependency graphs, symbol search, and impact analysis:
 
-HTTP handler detection for security analysis: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java (Spring/JAX-RS), Go (stdlib/Gin/Echo/Fiber), C# (ASP.NET), Ruby (Rails), PHP (Laravel/Symfony).
+| Category | Languages |
+|---|---|
+| **Systems** | C, C++, Rust, Zig |
+| **JVM** | Java, Kotlin, Scala, Groovy |
+| **Web/Scripting** | TypeScript/JS, Python, Ruby, PHP, Perl, Lua, Elixir |
+| **Mobile** | Swift, Dart |
+| **Functional** | Haskell, OCaml, Julia |
+| **Enterprise** | C#, COBOL, Fortran, Go |
+| **Shell/Config** | Bash, HCL/Terraform, TOML, YAML |
+| **Hardware** | Verilog/SystemVerilog, Tcl |
+| **Data Science** | R, Julia |
 
-All languages support:
-
-Bash, C, C++, C#, COBOL, Dart, Elixir, Fortran, Go, Groovy, Haskell, HCL/Terraform, Java, Julia, Kotlin, Lua, OCaml, Perl, PHP, Python, R, Ruby, Rust, Scala, Swift, Tcl, TOML, TypeScript/JS, Verilog/SystemVerilog, YAML, Zig
+HTTP handler detection: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java (Spring/JAX-RS), Go (stdlib/Gin/Echo/Fiber), C# (ASP.NET), Ruby (Rails), PHP (Laravel/Symfony).
 
 ---
 
