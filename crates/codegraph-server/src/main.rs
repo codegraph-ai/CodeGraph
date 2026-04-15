@@ -12,6 +12,13 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+// glibc 2.31 compat: __libc_single_threaded was added in glibc 2.32 but ONNX
+// Runtime references it. Provide a fallback for SLES 15 SP4 and similar.
+// On newer glibc the real symbol shadows this at runtime.
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub static __libc_single_threaded: u8 = 0;
+
 #[derive(Parser)]
 #[command(name = "codegraph-server")]
 #[command(about = "CodeGraph Language Server with MCP support")]
