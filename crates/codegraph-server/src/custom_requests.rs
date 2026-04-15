@@ -195,6 +195,16 @@ impl CodeGraphBackend {
             GraphUpdater::resolve_cross_file_imports(&mut graph);
         }
 
+        // Rebuild symbol index from graph (it was cleared at the start of reindex)
+        {
+            let graph = self.graph.read().await;
+            self.symbol_index.rebuild_from_graph(&graph);
+            tracing::info!(
+                "Rebuilt symbol index: {} files",
+                self.symbol_index.file_count()
+            );
+        }
+
         // Rebuild AI query engine indexes
         self.query_engine.build_indexes().await;
 

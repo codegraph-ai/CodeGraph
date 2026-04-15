@@ -132,6 +132,70 @@ impl SymbolIndex {
         self.by_position.insert(path, positions);
     }
 
+    /// Rebuild the entire index from the graph.
+    /// Used after bulk reindex when FileInfo objects are not available.
+    pub fn rebuild_from_graph(&self, graph: &CodeGraph) {
+        self.clear();
+
+        // Group nodes by file path
+        let mut files: std::collections::HashMap<PathBuf, Vec<NodeId>> =
+            std::collections::HashMap::new();
+
+        for (node_id, node) in graph.iter_nodes() {
+            // Only index functions, classes, and interfaces
+            if !matches!(
+                node.node_type,
+                codegraph::NodeType::Function
+                    | codegraph::NodeType::Class
+                    | codegraph::NodeType::Interface
+            ) {
+                continue;
+            }
+
+            let path_str = match node.properties.get_string("path") {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => continue,
+            };
+            let path = PathBuf::from(&path_str);
+
+            // Index by name
+            if let Some(name) = node.properties.get_string("name") {
+                self.by_name
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(node_id);
+            }
+
+            // Index by type
+            let type_str = format!("{}", node.node_type);
+            self.by_type.entry(type_str).or_default().push(node_id);
+
+            // Reverse index
+            self.node_to_file.insert(node_id, path.clone());
+
+            files.entry(path).or_default().push(node_id);
+        }
+
+        // Build file and position indexes
+        for (path, node_ids) in files {
+            let mut positions = Vec::new();
+            for &node_id in &node_ids {
+                if let Ok(node) = graph.get_node(node_id) {
+                    if let Some(range) = extract_range(&node.properties) {
+                        positions.push((range, node_id));
+                    }
+                }
+            }
+            positions.sort_by(|a, b| {
+                a.0.start_line
+                    .cmp(&b.0.start_line)
+                    .then(a.0.start_col.cmp(&b.0.start_col))
+            });
+            self.by_position.insert(path.clone(), positions);
+            self.by_file.insert(path, node_ids);
+        }
+    }
+
     /// Remove a file's symbols from the index.
     pub fn remove_file(&self, path: &Path) {
         let path_buf = path.to_path_buf();
@@ -287,6 +351,11 @@ impl SymbolIndex {
         self.by_type.clear();
         self.by_position.clear();
         self.node_to_file.clear();
+    }
+
+    /// Number of indexed files.
+    pub fn file_count(&self) -> usize {
+        self.by_file.len()
     }
 
     /// Get index statistics.
