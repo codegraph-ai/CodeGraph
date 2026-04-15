@@ -1094,14 +1094,11 @@ impl LanguageServer for CodeGraphBackend {
 
                         let slug = crate::memory::project_slug(first_folder);
 
-                        // Load persisted vectors if no files changed; rebuild otherwise
-                        let loaded = if files_parsed == 0 {
-                            self.query_engine.load_symbol_vectors(&slug).await
-                        } else {
-                            0
-                        };
+                        // Always try loading persisted vectors first
+                        let loaded = self.query_engine.load_symbol_vectors(&slug).await;
 
-                        if loaded > 0 {
+                        if loaded > 0 && files_parsed == 0 {
+                            // All files unchanged — persisted vectors are current
                             tracing::info!("Loaded {} persisted symbol vectors", loaded);
                             self.client
                                 .log_message(
@@ -1109,7 +1106,28 @@ impl LanguageServer for CodeGraphBackend {
                                     format!("✓ Loaded {} persisted symbol vectors", loaded),
                                 )
                                 .await;
+                        } else if loaded > 0 && files_parsed > 0 {
+                            // Loaded persisted vectors but some files changed.
+                            // Embed only symbols that don't have vectors yet.
+                            tracing::info!(
+                                "Loaded {} persisted vectors, embedding new/changed symbols",
+                                loaded
+                            );
+                            self.query_engine.embed_missing_symbols().await;
+                            if let Err(e) = self.query_engine.save_symbol_vectors(&slug).await {
+                                tracing::warn!("Failed to persist updated vectors: {}", e);
+                            }
+                            self.client
+                                .log_message(
+                                    MessageType::INFO,
+                                    format!(
+                                        "✓ Updated embeddings ({} files changed)",
+                                        files_parsed
+                                    ),
+                                )
+                                .await;
                         } else {
+                            // No persisted vectors — full build
                             self.query_engine.build_symbol_vectors().await;
                             if let Err(e) = self.query_engine.save_symbol_vectors(&slug).await {
                                 tracing::warn!("Failed to persist symbol vectors: {}", e);

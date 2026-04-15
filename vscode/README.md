@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **28 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. AI agents get structured code understanding instead of grepping through files.
+CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **39 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **31 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ The server indexes the current working directory automatically.
 Install the VSIX:
 
 ```bash
-code --install-extension codegraph-0.13.0.vsix
+code --install-extension codegraph-0.14.0.vsix
 ```
 
 The extension starts the server automatically and registers all tools as Language Model Tools for Copilot.
@@ -46,6 +46,7 @@ The extension starts the server automatically and registers all tools as Languag
 | `--workspace <path>` | current dir | Directories to index (repeatable for multi-project) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
 | `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast) or `jina-code-v2` (768d, 6x slower) |
+| `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
 | `--max-files <n>` | 5000 | Maximum files to index |
 
 ### VS Code settings
@@ -118,11 +119,11 @@ All tool names are prefixed with `codegraph_` (e.g. `codegraph_get_ai_context`).
 
 ### CodeGraph Pro
 
-Additional tools available in [CodeGraph Pro](https://codegraph.ai/pro):
+Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/pro):
 
 | Tool | What it does |
 |------|-------------|
-| `scan_security` | Security vulnerability scan (40+ patterns, 13 languages, architectural violations) |
+| `scan_security` | Security vulnerability scan: 40+ dangerous function patterns, source-to-sink taint tracing, auth coverage for HTTP endpoints (7 languages/frameworks), architectural layer violations, weak crypto, hardcoded secrets |
 | `analyze_coupling` | Module coupling metrics and instability scores |
 | `find_unused_code` | Dead code detection with confidence scoring |
 | `find_duplicates` | Detect duplicate/near-duplicate functions |
@@ -134,9 +135,21 @@ Additional tools available in [CodeGraph Pro](https://codegraph.ai/pro):
 
 ## Languages
 
-17 languages parsed via tree-sitter — functions, imports, call graph, complexity metrics, dependency graphs, symbol search, and impact analysis:
+31 languages parsed via tree-sitter — functions, classes, imports, call graph, complexity metrics, dependency graphs, symbol search, and impact analysis:
 
-TypeScript/JS, Python, Rust, Go, C, C++, Java, Kotlin, C#, PHP, Ruby, Swift, Tcl, Verilog/SystemVerilog, COBOL, Fortran
+| Category | Languages |
+|---|---|
+| **Systems** | C, C++, Rust, Zig |
+| **JVM** | Java, Kotlin, Scala, Groovy |
+| **Web/Scripting** | TypeScript/JS, Python, Ruby, PHP, Perl, Lua, Elixir |
+| **Mobile** | Swift, Dart |
+| **Functional** | Haskell, OCaml, Julia |
+| **Enterprise** | C#, COBOL, Fortran, Go |
+| **Shell/Config** | Bash, HCL/Terraform, TOML, YAML |
+| **Hardware** | Verilog/SystemVerilog, Tcl |
+| **Data Science** | R, Julia |
+
+HTTP handler detection: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java (Spring/JAX-RS), Go (stdlib/Gin/Echo/Fiber), C# (ASP.NET), Ruby (Rails), PHP (Laravel/Symfony).
 
 ---
 
@@ -152,7 +165,7 @@ MCP Client (Claude, Cursor, ...)        VS Code Extension
             ┌─────────────────────────────┐
             │       codegraph-server      │
             ├─────────────────────────────┤
-            │  17 tree-sitter parsers     │
+            │  31 tree-sitter parsers     │
             │  Semantic graph engine      │
             │  AI query engine (BM25)     │
             │  Memory layer (RocksDB)     │
@@ -163,9 +176,10 @@ MCP Client (Claude, Cursor, ...)        VS Code Extension
 
 A single Rust binary serves both MCP and LSP protocols.
 
-- **Indexing**: ~60 files/sec. Incremental re-indexing on file changes.
+- **Indexing**: ~60 files/sec. Incremental re-indexing on file changes via FNV-1a content hashing.
+- **Persistence**: Graph and embeddings persist to `~/.codegraph/graph.db` (RocksDB). Instant startup on restart — no re-parsing, no re-embedding.
 - **Queries**: Sub-100ms. Cross-file import and call resolution at index time.
-- **Embeddings**: Full-body (function bodies captured at parse time, zero disk I/O). Auto-downloads model on first run.
+- **Embeddings**: Full-body (function bodies captured at parse time, zero disk I/O). Vectors stored in RocksDB alongside the graph. Auto-downloads model on first run.
 
 ---
 

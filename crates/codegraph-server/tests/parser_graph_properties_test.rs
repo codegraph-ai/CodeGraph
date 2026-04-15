@@ -25,7 +25,9 @@ fn graph_with_source(parser: &dyn CodeParser, source: &str, filename: &str) -> C
 fn find_function<'a>(graph: &'a CodeGraph, name: &str) -> Option<&'a codegraph::Node> {
     graph
         .iter_nodes()
-        .find(|(_, n)| n.node_type == NodeType::Function && n.properties.get_string("name") == Some(name))
+        .find(|(_, n)| {
+            n.node_type == NodeType::Function && n.properties.get_string("name") == Some(name)
+        })
         .map(|(_, n)| n)
 }
 
@@ -102,11 +104,7 @@ fn assert_has_complexity(node: &codegraph::Node, name: &str) {
 /// Assert body_prefix is present and non-empty.
 fn assert_has_body_prefix(node: &codegraph::Node, name: &str) {
     let body = node.properties.get_string("body_prefix");
-    assert!(
-        body.is_some(),
-        "{}: missing 'body_prefix' property",
-        name
-    );
+    assert!(body.is_some(), "{}: missing 'body_prefix' property", name);
     assert!(
         !body.unwrap().is_empty(),
         "{}: 'body_prefix' is empty",

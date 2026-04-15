@@ -1265,7 +1265,7 @@ export class CodeGraphToolManager {
                         const params = options.input as { files: string[] };
                         const response = await this.sendRequestWithRetry<any>(
                             'codegraph.indexFiles',
-                            [params],
+                            params,
                             token
                         );
                         return new vscode.LanguageModelToolResult([
@@ -1286,7 +1286,7 @@ export class CodeGraphToolManager {
                         const params = options.input as { path: string; embed?: boolean };
                         const response = await this.sendRequestWithRetry<any>(
                             'codegraph.indexDirectory',
-                            [params],
+                            params,
                             token
                         );
                         return new vscode.LanguageModelToolResult([
@@ -1307,7 +1307,7 @@ export class CodeGraphToolManager {
                         const params = options.input as { structType?: string; field?: string; limit?: number };
                         const response = await this.sendRequestWithRetry<any>(
                             'codegraph.findImplementors',
-                            [params],
+                            params,
                             token
                         );
                         return new vscode.LanguageModelToolResult([

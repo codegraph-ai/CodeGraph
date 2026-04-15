@@ -2,7 +2,7 @@
     "name": "codegraph",
     "displayName": "CodeGraph",
     "description": "Cross-language code intelligence powered by graph analysis",
-    "version": "0.13.1",
+    "version": "0.14.0",
     "publisher": "aStudioPlus",
     "author": "Andrey Vasilevsky <anvanster@gmail.com>",
     "license": "Apache-2.0",

@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-memory"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-server"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "clap",
  "codegraph",

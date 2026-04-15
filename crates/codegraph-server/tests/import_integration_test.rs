@@ -101,10 +101,7 @@ app = FastAPI()
         .with_match_mode(codegraph_server::ai_query::ImportMatchMode::Fuzzy);
 
     let results = engine.find_by_imports("fastapi", &options).await;
-    assert!(
-        !results.is_empty(),
-        "Should find files importing 'fastapi'"
-    );
+    assert!(!results.is_empty(), "Should find files importing 'fastapi'");
 
     let results = engine.find_by_imports("os", &options).await;
     assert!(!results.is_empty(), "Should find files importing 'os'");
@@ -154,7 +151,10 @@ def complex_function(x, data):
             }
         }
     }
-    assert!(found_complexity, "Should find complex_function node with complexity metrics");
+    assert!(
+        found_complexity,
+        "Should find complex_function node with complexity metrics"
+    );
 }
 
 /// Verify Python HTTP decorator detection writes route properties to graph.

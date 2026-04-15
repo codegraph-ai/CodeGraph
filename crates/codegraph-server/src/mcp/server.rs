@@ -2607,19 +2607,33 @@ impl McpServer {
 
             // ==================== Index File(s) ====================
             "codegraph_index_files" => {
-                let paths: Vec<PathBuf> = args
+                // Accept both "paths" (MCP convention) and "files" (VS Code LM tools)
+                let raw: Vec<String> = args
                     .get("paths")
+                    .or_else(|| args.get("files"))
                     .and_then(|v| v.as_array())
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|v| v.as_str().map(PathBuf::from))
+                            .filter_map(|v| v.as_str().map(String::from))
                             .collect()
                     })
                     .unwrap_or_default();
 
-                if paths.is_empty() {
+                if raw.is_empty() {
                     return Err("paths parameter is required (array of file paths)".to_string());
                 }
+
+                // Convert file:// URIs to plain paths
+                let paths: Vec<PathBuf> = raw
+                    .iter()
+                    .map(|s| {
+                        if let Some(p) = s.strip_prefix("file://") {
+                            PathBuf::from(p)
+                        } else {
+                            PathBuf::from(s)
+                        }
+                    })
+                    .collect();
 
                 let (indexed, failed) = self.backend.add_files_to_index(&paths).await;
 

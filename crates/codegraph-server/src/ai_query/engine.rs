@@ -310,6 +310,83 @@ impl QueryEngine {
         );
     }
 
+    /// Embed only symbols that don't have vectors yet (after loading persisted vectors).
+    /// Much faster than full rebuild when only a few files changed.
+    pub async fn embed_missing_symbols(&self) {
+        let engine = match self.vector_engine.read().await.clone() {
+            Some(e) => e,
+            None => return,
+        };
+
+        let graph = self.graph.read().await;
+        let existing_vecs = self.symbol_vectors.read().await;
+
+        let mut node_ids = Vec::new();
+        let mut texts = Vec::new();
+
+        for (node_id, node) in graph.iter_nodes() {
+            if !matches!(
+                node.node_type,
+                NodeType::Function
+                    | NodeType::Class
+                    | NodeType::Variable
+                    | NodeType::Interface
+                    | NodeType::Type
+            ) {
+                continue;
+            }
+            // Skip if already has a vector
+            if existing_vecs.contains_key(&node_id) {
+                continue;
+            }
+            let name = node_props::name(node);
+            if name.is_empty() || name == "arrow_function" || name == "anonymous" {
+                continue;
+            }
+            let embed_text = Self::build_embed_text(
+                node,
+                node_id,
+                name,
+                self.full_body_embedding
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                &graph,
+            );
+            node_ids.push(node_id);
+            texts.push(embed_text);
+        }
+
+        drop(existing_vecs);
+        drop(graph);
+
+        if texts.is_empty() {
+            tracing::info!("[QueryEngine] No new symbols to embed");
+            return;
+        }
+
+        tracing::info!(
+            "[QueryEngine] Embedding {} new/changed symbols",
+            texts.len()
+        );
+
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        match engine.embed_batch(&text_refs) {
+            Ok(vectors) => {
+                let mut symbol_vecs = self.symbol_vectors.write().await;
+                for (i, vec) in vectors.into_iter().enumerate() {
+                    symbol_vecs.insert(node_ids[i], vec);
+                }
+                tracing::info!(
+                    "[QueryEngine] Embedded {} new symbols (total: {})",
+                    texts.len(),
+                    symbol_vecs.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("[QueryEngine] Failed to embed missing symbols: {}", e);
+            }
+        }
+    }
+
     /// Persist symbol vectors to RocksDB alongside the graph.
     ///
     /// Each vector is stored as key `vec:{node_id}` → binary `[f32]` (little-endian).
