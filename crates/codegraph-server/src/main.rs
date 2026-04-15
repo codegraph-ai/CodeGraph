@@ -45,7 +45,7 @@ struct Args {
     embedding_model: String,
 
     /// Embed full function body instead of just name+signature (captured at parse time, minimal overhead)
-    #[arg(long)]
+    #[arg(long, default_value = "true")]
     full_body_embedding: bool,
 }
 

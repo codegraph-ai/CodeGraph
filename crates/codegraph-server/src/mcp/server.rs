@@ -67,9 +67,23 @@ impl McpBackend {
             workspaces.len()
         );
 
-        let graph = Arc::new(RwLock::new(
-            CodeGraph::in_memory().expect("Failed to create in-memory graph"),
-        ));
+        // Try to load persisted graph from previous session.
+        // Falls back to empty in-memory graph if no prior data exists.
+        let graph = match Self::open_persistent_graph(&slug) {
+            Ok(g) if g.node_count() > 0 => {
+                tracing::info!(
+                    "Loaded persisted graph ({} nodes) from previous session",
+                    g.node_count()
+                );
+                Arc::new(RwLock::new(g))
+            }
+            _ => {
+                tracing::info!("No persisted graph found — starting fresh");
+                Arc::new(RwLock::new(
+                    CodeGraph::in_memory().expect("Failed to create in-memory graph"),
+                ))
+            }
+        };
 
         // Resolve extension path from binary location for model discovery
         // In dev: target/debug/codegraph-server -> project root (go up 3 levels)
@@ -524,18 +538,34 @@ impl McpBackend {
             }
         }
 
-        // Only rebuild indexes if something was actually parsed
-        if result.files_parsed > 0 {
+        // Rebuild indexes if files were parsed OR graph was loaded from persistence
+        let graph_has_data = self.graph.read().await.node_count() > 0;
+        if result.files_parsed > 0 || graph_has_data {
             self.query_engine.build_indexes().await;
 
             if let Some(engine) = self.memory_manager.get_vector_engine().await {
                 self.query_engine.set_vector_engine(engine).await;
-                tracing::info!("Building semantic search index... This may take a moment.");
-                self.query_engine.build_symbol_vectors().await;
-                tracing::info!("Semantic search index ready");
+
+                // Load persisted vectors if no files changed; rebuild otherwise
+                let loaded = if result.files_parsed == 0 {
+                    self.query_engine.load_symbol_vectors(&self.project_slug).await
+                } else {
+                    0
+                };
+
+                if loaded > 0 {
+                    tracing::info!("Loaded {} persisted symbol vectors — semantic search ready", loaded);
+                } else {
+                    tracing::info!("Building semantic search index... This may take a moment.");
+                    self.query_engine.build_symbol_vectors().await;
+                    if let Err(e) = self.query_engine.save_symbol_vectors(&self.project_slug).await {
+                        tracing::warn!("Failed to persist symbol vectors: {}", e);
+                    }
+                    tracing::info!("Semantic search index ready");
+                }
             }
         } else {
-            tracing::info!("No files changed — skipping index rebuild");
+            tracing::info!("No files changed and no persisted data — skipping index rebuild");
         }
 
         (result.total_files, result.files_parsed)

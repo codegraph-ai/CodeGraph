@@ -310,6 +310,117 @@ impl QueryEngine {
         );
     }
 
+    /// Persist symbol vectors to RocksDB alongside the graph.
+    ///
+    /// Each vector is stored as key `vec:{node_id}` → binary `[f32]` (little-endian).
+    /// Uses the namespaced backend so vectors are scoped per project.
+    pub async fn save_symbol_vectors(&self, slug: &str) -> std::result::Result<(), String> {
+        use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
+
+        let vecs = self.symbol_vectors.read().await;
+        if vecs.is_empty() {
+            return Ok(());
+        }
+
+        let db_path = crate::memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
+        }
+
+        let rocks = RocksDBBackend::open(&db_path)
+            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        let mut namespaced = NamespacedBackend::new(Box::new(rocks), slug);
+
+        // Write each vector as binary f32 array
+        for (&node_id, vec) in vecs.iter() {
+            let key = format!("vec:{node_id}");
+            let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
+            namespaced
+                .put(key.as_bytes(), &bytes)
+                .map_err(|e| format!("Failed to write vector: {e}"))?;
+        }
+
+        tracing::info!(
+            "[QueryEngine] Saved {} symbol vectors to graph.db (namespace: {})",
+            vecs.len(),
+            slug
+        );
+        Ok(())
+    }
+
+    /// Load persisted symbol vectors from RocksDB.
+    ///
+    /// Scans for keys prefixed with `vec:` in the project namespace.
+    /// Returns the number of vectors loaded, or 0 if none found.
+    pub async fn load_symbol_vectors(&self, slug: &str) -> usize {
+        use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
+
+        let db_path = match crate::memory::shared_graph_db_path() {
+            Ok(p) => p,
+            Err(_) => return 0,
+        };
+
+        if !db_path.exists() {
+            return 0;
+        }
+
+        let rocks = match RocksDBBackend::open(&db_path) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("[QueryEngine] Failed to open graph.db for vectors: {}", e);
+                return 0;
+            }
+        };
+        let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
+
+        let entries = match namespaced.scan_prefix(b"vec:") {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("[QueryEngine] Failed to scan vectors: {}", e);
+                return 0;
+            }
+        };
+
+        let mut symbol_vecs = self.symbol_vectors.write().await;
+        let mut loaded = 0;
+
+        for (key, value) in entries {
+            // Key format: "vec:{node_id}" (already stripped of namespace prefix by NamespacedBackend)
+            let key_str = match std::str::from_utf8(&key) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let node_id_str = match key_str.strip_prefix("vec:") {
+                Some(s) => s,
+                None => continue,
+            };
+            let node_id = match node_id_str.parse::<NodeId>() {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+
+            // Decode binary f32 array (little-endian, 4 bytes per float)
+            if value.len() % 4 != 0 {
+                continue;
+            }
+            let vec: Vec<f32> = value
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+
+            symbol_vecs.insert(node_id, vec);
+            loaded += 1;
+        }
+
+        tracing::info!(
+            "[QueryEngine] Loaded {} symbol vectors from graph.db (namespace: {})",
+            loaded,
+            slug
+        );
+        loaded
+    }
+
     /// Remove vectors for symbols from a deleted file.
     pub async fn remove_file_vectors(&self, file_path: &str) {
         let graph = self.graph.read().await;

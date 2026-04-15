@@ -30,7 +30,7 @@ The server indexes the current working directory automatically.
 Install the VSIX:
 
 ```bash
-code --install-extension codegraph-0.13.0.vsix
+code --install-extension codegraph-0.13.1.vsix
 ```
 
 The extension starts the server automatically and registers all tools as Language Model Tools for Copilot.
@@ -46,6 +46,7 @@ The extension starts the server automatically and registers all tools as Languag
 | `--workspace <path>` | current dir | Directories to index (repeatable for multi-project) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
 | `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast) or `jina-code-v2` (768d, 6x slower) |
+| `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
 | `--max-files <n>` | 5000 | Maximum files to index |
 
 ### VS Code settings
@@ -167,9 +168,10 @@ MCP Client (Claude, Cursor, ...)        VS Code Extension
 
 A single Rust binary serves both MCP and LSP protocols.
 
-- **Indexing**: ~60 files/sec. Incremental re-indexing on file changes.
+- **Indexing**: ~60 files/sec. Incremental re-indexing on file changes via FNV-1a content hashing.
+- **Persistence**: Graph and embeddings persist to `~/.codegraph/graph.db` (RocksDB). Instant startup on restart — no re-parsing, no re-embedding.
 - **Queries**: Sub-100ms. Cross-file import and call resolution at index time.
-- **Embeddings**: Full-body (function bodies captured at parse time, zero disk I/O). Auto-downloads model on first run.
+- **Embeddings**: Full-body (function bodies captured at parse time, zero disk I/O). Vectors stored in RocksDB alongside the graph. Auto-downloads model on first run.
 
 ---
 

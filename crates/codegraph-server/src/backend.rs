@@ -333,6 +333,52 @@ impl CodeGraphBackend {
         }
     }
 
+    /// Persist the in-memory graph to RocksDB for cross-session persistence.
+    fn persist_graph_to_rocksdb(
+        slug: &str,
+        workspace: &std::path::Path,
+        graph: &codegraph::CodeGraph,
+    ) -> std::result::Result<(), String> {
+        use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
+
+        let db_path = crate::memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
+        }
+
+        let mut rocks = RocksDBBackend::open(&db_path)
+            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
+
+        let registry_value = serde_json::json!({
+            "slug": slug,
+            "workspace": workspace.display().to_string(),
+            "node_count": graph.node_count(),
+            "edge_count": graph.edge_count(),
+            "last_indexed": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+        let registry_key = format!("_registry:{slug}");
+        rocks
+            .put(registry_key.as_bytes(), registry_value.to_string().as_bytes())
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
+
+        let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
+        graph
+            .persist_to(Box::new(namespaced))
+            .map_err(|e| format!("Failed to persist graph: {e}"))?;
+
+        tracing::info!(
+            "LSP: persisted {} nodes, {} edges to graph.db (namespace: {})",
+            graph.node_count(),
+            graph.edge_count(),
+            slug
+        );
+        Ok(())
+    }
+
     /// Index all supported files in a directory, delegating to the shared
     /// [`Indexer`](crate::indexer::Indexer).
     pub fn index_directory<'a>(
@@ -867,7 +913,9 @@ impl LanguageServer for CodeGraphBackend {
                             format!("{p}.mineGitHistory"),
                             format!("{p}.mineGitHistoryForFile"),
                             format!("{p}.searchGitHistory"),
+                            format!("{p}.indexFiles"),
                             format!("{p}.indexDirectory"),
+                            format!("{p}.findImplementors"),
                             format!("{p}.updateConfiguration"),
                         ];
                         // Note: pro commands are NOT advertised here to avoid
@@ -889,13 +937,51 @@ impl LanguageServer for CodeGraphBackend {
             .log_message(MessageType::INFO, "CodeGraph LSP server initialized")
             .await;
 
-        // Index workspace folders only if configured to do so
         let folders = self.workspace_folders.read().await.clone();
         let config = self.config.read().await.clone();
         let mut total_indexed = 0;
+        let mut files_parsed = 0usize;
 
-        if config.index_on_startup {
-            // Determine which paths to index
+        // Try to load persisted graph from previous session (RocksDB).
+        // This gives instant code intelligence without re-parsing.
+        let mut loaded_from_persistence = false;
+        if let Some(first) = folders.first() {
+            let slug = crate::memory::project_slug(first);
+            match crate::mcp::server::McpBackend::open_persistent_graph(&slug) {
+                Ok(g) if g.node_count() > 0 => {
+                    let node_count = g.node_count();
+                    {
+                        let mut graph = self.graph.write().await;
+                        *graph = g;
+                    }
+                    self.query_engine.build_indexes().await;
+                    loaded_from_persistence = true;
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            format!(
+                                "Loaded persisted graph ({} nodes) — code intelligence ready",
+                                node_count
+                            ),
+                        )
+                        .await;
+                    tracing::info!(
+                        "Loaded persisted graph ({} nodes) from previous session",
+                        node_count
+                    );
+                }
+                _ => {
+                    tracing::info!("No persisted graph found for LSP");
+                }
+            }
+        }
+
+        // Run incremental indexing: hash-based dedup skips unchanged files.
+        // - Fresh start (no persisted graph): full index if indexOnStartup=true
+        // - Loaded from persistence: incremental pass to catch changed files
+        let should_index = config.index_on_startup || loaded_from_persistence;
+
+        if should_index {
             let paths_to_index: Vec<std::path::PathBuf> = if config.index_paths.is_empty() {
                 folders.clone()
             } else {
@@ -906,44 +992,70 @@ impl LanguageServer for CodeGraphBackend {
                     .collect()
             };
 
-            for folder in &paths_to_index {
-                let count = self.index_directory(folder).await;
-                total_indexed += count;
+            let idx_config = Self::index_config_from_lsp(&config);
+            let result = self
+                .indexer
+                .index_workspace(&self.graph, &paths_to_index, &idx_config)
+                .await;
+            total_indexed = result.total_files;
+            files_parsed = result.files_parsed;
+
+            if result.files_parsed > 0 {
                 self.client
                     .log_message(
                         MessageType::INFO,
-                        format!("Indexed {} files from {}", count, folder.display()),
+                        format!(
+                            "Incremental index: {} parsed, {} skipped (unchanged)",
+                            result.files_parsed,
+                            result.total_files - result.files_parsed
+                        ),
+                    )
+                    .await;
+
+                // Resolve cross-file imports for newly parsed files
+                {
+                    let mut graph = self.graph.write().await;
+                    GraphUpdater::resolve_cross_file_imports(&mut graph);
+                }
+            } else if loaded_from_persistence {
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "All {} files unchanged — using persisted graph",
+                            result.total_files
+                        ),
+                    )
+                    .await;
+            } else {
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("Indexed {} files", result.total_files),
                     )
                     .await;
             }
 
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("Total files indexed: {total_indexed}"),
-                )
-                .await;
-
-            // Resolve cross-file imports after all files are indexed
-            {
-                let mut graph = self.graph.write().await;
-                GraphUpdater::resolve_cross_file_imports(&mut graph);
+            // Rebuild query indexes (needed whether loaded from persistence or freshly parsed)
+            if !loaded_from_persistence {
+                self.query_engine.build_indexes().await;
+                self.client
+                    .log_message(MessageType::INFO, "Semantic search index ready")
+                    .await;
             }
-            self.client
-                .log_message(MessageType::INFO, "Cross-file imports resolved")
-                .await;
 
-            // Build AI query engine indexes (includes embedding all symbols — can take 30-120s)
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("Building semantic search index ({total_indexed} files)... This may take a moment."),
-                )
-                .await;
-            self.query_engine.build_indexes().await;
-            self.client
-                .log_message(MessageType::INFO, "Semantic search index ready")
-                .await;
+            // Persist graph to RocksDB so next startup loads instantly
+            if result.files_parsed > 0 {
+                if let Some(first) = folders.first() {
+                    let slug = crate::memory::project_slug(first);
+                    let graph = self.graph.read().await;
+                    if let Err(e) = Self::persist_graph_to_rocksdb(&slug, first, &graph) {
+                        tracing::warn!("Failed to persist graph: {}", e);
+                    } else {
+                        tracing::info!("Graph persisted to RocksDB for next session");
+                    }
+                }
+            }
         } else {
             self.client
                 .log_message(MessageType::INFO, "Skipping auto-index (indexOnStartup=false). Use 'Index Directory' command to index specific paths.")
@@ -976,10 +1088,33 @@ impl LanguageServer for CodeGraphBackend {
                     // Share vector engine with query engine for semantic symbol search
                     if let Some(engine) = self.memory_manager.get_vector_engine().await {
                         self.query_engine.set_vector_engine(engine).await;
-                        self.query_engine.build_symbol_vectors().await;
-                        self.client
-                            .log_message(MessageType::INFO, "✓ Semantic symbol search initialized")
-                            .await;
+
+                        let slug = crate::memory::project_slug(first_folder);
+
+                        // Load persisted vectors if no files changed; rebuild otherwise
+                        let loaded = if files_parsed == 0 {
+                            self.query_engine.load_symbol_vectors(&slug).await
+                        } else {
+                            0
+                        };
+
+                        if loaded > 0 {
+                            tracing::info!("Loaded {} persisted symbol vectors", loaded);
+                            self.client
+                                .log_message(
+                                    MessageType::INFO,
+                                    format!("✓ Loaded {} persisted symbol vectors", loaded),
+                                )
+                                .await;
+                        } else {
+                            self.query_engine.build_symbol_vectors().await;
+                            if let Err(e) = self.query_engine.save_symbol_vectors(&slug).await {
+                                tracing::warn!("Failed to persist symbol vectors: {}", e);
+                            }
+                            self.client
+                                .log_message(MessageType::INFO, "✓ Semantic symbol search initialized")
+                                .await;
+                        }
                     }
                 }
                 Err(e) => {
@@ -1002,8 +1137,8 @@ impl LanguageServer for CodeGraphBackend {
                 .await;
         }
 
-        // Start file watcher for incremental updates (only if we indexed something)
-        if config.index_on_startup && !folders.is_empty() {
+        // Start file watcher for incremental updates (if we have indexed data)
+        if (config.index_on_startup || loaded_from_persistence) && !folders.is_empty() {
             let watch_paths = if config.index_paths.is_empty() {
                 folders.clone()
             } else {
@@ -1620,6 +1755,21 @@ impl LanguageServer for CodeGraphBackend {
                 self.query_engine.build_indexes().await;
                 self.query_engine.build_symbol_vectors().await;
 
+                // Persist graph and vectors for next session
+                if total_indexed > 0 {
+                    let folders = self.workspace_folders.read().await;
+                    if let Some(first) = folders.first() {
+                        let slug = crate::memory::project_slug(first);
+                        let graph = self.graph.read().await;
+                        if let Err(e) = Self::persist_graph_to_rocksdb(&slug, first, &graph) {
+                            tracing::warn!("Failed to persist graph after reindex: {}", e);
+                        }
+                        if let Err(e) = self.query_engine.save_symbol_vectors(&slug).await {
+                            tracing::warn!("Failed to persist symbol vectors: {}", e);
+                        }
+                    }
+                }
+
                 self.client
                     .log_message(
                         MessageType::INFO,
@@ -1932,6 +2082,146 @@ impl LanguageServer for CodeGraphBackend {
                     .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
                 let response = self.handle_search_git_history(search_params).await?;
                 Ok(Some(response))
+            }
+
+            "codegraph.indexFiles" => {
+                let args = params.arguments.first().ok_or_else(|| {
+                    tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")
+                })?;
+                let files: Vec<std::path::PathBuf> = args
+                    .get("files")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(std::path::PathBuf::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if files.is_empty() {
+                    return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                        "files parameter is required (array of file paths)",
+                    ));
+                }
+
+                let mut indexed = 0usize;
+                let mut failed = 0usize;
+                for path in &files {
+                    if !path.exists() {
+                        failed += 1;
+                        continue;
+                    }
+                    // Remove old nodes before re-parsing
+                    {
+                        let mut graph = self.graph.write().await;
+                        let path_str = path.to_string_lossy().to_string();
+                        if let Ok(old_nodes) =
+                            graph.query().property("path", path_str.as_str()).execute()
+                        {
+                            for old_id in old_nodes {
+                                let _ = graph.delete_node(old_id);
+                            }
+                        }
+                    }
+                    match self.indexer.index_file(&self.graph, path).await {
+                        Ok(true) => indexed += 1,
+                        Ok(false) => {} // unchanged
+                        Err(_) => failed += 1,
+                    }
+                }
+
+                if indexed > 0 {
+                    // Resolve cross-file imports and rebuild indexes
+                    {
+                        let mut graph = self.graph.write().await;
+                        crate::watcher::GraphUpdater::resolve_cross_file_imports(&mut graph);
+                    }
+                    self.query_engine.build_indexes().await;
+                }
+
+                Ok(Some(serde_json::json!({
+                    "status": if failed == 0 { "success" } else { "partial" },
+                    "files_indexed": indexed,
+                    "files_failed": failed,
+                    "message": format!("Indexed {} files ({} failed)", indexed, failed)
+                })))
+            }
+
+            "codegraph.indexDirectory" => {
+                let args = params.arguments.first().ok_or_else(|| {
+                    tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")
+                })?;
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        tower_lsp::jsonrpc::Error::invalid_params("path parameter is required")
+                    })?;
+                let embed = args.get("embed").and_then(|v| v.as_bool()).unwrap_or(false);
+                let dir = std::path::PathBuf::from(path);
+
+                if !dir.exists() || !dir.is_dir() {
+                    return Ok(Some(serde_json::json!({
+                        "status": "error",
+                        "message": format!("Directory not found: {}", path)
+                    })));
+                }
+
+                let lsp_config = self.config.read().await.clone();
+                let config = Self::index_config_from_lsp(&lsp_config);
+                let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let (total, _parsed, _skipped) = self
+                    .indexer
+                    .index_directory(&self.graph, &dir, &config, 0, counter)
+                    .await;
+
+                if total > 0 {
+                    {
+                        let mut graph = self.graph.write().await;
+                        crate::watcher::GraphUpdater::resolve_cross_file_imports(&mut graph);
+                    }
+                    self.query_engine.build_indexes().await;
+                    if embed {
+                        self.query_engine.build_symbol_vectors().await;
+                    }
+                }
+
+                Ok(Some(serde_json::json!({
+                    "status": "success",
+                    "files_indexed": total,
+                    "directory": path,
+                    "embedded": embed,
+                    "message": format!("Added {} files from {}{}", total, path,
+                        if embed { " (with embeddings)" } else { "" })
+                })))
+            }
+
+            "codegraph.findImplementors" => {
+                let args = params
+                    .arguments
+                    .first()
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                let struct_type = args.get("structType").and_then(|v| v.as_str());
+                let field_name = args.get("fieldName").and_then(|v| v.as_str());
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+                let results = self
+                    .query_engine
+                    .find_implementors(struct_type, field_name)
+                    .await;
+
+                let total = results.len();
+                let truncated: Vec<_> = results.into_iter().take(limit).collect();
+
+                Ok(Some(serde_json::json!({
+                    "implementors": truncated,
+                    "total": total,
+                    "filters": {
+                        "struct_type": struct_type,
+                        "field_name": field_name,
+                    }
+                })))
             }
 
             "codegraph.updateConfiguration" => {

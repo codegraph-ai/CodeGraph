@@ -2,7 +2,7 @@
     "name": "codegraph",
     "displayName": "CodeGraph",
     "description": "Cross-language code intelligence powered by graph analysis",
-    "version": "0.13.0",
+    "version": "0.13.1",
     "publisher": "aStudioPlus",
     "author": "Andrey Vasilevsky <anvanster@gmail.com>",
     "license": "Apache-2.0",
@@ -262,7 +262,7 @@
                 },
                 "codegraph.fullBodyEmbedding": {
                     "type": "boolean",
-                    "default": false,
+                    "default": true,
                     "scope": "resource",
                     "description": "Embed full function body (first ~50 lines) instead of just name+signature. Better quality for NL search and clone detection, ~3x slower indexing. Requires reindex after changing."
                 },

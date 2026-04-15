@@ -3,7 +3,7 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="CodegraphExtension.aStudioPlus"
-              Version="0.13.0"
+              Version="0.13.1"
               Language="en-US"
               Publisher="aStudioPlus" />
     <DisplayName>CodeGraph — Code Intelligence for Copilot</DisplayName>

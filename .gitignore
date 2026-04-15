@@ -18,3 +18,8 @@ vscode/*.vsix
 mcp-package/bin/codegraph-server-*
 mcp-package/bin/onnxruntime.dll
 mcp-package/*.tgz
+
+# Internal docs (not public)
+competitive-analysis.md
+TODO.md
+.mcp.json
