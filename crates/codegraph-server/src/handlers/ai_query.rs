@@ -789,9 +789,9 @@ impl CodeGraphBackend {
             .to_file_path()
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid file path"))?;
 
-        let line_num = line.unwrap_or(1);
+        let line_num = line.unwrap_or(0);
         let position = tower_lsp::lsp_types::Position {
-            line: line_num.saturating_sub(1), // LSP is 0-indexed
+            line: line_num, // line param is already 0-indexed
             character: 0,
         };
 
