@@ -20,8 +20,8 @@ serde.workspace = true
 thiserror.workspace = true
 
 # PHP parser
-tree-sitter = "0.22"
-tree-sitter-php = "0.22"
+tree-sitter = "0.25"
+tree-sitter-php = "0.24"
 rayon = "1.10"
 
 [dev-dependencies]

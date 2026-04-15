@@ -259,13 +259,23 @@ impl<'a> RustVisitor<'a> {
         if let Some(type_params) = node.child_by_field_name("type_parameters") {
             let mut cursor = type_params.walk();
             for child in type_params.children(&mut cursor) {
-                if child.kind() == "type_identifier" {
-                    params.push(self.node_text(child));
-                } else if child.kind() == "constrained_type_parameter" {
-                    // Get just the type name from T: Trait
-                    if let Some(name) = child.child_by_field_name("left") {
-                        params.push(self.node_text(name));
+                match child.kind() {
+                    "type_identifier" => {
+                        params.push(self.node_text(child));
                     }
+                    "type_parameter" => {
+                        // tree-sitter-rust 0.24+: type_parameter wraps the type_identifier
+                        if let Some(name) = child.child_by_field_name("name") {
+                            params.push(self.node_text(name));
+                        }
+                    }
+                    "constrained_type_parameter" => {
+                        // Get just the type name from T: Trait
+                        if let Some(name) = child.child_by_field_name("left") {
+                            params.push(self.node_text(name));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1152,7 +1162,7 @@ mod tests {
 
     fn parse_and_visit(source: &str) -> RustVisitor<'_> {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_rust::language()).unwrap();
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = RustVisitor::new(source.as_bytes(), ParserConfig::default());
@@ -1926,4 +1936,5 @@ fn add(a: i32, b: u64) -> f64 { 0.0 }
             visitor.type_references
         );
     }
+
 }

@@ -17,7 +17,7 @@ pub fn extract(
 ) -> Result<CodeIR, ParserError> {
     let mut parser = Parser::new();
     parser
-        .set_language(&tree_sitter_ruby::language())
+        .set_language(&tree_sitter_ruby::LANGUAGE.into())
         .map_err(|e| ParserError::ParseError(file_path.to_path_buf(), e.to_string()))?;
 
     let tree = parser.parse(source, None).ok_or_else(|| {

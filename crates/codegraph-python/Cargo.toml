@@ -21,8 +21,8 @@ codegraph.workspace = true
 codegraph-parser-api.workspace = true
 
 # Python parser - tree-sitter based
-tree-sitter = "0.22"
-tree-sitter-python = "0.21"
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
 
 # Error handling
 thiserror.workspace = true

@@ -14,9 +14,6 @@
 
 pub mod ai_query;
 pub mod backend;
-pub mod index_state;
-pub mod indexer;
-pub mod lsp_pro_hooks;
 pub mod branch_watcher;
 pub mod cache;
 pub mod custom_requests;
@@ -25,6 +22,9 @@ pub mod error;
 pub mod git_mining;
 pub mod handlers;
 pub mod index;
+pub mod index_state;
+pub mod indexer;
+pub mod lsp_pro_hooks;
 pub mod mcp;
 pub mod memory;
 pub mod metadata;

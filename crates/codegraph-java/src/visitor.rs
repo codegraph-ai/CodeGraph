@@ -915,7 +915,7 @@ mod tests {
         use tree_sitter::Parser;
 
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_java::language()).unwrap();
+        parser.set_language(&tree_sitter_java::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = JavaVisitor::new(source);

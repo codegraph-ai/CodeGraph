@@ -687,7 +687,7 @@ mod tests {
         use tree_sitter::Parser;
 
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_ruby::language()).unwrap();
+        parser.set_language(&tree_sitter_ruby::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = RubyVisitor::new(source);

@@ -137,9 +137,9 @@ impl Indexer {
         let mut result = IndexResult::default();
 
         for folder in folders {
-            let (total, parsed, skipped) =
-                self.index_directory(graph, folder, config, 0, counter.clone())
-                    .await;
+            let (total, parsed, skipped) = self
+                .index_directory(graph, folder, config, 0, counter.clone())
+                .await;
             result.total_files += total;
             result.files_parsed += parsed;
             result.files_skipped += skipped;
@@ -186,134 +186,135 @@ impl Indexer {
         config: &'a IndexConfig,
         depth: u32,
         counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (usize, usize, usize)> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (usize, usize, usize)> + Send + 'a>>
+    {
         Box::pin(async move {
-        use std::sync::atomic::Ordering;
+            use std::sync::atomic::Ordering;
 
-        if depth > config.max_depth {
-            tracing::warn!(
-                "Skipping {:?}: exceeded max indexing depth of {}",
-                dir,
-                config.max_depth
-            );
-            return (0, 0, 0);
-        }
-
-        if counter.load(Ordering::Relaxed) >= config.max_files {
-            return (0, 0, 0);
-        }
-
-        let exclude_set = config.build_exclude_set();
-        let supported_extensions = self.parsers.supported_extensions();
-
-        tracing::info!("Indexing directory: {:?}", dir);
-
-        let mut total = 0usize;
-        let mut parsed = 0usize;
-        let mut skipped = 0usize;
-
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("Cannot read directory {:?}: {}", dir, e);
+            if depth > config.max_depth {
+                tracing::warn!(
+                    "Skipping {:?}: exceeded max indexing depth of {}",
+                    dir,
+                    config.max_depth
+                );
                 return (0, 0, 0);
             }
-        };
 
-        for entry in entries.flatten() {
             if counter.load(Ordering::Relaxed) >= config.max_files {
-                tracing::warn!(
-                    "Reached max indexed file limit of {}; stopping",
-                    config.max_files
-                );
-                break;
+                return (0, 0, 0);
             }
 
-            let path = entry.path();
+            let exclude_set = config.build_exclude_set();
+            let supported_extensions = self.parsers.supported_extensions();
 
-            // Skip hidden files and directories
-            if let Some(name) = path.file_name() {
-                if name.to_string_lossy().starts_with('.') {
-                    continue;
+            tracing::info!("Indexing directory: {:?}", dir);
+
+            let mut total = 0usize;
+            let mut parsed = 0usize;
+            let mut skipped = 0usize;
+
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("Cannot read directory {:?}: {}", dir, e);
+                    return (0, 0, 0);
                 }
-            }
+            };
 
-            if path.is_dir() {
-                let dir_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                // Skip hardcoded exclude directories
-                if config.exclude_dirs.iter().any(|e| e == &dir_name) {
-                    continue;
-                }
-
-                // Skip directories matching user-configured exclude globs
-                let path_str = path.to_string_lossy();
-                if exclude_set.is_match(path_str.as_ref())
-                    || exclude_set.is_match(dir_name.as_str())
-                {
-                    tracing::info!("Skipping {:?}: matched exclude pattern", path);
-                    continue;
+            for entry in entries.flatten() {
+                if counter.load(Ordering::Relaxed) >= config.max_files {
+                    tracing::warn!(
+                        "Reached max indexed file limit of {}; stopping",
+                        config.max_files
+                    );
+                    break;
                 }
 
-                let (t, p, s) = self
-                    .index_directory(graph, &path, config, depth + 1, counter.clone())
-                    .await;
-                total += t;
-                parsed += p;
-                skipped += s;
-            } else if path.is_file() {
-                // Skip files matching exclude globs
-                let path_str = path.to_string_lossy();
-                if exclude_set.is_match(path_str.as_ref()) {
-                    continue;
-                }
+                let path = entry.path();
 
-                // Skip files that exceed the configurable size limit
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    if metadata.len() > config.max_file_size_bytes {
-                        tracing::info!(
-                            "Skipping {:?}: file size {} exceeds limit of {}",
-                            path,
-                            metadata.len(),
-                            config.max_file_size_bytes
-                        );
+                // Skip hidden files and directories
+                if let Some(name) = path.file_name() {
+                    if name.to_string_lossy().starts_with('.') {
                         continue;
                     }
                 }
 
-                // Check if file has a supported extension
-                if let Some(ext) = path.extension() {
-                    let ext_str = ext.to_string_lossy();
-                    let ext_with_dot = format!(".{}", ext_str);
-                    let is_supported = supported_extensions
-                        .iter()
-                        .any(|e| *e == ext_str.as_ref() || *e == ext_with_dot);
+                if path.is_dir() {
+                    let dir_name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
 
-                    if is_supported {
-                        match self.index_file(graph, &path).await {
-                            Ok(was_parsed) => {
-                                total += 1;
-                                counter.fetch_add(1, Ordering::Relaxed);
-                                if was_parsed {
-                                    parsed += 1;
-                                } else {
-                                    skipped += 1;
-                                    tracing::trace!("Skipped unchanged: {:?}", path);
+                    // Skip hardcoded exclude directories
+                    if config.exclude_dirs.iter().any(|e| e == &dir_name) {
+                        continue;
+                    }
+
+                    // Skip directories matching user-configured exclude globs
+                    let path_str = path.to_string_lossy();
+                    if exclude_set.is_match(path_str.as_ref())
+                        || exclude_set.is_match(dir_name.as_str())
+                    {
+                        tracing::info!("Skipping {:?}: matched exclude pattern", path);
+                        continue;
+                    }
+
+                    let (t, p, s) = self
+                        .index_directory(graph, &path, config, depth + 1, counter.clone())
+                        .await;
+                    total += t;
+                    parsed += p;
+                    skipped += s;
+                } else if path.is_file() {
+                    // Skip files matching exclude globs
+                    let path_str = path.to_string_lossy();
+                    if exclude_set.is_match(path_str.as_ref()) {
+                        continue;
+                    }
+
+                    // Skip files that exceed the configurable size limit
+                    if let Ok(metadata) = std::fs::metadata(&path) {
+                        if metadata.len() > config.max_file_size_bytes {
+                            tracing::info!(
+                                "Skipping {:?}: file size {} exceeds limit of {}",
+                                path,
+                                metadata.len(),
+                                config.max_file_size_bytes
+                            );
+                            continue;
+                        }
+                    }
+
+                    // Check if file has a supported extension
+                    if let Some(ext) = path.extension() {
+                        let ext_str = ext.to_string_lossy();
+                        let ext_with_dot = format!(".{}", ext_str);
+                        let is_supported = supported_extensions
+                            .iter()
+                            .any(|e| *e == ext_str.as_ref() || *e == ext_with_dot);
+
+                        if is_supported {
+                            match self.index_file(graph, &path).await {
+                                Ok(was_parsed) => {
+                                    total += 1;
+                                    counter.fetch_add(1, Ordering::Relaxed);
+                                    if was_parsed {
+                                        parsed += 1;
+                                    } else {
+                                        skipped += 1;
+                                        tracing::trace!("Skipped unchanged: {:?}", path);
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to index {:?}: {}", path, e);
+                                Err(e) => {
+                                    tracing::warn!("Failed to index {:?}: {}", path, e);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        (total, parsed, skipped)
+            (total, parsed, skipped)
         })
     }
 

@@ -8,11 +8,15 @@
 //! C symbol directly and wrap it with Language::from_raw (ABI-compatible).
 
 extern "C" {
-    fn tree_sitter_fortran() -> *const std::ffi::c_void;
+    fn tree_sitter_fortran() -> *const ();
 }
+
+/// The tree-sitter LanguageFn for Fortran
+pub const LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_fortran) };
 
 /// Get the tree-sitter Language for Fortran
 pub fn language() -> tree_sitter::Language {
     // SAFETY: tree_sitter_fortran() returns a valid TSLanguage pointer
-    unsafe { tree_sitter::Language::from_raw(tree_sitter_fortran() as *const _) }
+    LANGUAGE.into()
 }

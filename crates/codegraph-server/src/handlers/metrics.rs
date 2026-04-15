@@ -114,7 +114,6 @@ impl CodeGraphBackend {
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid file path"))?;
         Ok(self.symbol_index.get_file_symbols(&path))
     }
-
 }
 
 #[cfg(test)]

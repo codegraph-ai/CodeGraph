@@ -1030,7 +1030,7 @@ mod tests {
 
     fn parse_and_visit(source: &[u8]) -> CppVisitor<'_> {
         let mut parser = Parser::new();
-        let language = tree_sitter_cpp::language();
+        let language = tree_sitter_cpp::LANGUAGE.into();
         parser.set_language(&language).unwrap();
         let tree = parser.parse(source, None).unwrap();
 

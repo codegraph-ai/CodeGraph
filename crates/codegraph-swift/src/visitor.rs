@@ -1051,7 +1051,7 @@ mod tests {
 
     fn parse_and_visit(source: &[u8]) -> SwiftVisitor<'_> {
         let mut parser = Parser::new();
-        let language = tree_sitter_swift::language();
+        let language = tree_sitter_swift::LANGUAGE.into();
         parser.set_language(&language).unwrap();
         let tree = parser.parse(source, None).unwrap();
 

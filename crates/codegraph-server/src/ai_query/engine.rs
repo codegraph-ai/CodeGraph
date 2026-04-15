@@ -328,8 +328,8 @@ impl QueryEngine {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
-        let rocks = RocksDBBackend::open(&db_path)
-            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        let rocks =
+            RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
         let mut namespaced = NamespacedBackend::new(Box::new(rocks), slug);
 
         // Write each vector as binary f32 array

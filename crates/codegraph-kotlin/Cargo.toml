@@ -20,9 +20,15 @@ serde.workspace = true
 thiserror.workspace = true
 
 # Kotlin parser
-tree-sitter = "0.22"
-tree-sitter-kotlin = "0.3"
+tree-sitter = "0.25"
+tree-sitter-language = "0.1"
 rayon = "1.10"
+
+[build-dependencies]
+cc = "1.0"
+# Listed so cargo downloads the source; we compile parser.c directly since
+# tree-sitter-kotlin 0.3.x uses the old tree-sitter <0.23 API.
+tree-sitter-kotlin = "0.3"
 
 [dev-dependencies]
 serde_json.workspace = true

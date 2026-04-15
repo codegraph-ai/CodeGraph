@@ -1016,7 +1016,7 @@ mod tests {
 
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_c_sharp::language())
+            .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1100,7 +1100,7 @@ mod tests {
         let source = b"class Dog : Animal {}";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_c_sharp::language())
+            .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         print_tree(source, tree.root_node(), 0);

@@ -1085,7 +1085,7 @@ mod tests {
 
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_php::language_php())
+            .set_language(&tree_sitter_php::LANGUAGE_PHP.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 

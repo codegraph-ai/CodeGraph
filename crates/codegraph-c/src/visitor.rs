@@ -942,7 +942,7 @@ mod tests {
 
     fn parse_and_visit(source: &[u8]) -> CVisitor<'_> {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_c::language()).unwrap();
+        parser.set_language(&tree_sitter_c::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = CVisitor::new(source);

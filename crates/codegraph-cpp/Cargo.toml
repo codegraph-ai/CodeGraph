@@ -20,8 +20,8 @@ serde.workspace = true
 thiserror.workspace = true
 
 # C++ parser
-tree-sitter = "0.22"
-tree-sitter-cpp = "0.22"
+tree-sitter = "0.25"
+tree-sitter-cpp = "0.23"
 rayon = "1.10"
 
 [dev-dependencies]

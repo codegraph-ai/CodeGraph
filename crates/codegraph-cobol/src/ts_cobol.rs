@@ -8,11 +8,15 @@
 //! since the grammar may use a different ABI version than the tree-sitter crate.
 
 extern "C" {
-    fn tree_sitter_COBOL() -> *const std::ffi::c_void;
+    fn tree_sitter_COBOL() -> *const ();
 }
+
+/// The tree-sitter LanguageFn for COBOL
+pub const LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_COBOL) };
 
 /// Get the tree-sitter Language for COBOL
 pub fn language() -> tree_sitter::Language {
     // SAFETY: tree_sitter_COBOL() returns a valid TSLanguage pointer.
-    unsafe { tree_sitter::Language::from_raw(tree_sitter_COBOL() as *const _) }
+    LANGUAGE.into()
 }

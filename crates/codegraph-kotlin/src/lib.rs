@@ -37,6 +37,7 @@
 mod extractor;
 mod mapper;
 mod parser_impl;
+pub(crate) mod ts_kotlin;
 mod visitor;
 
 // Re-export parser-api types for convenience

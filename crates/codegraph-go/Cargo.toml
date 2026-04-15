@@ -20,8 +20,8 @@ serde.workspace = true
 thiserror.workspace = true
 
 # Go parser
-tree-sitter = "0.22"
-tree-sitter-go = "0.21"
+tree-sitter = "0.25"
+tree-sitter-go = "0.25"
 rayon = "1.10"
 
 [dev-dependencies]

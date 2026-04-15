@@ -154,7 +154,7 @@ pub fn extract_with_options(
     };
 
     let mut parser = Parser::new();
-    let language = tree_sitter_c::language();
+    let language = tree_sitter_c::LANGUAGE.into();
     parser
         .set_language(&language)
         .map_err(|e| ParserError::ParseError(file_path.to_path_buf(), e.to_string()))?;

@@ -4,10 +4,14 @@
 //! Bindings to the vendored tree-sitter-tcl grammar
 
 extern "C" {
-    fn tree_sitter_tcl() -> *const std::ffi::c_void;
+    fn tree_sitter_tcl() -> *const ();
 }
+
+/// The tree-sitter [`LanguageFn`] for Tcl
+pub const LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_tcl) };
 
 /// Get the tree-sitter Language for Tcl
 pub fn language() -> tree_sitter::Language {
-    unsafe { tree_sitter::Language::from_raw(tree_sitter_tcl() as *const _) }
+    LANGUAGE.into()
 }

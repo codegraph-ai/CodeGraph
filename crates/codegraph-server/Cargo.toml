@@ -55,6 +55,21 @@ codegraph-tcl.workspace = true
 codegraph-verilog.workspace = true
 codegraph-cobol.workspace = true
 codegraph-fortran.workspace = true
+codegraph-dart.workspace = true
+codegraph-zig.workspace = true
+codegraph-lua.workspace = true
+codegraph-groovy.workspace = true
+codegraph-r.workspace = true
+codegraph-scala.workspace = true
+codegraph-bash.workspace = true
+codegraph-elixir.workspace = true
+codegraph-haskell.workspace = true
+codegraph-hcl.workspace = true
+codegraph-julia.workspace = true
+codegraph-ocaml.workspace = true
+codegraph-perl.workspace = true
+codegraph-toml.workspace = true
+codegraph-yaml.workspace = true
 
 # Memory layer
 codegraph-memory.workspace = true

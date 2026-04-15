@@ -1155,7 +1155,7 @@ mod tests {
         let source = b"function greet(name: string, age: number): void {}";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1176,7 +1176,7 @@ mod tests {
         let source = b"async function loadData() { await fetch(); }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1194,7 +1194,7 @@ mod tests {
         let source = b"class MyClass { myMethod() {} }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1214,7 +1214,7 @@ mod tests {
         let source = b"interface IPerson { name: string; age: number; }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1232,7 +1232,7 @@ mod tests {
         let source = b"import { useState } from 'react';";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1249,7 +1249,7 @@ mod tests {
         let source = b"import { useState, useEffect } from 'react';";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1271,7 +1271,7 @@ mod tests {
         let source = b"import React from 'react';";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1291,7 +1291,7 @@ mod tests {
         let source = b"import * as Utils from './utils';";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1311,7 +1311,7 @@ mod tests {
         let source = b"import './styles.css';";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1330,7 +1330,7 @@ mod tests {
         let source = b"import React, { useState, useEffect } from 'react';";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1352,7 +1352,7 @@ mod tests {
         let source = b"const func = () => { return 42; };";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1370,7 +1370,7 @@ mod tests {
         let source = b"class Calculator { add(a: number, b: number): number { return a + b; } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1395,7 +1395,7 @@ mod tests {
         let source = b"class Math { add(a, b) { return a + b; } subtract(a, b) { return a - b; } multiply(a, b) { return a * b; } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1422,7 +1422,7 @@ mod tests {
         let source = b"class Person { constructor(name: string) { this.name = name; } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1446,7 +1446,7 @@ mod tests {
         let source = b"class Utils { static format(value: string): string { return value; } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1468,7 +1468,7 @@ mod tests {
         let source = b"function caller() { callee(); helper(); }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1493,7 +1493,7 @@ mod tests {
         let source = b"class MyClass { myMethod() { this.helper(); this.anotherMethod(); } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1519,7 +1519,7 @@ mod tests {
         let source = b"async function fetchData() { await this.initialize(); const result = await this.getData(); }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1547,7 +1547,7 @@ mod tests {
         let source = b"function simple() { return 1; }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1568,7 +1568,7 @@ mod tests {
         let source = b"function check(x: number) { if (x > 0) { return 1; } else { return 0; } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1588,7 +1588,7 @@ mod tests {
         let source = b"function loop() { for (let i = 0; i < 10; i++) { console.log(i); } while (true) { break; } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1608,7 +1608,7 @@ mod tests {
         let source = b"function check(a: boolean, b: boolean, c: boolean) { if (a && b || c) { return true; } return false; }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1628,7 +1628,7 @@ mod tests {
         let source = b"function safe() { try { doSomething(); } catch (e) { console.error(e); } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1648,7 +1648,7 @@ mod tests {
         let source = b"function grade(score: number) { switch (score) { case 90: return 'A'; case 80: return 'B'; default: return 'C'; } }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1668,7 +1668,7 @@ mod tests {
         let source = b"function abs(x: number) { return x >= 0 ? x : -x; }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1688,7 +1688,7 @@ mod tests {
         let source = b"function nested(x: number) { if (x > 0) { if (x > 10) { if (x > 100) { return 3; } return 2; } return 1; } return 0; }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
@@ -1709,7 +1709,7 @@ mod tests {
         let source = b"function simple() { return 1; }";
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_typescript::language_typescript())
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 

@@ -544,6 +544,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codegraph-bash"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-bash",
+]
+
+[[package]]
 name = "codegraph-c"
 version = "0.1.4"
 dependencies = [
@@ -556,7 +571,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-c",
 ]
 
@@ -572,7 +587,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -587,7 +603,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-cpp",
 ]
 
@@ -603,8 +619,39 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-c-sharp",
+]
+
+[[package]]
+name = "codegraph-dart"
+version = "0.2.1"
+dependencies = [
+ "cc",
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "codegraph-elixir"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-elixir",
 ]
 
 [[package]]
@@ -620,8 +667,9 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-fortran",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -636,8 +684,53 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-go",
+]
+
+[[package]]
+name = "codegraph-groovy"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-groovy",
+]
+
+[[package]]
+name = "codegraph-haskell"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-haskell",
+]
+
+[[package]]
+name = "codegraph-hcl"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-hcl",
 ]
 
 [[package]]
@@ -652,14 +745,30 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-java",
+]
+
+[[package]]
+name = "codegraph-julia"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-julia",
 ]
 
 [[package]]
 name = "codegraph-kotlin"
 version = "0.1.2"
 dependencies = [
+ "cc",
  "codegraph",
  "codegraph-parser-api",
  "criterion",
@@ -668,8 +777,24 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-kotlin",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "codegraph-lua"
+version = "0.2.1"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-lua",
 ]
 
 [[package]]
@@ -699,6 +824,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codegraph-ocaml"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-ocaml",
+]
+
+[[package]]
 name = "codegraph-parser-api"
 version = "0.2.1"
 dependencies = [
@@ -706,6 +846,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "codegraph-perl"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -720,7 +876,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-php",
 ]
 
@@ -737,9 +893,25 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-python",
  "walkdir",
+]
+
+[[package]]
+name = "codegraph-r"
+version = "0.2.1"
+dependencies = [
+ "cc",
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -754,7 +926,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-ruby",
 ]
 
@@ -770,8 +942,23 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-rust",
+]
+
+[[package]]
+name = "codegraph-scala"
+version = "0.2.1"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-scala",
 ]
 
 [[package]]
@@ -780,24 +967,39 @@ version = "0.13.1"
 dependencies = [
  "clap",
  "codegraph",
+ "codegraph-bash",
  "codegraph-c",
  "codegraph-cobol",
  "codegraph-cpp",
  "codegraph-csharp",
+ "codegraph-dart",
+ "codegraph-elixir",
  "codegraph-fortran",
  "codegraph-go",
+ "codegraph-groovy",
+ "codegraph-haskell",
+ "codegraph-hcl",
  "codegraph-java",
+ "codegraph-julia",
  "codegraph-kotlin",
+ "codegraph-lua",
  "codegraph-memory",
+ "codegraph-ocaml",
  "codegraph-parser-api",
+ "codegraph-perl",
  "codegraph-php",
  "codegraph-python",
+ "codegraph-r",
  "codegraph-ruby",
  "codegraph-rust",
+ "codegraph-scala",
  "codegraph-swift",
  "codegraph-tcl",
+ "codegraph-toml",
  "codegraph-typescript",
  "codegraph-verilog",
+ "codegraph-yaml",
+ "codegraph-zig",
  "dashmap",
  "globset",
  "lru",
@@ -826,7 +1028,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-swift",
 ]
 
@@ -843,7 +1045,23 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "codegraph-toml"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-toml-ng",
 ]
 
 [[package]]
@@ -858,7 +1076,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
  "tree-sitter-typescript",
 ]
 
@@ -875,8 +1093,40 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tree-sitter",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
  "tree-sitter-verilog",
+]
+
+[[package]]
+name = "codegraph-yaml"
+version = "0.1.0"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-yaml",
+]
+
+[[package]]
+name = "codegraph-zig"
+version = "0.2.1"
+dependencies = [
+ "cc",
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -3268,6 +3518,7 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -3405,6 +3656,12 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 
 [[package]]
 name = "strsim"
@@ -3833,42 +4090,76 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.22.6"
+version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df7cc499ceadd4dcdf7ec6d4cbc34ece92c3fa07821e287aedecd4416c516dca"
+checksum = "e747b1f9b7b931ed39a548c1fae149101497de3c1fc8d9e18c62c1a66c683d3d"
 dependencies = [
  "cc",
  "regex",
 ]
 
 [[package]]
-name = "tree-sitter-c"
-version = "0.21.4"
+name = "tree-sitter"
+version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f956d5351d62652864a4ff3ae861747e7a1940dc96c9998ae400ac0d3ce30427"
+checksum = "78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87"
 dependencies = [
  "cc",
- "tree-sitter",
+ "regex",
+ "regex-syntax",
+ "serde_json",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-bash"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-c"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a3aad8f0129083a59fe8596157552d2bb7148c492d44c21558d68ca1c722707"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-c-sharp"
-version = "0.21.3"
+version = "0.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8997ad04502208449025114e434c9024a33a74e700513c702a9d2cac6522a771"
+checksum = "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-cpp"
-version = "0.22.3"
+version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d509a22a992790d38f2c291961ff8a1ff016c437c7ec6befc9220b8eec8918c"
+checksum = "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-elixir"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66dd064a762ed95bfc29857fa3cb7403bb1e5cb88112de0f6341b7e47284ba40"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -3883,32 +4174,72 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-go"
-version = "0.21.2"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8d702a98d3c7e70e466456e58ff2b1ac550bf1e29b97e5770676d2fdabec00d"
+checksum = "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-groovy"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a20016017f0865ba902ca50354f92429de5de8df994e64ab7fae087a13c40ed"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-haskell"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "977c51e504548cba13fc27cb5a2edab2124cf6716a1934915d07ab99523b05a4"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-hcl"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a7b2cc3d7121553b84309fab9d11b3ff3d420403eef9ae50f9fd1cd9d9cf012"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-java"
-version = "0.21.0"
+version = "0.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33bc21adf831a773c075d9d00107ab43965e6a6ea7607b47fd9ec6f3db4b481b"
+checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-julia"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4144731a178812ee867619b1e98b3b91e54c1652304b26e5ebe3175b701de323"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-kotlin"
-version = "0.3.8"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54ff60aeb036f5762515ceb31404512ea4f9599764bcd3857074bb82867bdd34"
+checksum = "8df217a0e1fec649f3e13157de932439f3d37ea4e265038dd0873971ef56e726"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter 0.20.10",
 ]
 
 [[package]]
@@ -3918,63 +4249,103 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
-name = "tree-sitter-php"
-version = "0.22.8"
+name = "tree-sitter-lua"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1be890bd043986cc26b69968698e508dbd40060805e482f226dc873a63a88d60"
+checksum = "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-ocaml"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d19db582b3855f56b5f9ec484170fbfb9ee60b938ec7720d76d2ee788e8b640"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-php"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d8c17c3ab69052c5eeaa7ff5cd972dd1bc25d1b97ee779fec391ad3b5df5592"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-python"
-version = "0.21.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4066c6cf678f962f8c2c4561f205945c84834cce73d981e71392624fdc390a9"
+checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-ruby"
-version = "0.21.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0031f687c0772f2dad7b77104c43428611099a1804c81244ada21560f41f0b1"
+checksum = "be0484ea4ef6bb9c575b4fdabde7e31340a8d2dbc7d52b321ac83da703249f95"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-rust"
-version = "0.20.3"
+version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "797842733e252dc11ae5d403a18060bf337b822fc2ae5ddfaa6ff4d9cc20bda6"
+checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-scala"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83079f50ea7d03e0faf6be6260ed97538e6df7349ec3cbcbf5771f7b38e3c8b7"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-swift"
-version = "0.5.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75fd4af840121c5add7a20372be867c04fc398edf3edb2c64286b56f2da28c43"
+checksum = "4ef216011c3e3df4fa864736f347cb8d509b1066cf0c8549fb1fd81ac9832e59"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-toml-ng"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9adc2c898ae49730e857d75be403da3f92bb81d8e37a2f918a08dd10de5ebb1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
 name = "tree-sitter-typescript"
-version = "0.21.2"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecb35d98a688378e56c18c9c159824fd16f730ccbea19aacf4f206e5d5438ed9"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
 dependencies = [
  "cc",
- "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -3982,6 +4353,16 @@ name = "tree-sitter-verilog"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e7e0360395852f1f6ff5b7b82c72dc6557d181073188df1d60ec469ea69c66"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-yaml"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c223db85f05e34794f065454843b0668ebc15d240ada63e2b5939f43ce7c97"
 dependencies = [
  "cc",
  "tree-sitter-language",

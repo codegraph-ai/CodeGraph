@@ -548,17 +548,26 @@ impl McpBackend {
 
                 // Load persisted vectors if no files changed; rebuild otherwise
                 let loaded = if result.files_parsed == 0 {
-                    self.query_engine.load_symbol_vectors(&self.project_slug).await
+                    self.query_engine
+                        .load_symbol_vectors(&self.project_slug)
+                        .await
                 } else {
                     0
                 };
 
                 if loaded > 0 {
-                    tracing::info!("Loaded {} persisted symbol vectors — semantic search ready", loaded);
+                    tracing::info!(
+                        "Loaded {} persisted symbol vectors — semantic search ready",
+                        loaded
+                    );
                 } else {
                     tracing::info!("Building semantic search index... This may take a moment.");
                     self.query_engine.build_symbol_vectors().await;
-                    if let Err(e) = self.query_engine.save_symbol_vectors(&self.project_slug).await {
+                    if let Err(e) = self
+                        .query_engine
+                        .save_symbol_vectors(&self.project_slug)
+                        .await
+                    {
                         tracing::warn!("Failed to persist symbol vectors: {}", e);
                     }
                     tracing::info!("Semantic search index ready");
@@ -827,8 +836,12 @@ impl McpServer {
         loop {
             match transport.read_request().await {
                 Ok(Some(request)) => {
+                    // JSON-RPC 2.0: notifications have no id and must not receive a response
+                    let is_notification = request.id.is_none();
                     let response = self.handle_request(request).await;
-                    transport.write_response(&response).await?;
+                    if !is_notification {
+                        transport.write_response(&response).await?;
+                    }
                 }
                 Ok(None) => {
                     // Empty line, keep reading
@@ -858,7 +871,8 @@ impl McpServer {
         match request.method.as_str() {
             "initialize" => self.handle_initialize(request.id, request.params).await,
             "initialized" => {
-                // Respond immediately, index in background to avoid client timeout
+                // This is a notification (no id) — response suppressed by run()
+                tracing::debug!("Client initialized");
                 JsonRpcResponse::success(request.id, Value::Null)
             }
             "ping" => {
@@ -868,8 +882,11 @@ impl McpServer {
             "tools/call" => self.handle_tools_call(request.id, request.params).await,
             "resources/list" => self.handle_resources_list(request.id).await,
             "resources/read" => self.handle_resources_read(request.id, request.params).await,
-            "notifications/cancelled" => {
-                // Notification, no response needed
+            // Notifications — handled silently, response is suppressed by run()
+            "notifications/initialized"
+            | "notifications/cancelled"
+            | "notifications/roots/list_changed" => {
+                tracing::debug!("Received notification: {}", request.method);
                 JsonRpcResponse::success(request.id, Value::Null)
             }
             _ => {
@@ -972,10 +989,7 @@ impl McpServer {
             }));
         }
 
-        JsonRpcResponse::success(
-            id,
-            serde_json::json!({ "tools": tools_json }),
-        )
+        JsonRpcResponse::success(id, serde_json::json!({ "tools": tools_json }))
     }
 
     async fn handle_tools_call(
@@ -2666,7 +2680,10 @@ impl McpServer {
             // ==================== Pro / Unknown Tool ====================
             other => {
                 // Fall through to pro tool provider
-                if let Some(future) = self.pro_provider.handle_tool(other, args.clone(), &self.backend) {
+                if let Some(future) =
+                    self.pro_provider
+                        .handle_tool(other, args.clone(), &self.backend)
+                {
                     future.await
                 } else {
                     Err(format!("Unknown tool: {}", other))

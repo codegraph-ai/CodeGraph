@@ -29,7 +29,7 @@ pub fn extract(
     // Initialize tree-sitter parser
     let mut parser = Parser::new();
     parser
-        .set_language(&tree_sitter_rust::language())
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
         .map_err(|e| ParserError::ParseError(file_path.to_path_buf(), e.to_string()))?;
 
     // Parse the source code

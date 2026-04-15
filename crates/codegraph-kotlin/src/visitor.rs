@@ -1122,7 +1122,7 @@ mod tests {
 
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_kotlin::language())
+            .set_language(&crate::ts_kotlin::language())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 

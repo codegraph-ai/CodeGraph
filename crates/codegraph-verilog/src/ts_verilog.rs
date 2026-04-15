@@ -10,11 +10,15 @@
 //! tree-sitter-language API incompatible with tree-sitter 0.22's Rust bindings.
 
 extern "C" {
-    fn tree_sitter_verilog() -> *const std::ffi::c_void;
+    fn tree_sitter_verilog() -> *const ();
 }
+
+/// The tree-sitter LanguageFn for SystemVerilog/Verilog
+pub const LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_verilog) };
 
 /// Get the tree-sitter Language for SystemVerilog/Verilog
 pub fn language() -> tree_sitter::Language {
     // SAFETY: tree_sitter_verilog() returns a valid TSLanguage pointer (ABI 14)
-    unsafe { tree_sitter::Language::from_raw(tree_sitter_verilog() as *const _) }
+    LANGUAGE.into()
 }

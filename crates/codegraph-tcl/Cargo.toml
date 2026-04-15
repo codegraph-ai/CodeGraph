@@ -19,7 +19,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-tree-sitter = "0.22"
+tree-sitter = "0.25"
+tree-sitter-language = "0.1"
 rayon = "1.10"
 
 [build-dependencies]

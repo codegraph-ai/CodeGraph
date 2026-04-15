@@ -16,7 +16,7 @@ pub fn extract(
     _config: &ParserConfig,
 ) -> Result<CodeIR, ParserError> {
     let mut parser = Parser::new();
-    let language = tree_sitter_go::language();
+    let language = tree_sitter_go::LANGUAGE.into();
     parser
         .set_language(&language)
         .map_err(|e| ParserError::ParseError(file_path.to_path_buf(), e.to_string()))?;

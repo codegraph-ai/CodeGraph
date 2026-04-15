@@ -19,10 +19,9 @@ codegraph-parser-api.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
-# Rust parser - tree-sitter based (0.22 aligned across all codegraph parsers)
-# Pin tree-sitter-rust to 0.20.3 exactly: 0.20.4 pulls in tree-sitter 0.20 causing duplicate symbols
-tree-sitter = "0.22"
-tree-sitter-rust = "=0.20.3"
+# Rust parser - tree-sitter based
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
 rayon = "1.10"
 
 [dev-dependencies]

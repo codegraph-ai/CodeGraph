@@ -1106,7 +1106,12 @@ mod tests {
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
-        assert_eq!(tools.len(), 28, "Expected 28 community tools, got {}", tools.len());
+        assert_eq!(
+            tools.len(),
+            28,
+            "Expected 28 community tools, got {}",
+            tools.len()
+        );
     }
 
     #[test]

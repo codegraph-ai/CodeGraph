@@ -26,9 +26,9 @@ pub fn extract(
         .unwrap_or(false);
 
     let language = if is_jsx {
-        tree_sitter_typescript::language_tsx()
+        tree_sitter_typescript::LANGUAGE_TSX.into()
     } else {
-        tree_sitter_typescript::language_typescript()
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
     };
 
     parser

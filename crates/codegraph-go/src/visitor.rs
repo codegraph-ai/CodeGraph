@@ -682,7 +682,7 @@ mod tests {
 
         let source = b"package main\nfunc greet(name string) string { return \"Hello\" }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -698,7 +698,7 @@ mod tests {
 
         let source = b"package main\ntype Person struct { Name string }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -714,7 +714,7 @@ mod tests {
 
         let source = b"package main\ntype Reader interface { Read() error }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -730,7 +730,7 @@ mod tests {
 
         let source = b"package main\nfunc (p Person) String() string { return \"\" }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -747,7 +747,7 @@ mod tests {
 
         let source = b"package main\nimport \"fmt\"";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -762,7 +762,7 @@ mod tests {
 
         let source = b"package main\ntype User struct {}\ntype Admin struct {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -780,7 +780,7 @@ mod tests {
 
         let source = b"package main\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"io\"\n)";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -803,7 +803,7 @@ mod tests {
 
         let source = b"package main\nimport f \"fmt\"";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -821,7 +821,7 @@ mod tests {
 
         let source = b"package main\nimport . \"fmt\"";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -839,7 +839,7 @@ mod tests {
 
         let source = b"package main\nimport _ \"database/sql\"";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -857,7 +857,7 @@ mod tests {
 
         let source = b"package main\nimport (\n\tf \"fmt\"\n\t. \"os\"\n\t_ \"encoding/json\"\n)";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -887,7 +887,7 @@ mod tests {
 
         let source = b"package main\nfunc caller() {\n\tcallee()\n\tfmt.Println(\"hello\")\n}\nfunc callee() {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -906,7 +906,7 @@ mod tests {
 
         let source = b"package main\ntype Foo struct{}\nfunc (f Foo) Method() {\n\thelper()\n}\nfunc helper() {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -923,7 +923,7 @@ mod tests {
 
         let source = b"package main\nfunc standalone() {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -938,7 +938,7 @@ mod tests {
 
         let source = b"package main\nfunc add(a int, b int) int { return a + b }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -959,7 +959,7 @@ mod tests {
 
         let source = b"package main\nfunc sum(nums ...int) int { return 0 }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -980,7 +980,7 @@ mod tests {
 
         let source = b"package main\nfunc divide(a, b float64) (float64, error) { return 0, nil }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1003,7 +1003,7 @@ mod tests {
 
         let source = b"package main\ntype Foo struct{}\nfunc (f *Foo) Bar() string { return \"\" }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1024,7 +1024,7 @@ mod tests {
         // A function with no branches — CC should be 1
         let source = b"package main\nfunc simple(x int) int { return x + 1 }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1047,7 +1047,7 @@ mod tests {
         // if adds 1 branch, else adds 1 branch, for adds 1 loop → CC = 1 + 3 = 4
         let source = b"package main\nfunc process(n int) int {\n\tif n > 0 {\n\t\treturn n\n\t} else {\n\t\treturn -n\n\t}\n\tfor i := 0; i < n; i++ {}\n\treturn 0\n}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1089,7 +1089,7 @@ func handle(x int, ch chan int) {
     }
 }"#;
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1114,7 +1114,7 @@ func handle(x int, ch chan int) {
         let source =
             b"package main\ntype Config struct{}\nfunc setup(cfg Config) error { return nil }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1145,7 +1145,7 @@ func handle(x int, ch chan int) {
         let source =
             b"package main\ntype Response struct{}\nfunc fetch() Response { return Response{} }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1171,7 +1171,7 @@ func handle(x int, ch chan int) {
         let source =
             b"package main\ntype Foo struct{}\ntype Bar struct{}\nfunc (f Foo) Do(b Bar) {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1196,7 +1196,7 @@ func handle(x int, ch chan int) {
 
         let source = b"package main\ntype Node struct{}\nfunc process(n *Node) *Node { return n }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1220,7 +1220,7 @@ func handle(x int, ch chan int) {
 
         let source = b"package main\nfunc add(a int, b int) int { return a + b }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1240,7 +1240,7 @@ func handle(x int, ch chan int) {
         // && and || each add a logical operator count
         let source = b"package main\nfunc check(a, b, c bool) bool { return a && b || c }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::language()).unwrap();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);

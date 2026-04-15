@@ -18,7 +18,8 @@ codegraph-parser-api.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
-tree-sitter = "0.22"
+tree-sitter = "0.25"
+tree-sitter-language = "0.1"
 
 [build-dependencies]
 cc = "1.0"

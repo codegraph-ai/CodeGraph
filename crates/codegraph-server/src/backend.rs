@@ -347,8 +347,8 @@ impl CodeGraphBackend {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
-        let mut rocks = RocksDBBackend::open(&db_path)
-            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        let mut rocks =
+            RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
 
         let registry_value = serde_json::json!({
             "slug": slug,
@@ -362,7 +362,10 @@ impl CodeGraphBackend {
         });
         let registry_key = format!("_registry:{slug}");
         rocks
-            .put(registry_key.as_bytes(), registry_value.to_string().as_bytes())
+            .put(
+                registry_key.as_bytes(),
+                registry_value.to_string().as_bytes(),
+            )
             .map_err(|e| format!("Failed to write registry: {e}"))?;
 
         let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
@@ -1112,7 +1115,10 @@ impl LanguageServer for CodeGraphBackend {
                                 tracing::warn!("Failed to persist symbol vectors: {}", e);
                             }
                             self.client
-                                .log_message(MessageType::INFO, "✓ Semantic symbol search initialized")
+                                .log_message(
+                                    MessageType::INFO,
+                                    "✓ Semantic symbol search initialized",
+                                )
                                 .await;
                         }
                     }
@@ -1660,7 +1666,9 @@ impl LanguageServer for CodeGraphBackend {
         // Remap incoming command prefix to "codegraph." for internal dispatch.
         // e.g., "stellarion.getDependencyGraph" → "codegraph.getDependencyGraph"
         let canonical_command = if self.command_prefix != "codegraph" {
-            params.command.replacen(&self.command_prefix, "codegraph", 1)
+            params
+                .command
+                .replacen(&self.command_prefix, "codegraph", 1)
         } else {
             params.command.clone()
         };
@@ -2151,12 +2159,9 @@ impl LanguageServer for CodeGraphBackend {
                 let args = params.arguments.first().ok_or_else(|| {
                     tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")
                 })?;
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        tower_lsp::jsonrpc::Error::invalid_params("path parameter is required")
-                    })?;
+                let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                    tower_lsp::jsonrpc::Error::invalid_params("path parameter is required")
+                })?;
                 let embed = args.get("embed").and_then(|v| v.as_bool()).unwrap_or(false);
                 let dir = std::path::PathBuf::from(path);
 
