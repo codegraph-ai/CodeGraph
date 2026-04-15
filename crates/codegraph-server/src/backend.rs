@@ -1759,6 +1759,12 @@ impl LanguageServer for CodeGraphBackend {
 
                 let total_indexed = result.total_files;
 
+                // Rebuild symbol index from graph (cleared above)
+                {
+                    let graph = self.graph.read().await;
+                    self.symbol_index.rebuild_from_graph(&graph);
+                }
+
                 // Rebuild AI query engine indexes
                 self.query_engine.build_indexes().await;
                 self.query_engine.build_symbol_vectors().await;
@@ -2096,21 +2102,35 @@ impl LanguageServer for CodeGraphBackend {
                 let args = params.arguments.first().ok_or_else(|| {
                     tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")
                 })?;
-                let files: Vec<std::path::PathBuf> = args
+                // Accept both "files" and "paths" parameter names
+                let raw_files: Vec<String> = args
                     .get("files")
+                    .or_else(|| args.get("paths"))
                     .and_then(|v| v.as_array())
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|v| v.as_str().map(std::path::PathBuf::from))
+                            .filter_map(|v| v.as_str().map(String::from))
                             .collect()
                     })
                     .unwrap_or_default();
 
-                if files.is_empty() {
+                if raw_files.is_empty() {
                     return Err(tower_lsp::jsonrpc::Error::invalid_params(
                         "files parameter is required (array of file paths)",
                     ));
                 }
+
+                // Convert file:// URIs to paths
+                let files: Vec<std::path::PathBuf> = raw_files
+                    .iter()
+                    .map(|s| {
+                        if let Ok(url) = tower_lsp::lsp_types::Url::parse(s) {
+                            url.to_file_path().unwrap_or_else(|_| std::path::PathBuf::from(s))
+                        } else {
+                            std::path::PathBuf::from(s)
+                        }
+                    })
+                    .collect();
 
                 let mut indexed = 0usize;
                 let mut failed = 0usize;
