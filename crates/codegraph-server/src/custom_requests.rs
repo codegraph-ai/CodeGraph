@@ -145,6 +145,8 @@ impl CodeGraphBackend {
                 serde_json::to_value(response).map_err(|_| Error::internal_error())
             }
 
+            "codegraph/indexFiles" => self.handle_index_files(params).await,
+
             "codegraph/indexDirectory" => self.handle_index_directory(params).await,
 
             "codegraph/updateConfiguration" => self.handle_update_configuration(params).await,
@@ -206,14 +208,83 @@ impl CodeGraphBackend {
         Ok(total_indexed)
     }
 
-    async fn handle_index_directory(&self, params: Value) -> Result<Value> {
-        let paths: Vec<String> = params
-            .get("paths")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    async fn handle_index_files(&self, params: Value) -> Result<Value> {
+        // Accept both "files" (VS Code LM tools) and "paths" (MCP convention)
+        let files: Vec<String> = params
+            .get("files")
+            .or_else(|| params.get("paths"))
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
             .unwrap_or_default();
 
+        if files.is_empty() {
+            return Err(Error::invalid_params(
+                "files parameter is required (array of file paths)",
+            ));
+        }
+
+        tracing::info!("Indexing {} files", files.len());
+        let mut indexed = 0usize;
+        let mut failed = 0usize;
+
+        for path_str in &files {
+            let path = std::path::PathBuf::from(path_str);
+            if !path.exists() {
+                tracing::warn!("Skipping non-existent file: {}", path_str);
+                failed += 1;
+                continue;
+            }
+            // Remove old nodes before re-parsing
+            {
+                let mut graph = self.graph.write().await;
+                if let Ok(old_nodes) = graph
+                    .query()
+                    .property("path", path.to_string_lossy().as_ref())
+                    .execute()
+                {
+                    for old_id in old_nodes {
+                        let _ = graph.delete_node(old_id);
+                    }
+                }
+            }
+            match self.indexer.index_file(&self.graph, &path).await {
+                Ok(_) => indexed += 1,
+                Err(e) => {
+                    tracing::warn!("Failed to index {:?}: {}", path, e);
+                    failed += 1;
+                }
+            }
+        }
+
+        // Resolve cross-file imports
+        {
+            let mut graph = self.graph.write().await;
+            GraphUpdater::resolve_cross_file_imports(&mut graph);
+        }
+        self.query_engine.build_indexes().await;
+
+        Ok(serde_json::json!({
+            "status": "success",
+            "files_indexed": indexed,
+            "files_failed": failed,
+            "message": format!("Indexed {} files ({} failed)", indexed, failed)
+        }))
+    }
+
+    async fn handle_index_directory(&self, params: Value) -> Result<Value> {
+        // Accept "path" (singular string) or "paths" (array)
+        let paths: Vec<String> = if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+            vec![path.to_string()]
+        } else {
+            params
+                .get("paths")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default()
+        };
+
         if paths.is_empty() {
-            return Err(Error::invalid_params("Missing or empty 'paths' array"));
+            return Err(Error::invalid_params(
+                "path parameter is required (string or array of paths)",
+            ));
         }
 
         tracing::info!("Indexing directories: {:?}", paths);
