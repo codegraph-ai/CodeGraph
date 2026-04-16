@@ -634,6 +634,12 @@ impl McpBackend {
                 }
             }
 
+            // Clear hash so index_file doesn't skip (we already deleted old nodes above)
+            {
+                let mut state = self.index_state.lock().await;
+                state.remove(path);
+            }
+
             match self.indexer.index_file(&self.graph, path).await {
                 Ok(_) => {
                     tracing::info!("Indexed: {:?}", path);
