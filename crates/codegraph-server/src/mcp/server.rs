@@ -546,31 +546,43 @@ impl McpBackend {
             if let Some(engine) = self.memory_manager.get_vector_engine().await {
                 self.query_engine.set_vector_engine(engine).await;
 
-                // Load persisted vectors if no files changed; rebuild otherwise
-                let loaded = if result.files_parsed == 0 {
-                    self.query_engine
-                        .load_symbol_vectors(&self.project_slug)
-                        .await
-                } else {
-                    0
-                };
+                // Load persisted vectors synchronously (fast — just reads from RocksDB)
+                let loaded = self
+                    .query_engine
+                    .load_symbol_vectors(&self.project_slug)
+                    .await;
 
-                if loaded > 0 {
+                if loaded > 0 && result.files_parsed == 0 {
                     tracing::info!(
                         "Loaded {} persisted symbol vectors — semantic search ready",
                         loaded
                     );
                 } else {
-                    tracing::info!("Building semantic search index... This may take a moment.");
-                    self.query_engine.build_symbol_vectors().await;
-                    if let Err(e) = self
-                        .query_engine
-                        .save_symbol_vectors(&self.project_slug)
-                        .await
-                    {
-                        tracing::warn!("Failed to persist symbol vectors: {}", e);
-                    }
-                    tracing::info!("Semantic search index ready");
+                    // Embeddings need building — do it in background so server can
+                    // start handling requests immediately. Graph-based tools (34 of 37)
+                    // work without embeddings. Only symbol_search semantic matching,
+                    // find_similar, find_duplicates, cluster_symbols, compare_symbols
+                    // are degraded until embeddings finish.
+                    let query_engine = Arc::clone(&self.query_engine);
+                    let slug = self.project_slug.clone();
+                    let files_changed = result.files_parsed;
+                    tracing::info!(
+                        "Starting background embedding generation ({} symbols)...",
+                        self.query_engine.symbol_count().await
+                    );
+                    tokio::spawn(async move {
+                        if loaded > 0 && files_changed > 0 {
+                            // Have persisted vectors + some files changed
+                            query_engine.embed_missing_symbols().await;
+                        } else {
+                            // No persisted vectors — full build
+                            query_engine.build_symbol_vectors().await;
+                        }
+                        if let Err(e) = query_engine.save_symbol_vectors(&slug).await {
+                            tracing::warn!("Failed to persist symbol vectors: {}", e);
+                        }
+                        tracing::info!("Background embedding generation complete — semantic search ready");
+                    });
                 }
             }
         } else {

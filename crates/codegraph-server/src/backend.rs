@@ -1106,38 +1106,29 @@ impl LanguageServer for CodeGraphBackend {
                                     format!("✓ Loaded {} persisted symbol vectors", loaded),
                                 )
                                 .await;
-                        } else if loaded > 0 && files_parsed > 0 {
-                            // Loaded persisted vectors but some files changed.
-                            // Embed only symbols that don't have vectors yet.
-                            tracing::info!(
-                                "Loaded {} persisted vectors, embedding new/changed symbols",
-                                loaded
-                            );
-                            self.query_engine.embed_missing_symbols().await;
-                            if let Err(e) = self.query_engine.save_symbol_vectors(&slug).await {
-                                tracing::warn!("Failed to persist updated vectors: {}", e);
-                            }
-                            self.client
-                                .log_message(
-                                    MessageType::INFO,
-                                    format!(
-                                        "✓ Updated embeddings ({} files changed)",
-                                        files_parsed
-                                    ),
-                                )
-                                .await;
                         } else {
-                            // No persisted vectors — full build
-                            self.query_engine.build_symbol_vectors().await;
-                            if let Err(e) = self.query_engine.save_symbol_vectors(&slug).await {
-                                tracing::warn!("Failed to persist symbol vectors: {}", e);
-                            }
+                            // Embeddings need building — do it in background
+                            let query_engine = Arc::clone(&self.query_engine);
+                            let slug_bg = slug.clone();
+                            let had_vectors = loaded > 0;
+                            tracing::info!("Starting background embedding generation...");
                             self.client
                                 .log_message(
                                     MessageType::INFO,
-                                    "✓ Semantic symbol search initialized",
+                                    "Building embeddings in background — tools available immediately",
                                 )
                                 .await;
+                            tokio::spawn(async move {
+                                if had_vectors {
+                                    query_engine.embed_missing_symbols().await;
+                                } else {
+                                    query_engine.build_symbol_vectors().await;
+                                }
+                                if let Err(e) = query_engine.save_symbol_vectors(&slug_bg).await {
+                                    tracing::warn!("Failed to persist symbol vectors: {}", e);
+                                }
+                                tracing::info!("Background embedding generation complete");
+                            });
                         }
                     }
                 }

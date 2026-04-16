@@ -125,6 +125,20 @@ impl QueryEngine {
         }
     }
 
+    /// Number of symbols that have been indexed (for logging).
+    pub async fn symbol_count(&self) -> usize {
+        let graph = self.graph.read().await;
+        graph
+            .iter_nodes()
+            .filter(|(_, n)| {
+                matches!(
+                    n.node_type,
+                    NodeType::Function | NodeType::Class | NodeType::Variable | NodeType::Interface | NodeType::Type
+                )
+            })
+            .count()
+    }
+
     /// Build indexes from the current graph state.
     /// Should be called after initial parsing or reindexing.
     pub async fn build_indexes(&self) {
