@@ -209,6 +209,9 @@ pub struct SymbolSearchResult {
     pub total_matches: usize,
     /// Query execution time
     pub query_time_ms: u64,
+    /// Embedding status message (set when embeddings are still building)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_status: Option<String>,
 }
 
 /// A pair of similar/duplicate functions.

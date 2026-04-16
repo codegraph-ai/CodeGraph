@@ -432,12 +432,52 @@ impl QueryEngine {
                 .map_err(|e| format!("Failed to write vector: {e}"))?;
         }
 
+        // Write embedding status
+        namespaced
+            .put(b"embedding_status", format!("complete:{}", vecs.len()).as_bytes())
+            .map_err(|e| format!("Failed to write embedding status: {e}"))?;
+
         tracing::info!(
             "[QueryEngine] Saved {} symbol vectors to graph.db (namespace: {})",
             vecs.len(),
             slug
         );
         Ok(())
+    }
+
+    /// Check if embeddings are complete (persisted status in RocksDB).
+    /// Returns (is_complete, count) or (false, 0) if no status found.
+    pub fn check_embedding_status(slug: &str) -> (bool, usize) {
+        use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
+
+        let db_path = match crate::memory::shared_graph_db_path() {
+            Ok(p) if p.exists() => p,
+            _ => return (false, 0),
+        };
+
+        let rocks = match RocksDBBackend::open(&db_path) {
+            Ok(r) => r,
+            Err(_) => return (false, 0),
+        };
+        let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
+
+        match namespaced.get(b"embedding_status") {
+            Ok(Some(value)) => {
+                let status = String::from_utf8_lossy(&value);
+                if let Some(count_str) = status.strip_prefix("complete:") {
+                    let count = count_str.parse::<usize>().unwrap_or(0);
+                    (true, count)
+                } else {
+                    (false, 0)
+                }
+            }
+            _ => (false, 0),
+        }
+    }
+
+    /// Check if embeddings are ready (either loaded from persistence or built in background).
+    pub fn are_embeddings_ready(&self) -> bool {
+        !self.symbol_vectors.try_read().map(|v| v.is_empty()).unwrap_or(true)
     }
 
     /// Load persisted symbol vectors from RocksDB.
@@ -772,10 +812,17 @@ impl QueryEngine {
 
         let query_time_ms = start.elapsed().as_millis() as u64;
 
+        let embedding_status = if !self.are_embeddings_ready() {
+            Some("Embeddings are building in the background. Semantic matching is temporarily unavailable — results are from name/text search only.".to_string())
+        } else {
+            None
+        };
+
         SymbolSearchResult {
             results: scored_results,
             total_matches,
             query_time_ms,
+            embedding_status,
         }
     }
 
