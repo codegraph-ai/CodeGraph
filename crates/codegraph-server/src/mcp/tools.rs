@@ -12,7 +12,7 @@ use std::collections::HashMap;
 /// Get all available CodeGraph tools
 pub fn get_all_tools() -> Vec<Tool> {
     vec![
-        // Analysis Tools (9)
+        // Analysis Tools (11)
         get_dependency_graph_tool(),
         get_call_graph_tool(),
         analyze_impact_tool(),
@@ -22,12 +22,17 @@ pub fn get_all_tools() -> Vec<Tool> {
         find_related_tests_tool(),
         get_symbol_info_tool(),
         analyze_complexity_tool(),
-        // Search Tools (5)
+        get_module_summary_tool(),
+        find_circular_deps_tool(),
+        // Search Tools (8)
         symbol_search_tool(),
         find_by_imports_tool(),
         find_entry_points_tool(),
+        find_hot_paths_tool(),
         traverse_graph_tool(),
         find_by_signature_tool(),
+        search_by_pattern_tool(),
+        search_by_error_tool(),
         // Navigation Tools (3)
         get_callers_tool(),
         get_callees_tool(),
@@ -40,6 +45,8 @@ pub fn get_all_tools() -> Vec<Tool> {
         memory_invalidate_tool(),
         memory_list_tool(),
         memory_stats_tool(),
+        // Dead Import Analysis (1)
+        find_dead_imports_tool(),
         // Ops Struct Tools (1)
         find_implementors_tool(),
         // Admin Tools (3)
@@ -421,6 +428,31 @@ fn analyze_complexity_tool() -> Tool {
             schema_type: "object".to_string(),
             properties: Some(properties),
             required: Some(vec!["uri".to_string()]),
+        },
+    }
+}
+
+fn get_module_summary_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "path".to_string(),
+        string_prop("Absolute directory path to summarize (e.g. /workspace/src/auth). All graph nodes whose file path starts with this prefix are included."),
+    );
+    properties.insert(
+        "top_n".to_string(),
+        number_prop(
+            "How many of the most-complex functions to include in the result (default: 5)",
+            Some(5.0),
+        ),
+    );
+
+    Tool {
+        name: "codegraph_get_module_summary".to_string(),
+        description: Some("Get a high-level summary of a module or directory — file count, function count, language breakdown, top complex functions, and external dependencies. Great for understanding unfamiliar code areas.".to_string()),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: Some(vec!["path".to_string()]),
         },
     }
 }
@@ -1095,6 +1127,179 @@ fn find_implementors_tool() -> Tool {
     }
 }
 
+fn find_circular_deps_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "max_cycle_length".to_string(),
+        number_prop(
+            "Maximum number of files in a reported cycle (default: 10). Cycles longer than this are omitted.",
+            Some(10.0),
+        ),
+    );
+    properties.insert(
+        "compact".to_string(),
+        boolean_prop(
+            "Return a condensed summary (cycle count only) without the full file lists",
+            false,
+        ),
+    );
+
+    Tool {
+        name: "codegraph_find_circular_deps".to_string(),
+        description: Some("Detect circular import/dependency chains in the codebase. USE WHEN: auditing architecture health, finding import cycles that prevent tree-shaking or module splitting, or diagnosing build/bundler errors caused by circular references. Returns each cycle as an ordered list of file paths with the originating file repeated at the end (e.g. [\"a.rs\", \"b.rs\", \"a.rs\"]). Self-imports are also detected. Use max_cycle_length to cap large cycles. Use compact=true for a quick yes/no answer with counts only.".to_string()),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: None,
+        },
+    }
+}
+
+fn find_dead_imports_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "uri".to_string(),
+        string_prop(
+            "File URI to restrict analysis to a single file (e.g. file:///path/to/foo.rs). \
+             Omit to scan the entire indexed workspace.",
+        ),
+    );
+    properties.insert(
+        "limit".to_string(),
+        number_prop("Maximum number of dead imports to return (default: 100)", Some(100.0)),
+    );
+
+    Tool {
+        name: "codegraph_find_dead_imports".to_string(),
+        description: Some(
+            "Find unused imports — modules imported but never referenced by any function in the \
+             importing file. USE WHEN: cleaning up import lists, reducing bundle size, or auditing \
+             a file before refactoring. Returns dead_imports (confirmed unused, module is in the \
+             graph), unresolved_imports (external/third-party modules that could not be verified), \
+             total_imports, and dead_count. Provide uri to restrict to one file; omit for a \
+             workspace-wide scan. LIMITATIONS: macro-generated call sites and dynamic dispatch \
+             may cause false positives."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: None,
+        },
+    }
+}
+
+fn find_hot_paths_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "limit".to_string(),
+        number_prop(
+            "Maximum number of functions to return, sorted by caller score (default: 20)",
+            Some(20.0),
+        ),
+    );
+
+    Tool {
+        name: "codegraph_find_hot_paths".to_string(),
+        description: Some("Find the most-called functions in the codebase, ranked by caller count. USE WHEN: identifying performance bottlenecks, understanding which functions are central to your codebase, or deciding where to focus optimisation or review effort. Scores each function by incoming Calls edges: direct callers count 1.0, depth-2 callers 0.5, depth-3 callers 0.25. Returns an array of functions with name, file path, line range, direct_callers, transitive_callers, score, and signature. Default limit 20.".to_string()),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: None,
+        },
+    }
+}
+
+fn search_by_pattern_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "pattern".to_string(),
+        string_prop("Regex pattern to search for (e.g. 'unwrap\\(\\)', 'TODO', 'SELECT .* FROM')"),
+    );
+    properties.insert(
+        "scope".to_string(),
+        enum_prop(
+            "Which node property to search: 'function_body' (body_prefix), 'signature', 'name', 'docstring', or 'any' (all, default)",
+            vec!["any", "function_body", "signature", "name", "docstring"],
+            Some("any"),
+        ),
+    );
+    properties.insert(
+        "node_type".to_string(),
+        enum_prop(
+            "Filter to a specific node kind: 'function', 'class', or 'any' (all, default)",
+            vec!["any", "function", "class"],
+            Some("any"),
+        ),
+    );
+    properties.insert(
+        "limit".to_string(),
+        number_prop("Maximum number of matches to return (default: 50)", Some(50.0)),
+    );
+
+    Tool {
+        name: "codegraph_search_by_pattern".to_string(),
+        description: Some(
+            "Search code using regex patterns across function bodies, signatures, names, and \
+             docstrings. USE WHEN: finding specific code patterns (e.g., 'unwrap\\(\\)' calls, \
+             SQL queries, error handling patterns). More precise than symbol_search when you know \
+             the exact pattern. Returns matches with node_id, name, kind, path, line range, \
+             matched_in (which scope matched), matched_text (snippet up to 200 chars), and \
+             signature."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: Some(vec!["pattern".to_string()]),
+        },
+    }
+}
+
+fn search_by_error_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "error_type".to_string(),
+        string_prop(
+            "Specific error type to search for (e.g. \"IoError\", \"ValueError\"). Omit to match any error pattern.",
+        ),
+    );
+    properties.insert(
+        "mode".to_string(),
+        enum_prop(
+            "Which functions to return: \"throws\" (produce errors), \"catches\" (handle errors), \"any\" (both). Default: \"any\".",
+            vec!["throws", "catches", "any"],
+            Some("any"),
+        ),
+    );
+    properties.insert(
+        "limit".to_string(),
+        number_prop(
+            "Maximum number of functions to return (default: 50)",
+            Some(50.0),
+        ),
+    );
+
+    Tool {
+        name: "codegraph_search_by_error".to_string(),
+        description: Some(
+            "Find functions that throw, catch, or handle specific error types. USE WHEN: \
+             understanding error flow, finding where exceptions originate, or auditing error \
+             handling coverage. Scans function body_prefix and signature for language-specific \
+             error patterns (Rust: Err(/panic!/anyhow, Python: raise/except, JS/TS: throw/catch, \
+             Go: errors.New/if err != nil, Java/C#: throw/catch). Optionally filter by a specific \
+             error type string and by role (throws vs catches). Returns functions with matched \
+             error_patterns and error_role (\"throws\", \"catches\", or \"both\")."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1102,14 +1307,14 @@ mod tests {
     #[test]
     fn test_get_all_tools_count() {
         let tools = get_all_tools();
-        // Analysis: 9, Search: 5, Navigation: 3, Memory: 7, Ops: 1, Admin: 3 = 28 community tools
+        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3 = 34 community tools
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
         assert_eq!(
             tools.len(),
-            28,
-            "Expected 28 community tools, got {}",
+            34,
+            "Expected 34 community tools, got {}",
             tools.len()
         );
     }

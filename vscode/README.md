@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **39 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **31 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
+CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **45 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **31 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
 
 ## Quick Start
 
@@ -68,9 +68,9 @@ Built-in exclusions (always skipped): `node_modules`, `target`, `dist`, `build`,
 
 ---
 
-## Tools (28)
+## Tools (34 community + 11 pro)
 
-### Code Analysis (5)
+### Code Analysis (11)
 
 | Tool | What it does |
 |------|-------------|
@@ -79,6 +79,12 @@ Built-in exclusions (always skipped): `node_modules`, `target`, `dist`, `build`,
 | `get_curated_context` | Cross-codebase context for a natural language query ("how does auth work?") |
 | `analyze_impact` | Blast radius prediction — what breaks if you modify, delete, or rename |
 | `analyze_complexity` | Cyclomatic complexity with breakdown (branches, loops, nesting, exceptions, early returns) |
+| `find_circular_deps` | Detect circular import/dependency chains across files |
+| `find_hot_paths` | Most-called functions ranked by transitive caller count |
+| `find_dead_imports` | Find unused imports — modules imported but never referenced |
+| `get_module_summary` | High-level summary of a directory: file count, functions, language breakdown, top complex functions |
+| `search_by_pattern` | Regex search across function bodies, signatures, names, and docstrings |
+| `search_by_error` | Find functions that throw, catch, or handle specific error types |
 
 ### Code Navigation (13)
 

@@ -1212,6 +1212,21 @@ impl McpServer {
                 Ok(serde_json::to_value(deduped).map_err(|e| e.to_string())?)
             }
 
+            "codegraph_find_hot_paths" => {
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(20);
+
+                let result = {
+                    let graph = self.backend.graph.read().await;
+                    crate::domain::hot_paths::find_hot_paths(&graph, limit)
+                };
+
+                Ok(serde_json::to_value(&result).map_err(|e| e.to_string())?)
+            }
+
             "codegraph_find_by_imports" => {
                 let module_name = args
                     .get("moduleName")
@@ -2666,6 +2681,32 @@ impl McpServer {
                 }))
             }
 
+            // ==================== Circular Dependencies ====================
+            "codegraph_find_circular_deps" => {
+                let max_cycle_length = args
+                    .get("max_cycle_length")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(10);
+                let compact = args
+                    .get("compact")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                let graph = self.backend.graph.read().await;
+                let result =
+                    crate::domain::circular_deps::find_circular_deps(&graph, max_cycle_length);
+
+                if compact {
+                    Ok(serde_json::json!({
+                        "has_circular_deps": result.has_circular_deps,
+                        "total_cycles": result.total_cycles,
+                    }))
+                } else {
+                    Ok(serde_json::to_value(&result).map_err(|e| e.to_string())?)
+                }
+            }
+
             // ==================== Find Implementors ====================
             "codegraph_find_implementors" => {
                 let struct_type = args.get("structType").and_then(|v| v.as_str());
@@ -2689,6 +2730,136 @@ impl McpServer {
                         "field_name": field_name,
                     }
                 }))
+            }
+
+            // ==================== Module Summary ====================
+            "codegraph_get_module_summary" => {
+                let directory = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing 'path' parameter")?;
+                let top_n = args
+                    .get("top_n")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(5);
+
+                let graph = self.backend.graph.read().await;
+                let result = crate::domain::module_summary::get_module_summary(
+                    &graph, directory, top_n,
+                );
+
+                Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
+            }
+
+            // ==================== Dead Import Analysis ====================
+            "codegraph_find_dead_imports" => {
+                let file_path: Option<String> = args
+                    .get("uri")
+                    .and_then(|v| v.as_str())
+                    .and_then(|uri| tower_lsp::lsp_types::Url::parse(uri).ok())
+                    .and_then(|url| url.to_file_path().ok())
+                    .map(|p| p.to_string_lossy().to_string());
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100) as usize;
+
+                let typed_result = {
+                    let graph = self.backend.graph.read().await;
+                    crate::domain::dead_imports::find_dead_imports(
+                        &graph,
+                        file_path.as_deref(),
+                    )
+                };
+
+                let dead_count = typed_result.dead_count;
+                let total_imports = typed_result.total_imports;
+                let unresolved_count = typed_result.unresolved_imports.len();
+                let dead_imports: Vec<_> = typed_result
+                    .dead_imports
+                    .into_iter()
+                    .take(limit)
+                    .collect();
+
+                Ok(serde_json::json!({
+                    "dead_imports": dead_imports,
+                    "unresolved_imports": typed_result.unresolved_imports,
+                    "total_imports": total_imports,
+                    "dead_count": dead_count,
+                    "unresolved_count": unresolved_count,
+                    "scanned_file": file_path,
+                }))
+            }
+
+            "codegraph_search_by_pattern" => {
+                let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+                    Some(p) => p.to_string(),
+                    None => {
+                        return Ok(serde_json::json!({
+                            "error": "Missing required argument: pattern"
+                        }))
+                    }
+                };
+
+                let scope = args
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                let node_type = args
+                    .get("node_type")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(50);
+
+                let result = {
+                    let graph = self.backend.graph.read().await;
+                    crate::domain::pattern_search::search_by_pattern(
+                        &graph,
+                        &pattern,
+                        scope.as_deref(),
+                        node_type.as_deref(),
+                        limit,
+                    )
+                };
+
+                Ok(serde_json::to_value(&result).map_err(|e| e.to_string())?)
+            }
+
+            "codegraph_search_by_error" => {
+                let error_type = args
+                    .get("error_type")
+                    .or_else(|| args.get("errorType"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let mode = args
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("any")
+                    .to_string();
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(50);
+
+                let result = {
+                    let graph = self.backend.graph.read().await;
+                    crate::domain::error_search::search_by_error(
+                        &graph,
+                        error_type.as_deref(),
+                        &mode,
+                        limit,
+                    )
+                };
+
+                Ok(serde_json::to_value(&result).map_err(|e| e.to_string())?)
             }
 
             // ==================== Pro / Unknown Tool ====================

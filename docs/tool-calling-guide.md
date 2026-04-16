@@ -1,6 +1,6 @@
 # CodeGraph Tool Calling Guide
 
-Reference for calling all 39 CodeGraph MCP tools. Each tool is prefixed with `codegraph_` (e.g., `codegraph_symbol_search`).
+Reference for calling all 45 CodeGraph MCP tools (34 community + 11 pro). Each tool is prefixed with `codegraph_` (e.g., `codegraph_symbol_search`).
 
 ## Identifying Symbols
 
@@ -236,7 +236,7 @@ Cross-codebase context for a natural language query.
 
 ---
 
-## Analysis (3 tools)
+## Analysis (7 tools)
 
 ### analyze_complexity
 
@@ -271,6 +271,86 @@ Blast radius prediction. What breaks if you modify, delete, or rename?
 ```
 
 `changeType`: `modify`, `delete`, `rename`
+
+### find_circular_deps
+
+Detect circular import/dependency chains across the codebase.
+
+```json
+{
+  "max_cycle_length": 10,
+  "compact": false
+}
+```
+
+No required parameters. Returns all cycles found. Use `compact: true` for just the count.
+
+### find_hot_paths
+
+Find the most-called functions, ranked by transitive caller count.
+
+```json
+{
+  "limit": 20
+}
+```
+
+Score = direct callers + 0.5 * depth-2 callers + 0.25 * depth-3 callers.
+
+### find_dead_imports
+
+Find imports that are never referenced by any function in the importing file.
+
+```json
+{
+  "uri": "file:///path/to/file.rs",
+  "limit": 100
+}
+```
+
+Omit `uri` to scan all files. Returns `dead_imports` (in-graph but unused) and `unresolved_imports` (external/not indexed).
+
+### get_module_summary
+
+High-level summary of a directory: file count, function count, language breakdown, top complex functions.
+
+```json
+{
+  "path": "/absolute/path/to/module",
+  "top_n": 5
+}
+```
+
+### search_by_pattern
+
+Regex search across function bodies, signatures, names, and docstrings.
+
+```json
+{
+  "pattern": "unwrap\\(\\)",
+  "scope": "function_body",
+  "node_type": "function",
+  "limit": 50
+}
+```
+
+`scope`: `function_body`, `signature`, `name`, `docstring`, `any` (default)
+`node_type`: `function`, `class`, `any` (default)
+
+### search_by_error
+
+Find functions that throw, catch, or handle specific error types.
+
+```json
+{
+  "error_type": "IoError",
+  "mode": "throws",
+  "limit": 50
+}
+```
+
+`mode`: `throws` (raise/throw/Err/panic), `catches` (catch/except/?), `any` (default)
+Omit `error_type` to find all error-handling functions.
 
 ### analyze_coupling
 
