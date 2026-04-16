@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **45 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **31 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
+CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **45 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **37 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
 
 ## Quick Start
 
@@ -145,12 +145,14 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 
 | Category | Languages |
 |---|---|
-| **Systems** | C, C++, Rust, Zig |
-| **JVM** | Java, Kotlin, Scala, Groovy |
-| **Web/Scripting** | TypeScript/JS, Python, Ruby, PHP, Perl, Lua, Elixir |
+| **Systems** | C, C++, Rust, Zig, Objective-C |
+| **JVM** | Java, Kotlin, Scala, Groovy, Clojure |
+| **Web/Scripting** | TypeScript/JS, Python, Ruby, PHP, Perl, Lua, Elixir, Elm |
+| **Web/Style** | CSS |
 | **Mobile** | Swift, Dart |
-| **Functional** | Haskell, OCaml, Julia |
+| **Functional** | Haskell, OCaml, Julia, Erlang, Elm, Clojure |
 | **Enterprise** | C#, COBOL, Fortran, Go |
+| **Blockchain** | Solidity |
 | **Shell/Config** | Bash, HCL/Terraform, TOML, YAML |
 | **Hardware** | Verilog/SystemVerilog, Tcl |
 | **Data Science** | R, Julia |
@@ -171,7 +173,7 @@ MCP Client (Claude, Cursor, ...)        VS Code Extension
             ┌─────────────────────────────┐
             │       codegraph-server      │
             ├─────────────────────────────┤
-            │  31 tree-sitter parsers     │
+            │  37 tree-sitter parsers     │
             │  Semantic graph engine      │
             │  AI query engine (BM25)     │
             │  Memory layer (RocksDB)     │

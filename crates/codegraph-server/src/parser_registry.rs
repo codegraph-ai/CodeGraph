@@ -6,11 +6,15 @@
 use codegraph::CodeGraph;
 use codegraph_bash::BashParser;
 use codegraph_c::CParser;
+use codegraph_clojure::ClojureParser;
 use codegraph_cobol::CobolParser;
 use codegraph_cpp::CppParser;
+use codegraph_css::CssParser;
 use codegraph_csharp::CSharpParser;
 use codegraph_dart::DartParser;
 use codegraph_elixir::ElixirParser;
+use codegraph_elm::ElmParser;
+use codegraph_erlang::ErlangParser;
 use codegraph_fortran::FortranParser;
 use codegraph_go::GoParser;
 use codegraph_groovy::GroovyParser;
@@ -20,6 +24,7 @@ use codegraph_java::JavaParser;
 use codegraph_julia::JuliaParser;
 use codegraph_kotlin::KotlinParser;
 use codegraph_lua::LuaParser;
+use codegraph_objc::ObjcParser;
 use codegraph_ocaml::OcamlParser;
 use codegraph_parser_api::{CodeParser, FileInfo, ParserConfig, ParserError, ParserMetrics};
 use codegraph_perl::PerlParser;
@@ -29,6 +34,7 @@ use codegraph_r::RParser;
 use codegraph_ruby::RubyParser;
 use codegraph_rust::RustParser;
 use codegraph_scala::ScalaParser;
+use codegraph_solidity::SolidityParser;
 use codegraph_swift::SwiftParser;
 use codegraph_tcl::TclParser;
 use codegraph_toml::TomlParser;
@@ -43,11 +49,15 @@ use std::sync::Arc;
 pub struct ParserRegistry {
     bash: Arc<BashParser>,
     c: Arc<CParser>,
+    clojure: Arc<ClojureParser>,
     cobol: Arc<CobolParser>,
     cpp: Arc<CppParser>,
+    css: Arc<CssParser>,
     csharp: Arc<CSharpParser>,
     dart: Arc<DartParser>,
     elixir: Arc<ElixirParser>,
+    elm: Arc<ElmParser>,
+    erlang: Arc<ErlangParser>,
     fortran: Arc<FortranParser>,
     go: Arc<GoParser>,
     groovy: Arc<GroovyParser>,
@@ -57,6 +67,7 @@ pub struct ParserRegistry {
     julia: Arc<JuliaParser>,
     kotlin: Arc<KotlinParser>,
     lua: Arc<LuaParser>,
+    objc: Arc<ObjcParser>,
     ocaml: Arc<OcamlParser>,
     perl: Arc<PerlParser>,
     php: Arc<PhpParser>,
@@ -65,6 +76,7 @@ pub struct ParserRegistry {
     ruby: Arc<RubyParser>,
     rust: Arc<RustParser>,
     scala: Arc<ScalaParser>,
+    solidity: Arc<SolidityParser>,
     swift: Arc<SwiftParser>,
     tcl: Arc<TclParser>,
     toml: Arc<TomlParser>,
@@ -85,11 +97,15 @@ impl ParserRegistry {
         Self {
             bash: Arc::new(BashParser::with_config(config.clone())),
             c: Arc::new(CParser::with_config(config.clone())),
+            clojure: Arc::new(ClojureParser::with_config(config.clone())),
             cobol: Arc::new(CobolParser::with_config(config.clone())),
             cpp: Arc::new(CppParser::with_config(config.clone())),
+            css: Arc::new(CssParser::with_config(config.clone())),
             csharp: Arc::new(CSharpParser::with_config(config.clone())),
             dart: Arc::new(DartParser::with_config(config.clone())),
             elixir: Arc::new(ElixirParser::with_config(config.clone())),
+            elm: Arc::new(ElmParser::with_config(config.clone())),
+            erlang: Arc::new(ErlangParser::with_config(config.clone())),
             fortran: Arc::new(FortranParser::with_config(config.clone())),
             go: Arc::new(GoParser::with_config(config.clone())),
             groovy: Arc::new(GroovyParser::with_config(config.clone())),
@@ -99,6 +115,7 @@ impl ParserRegistry {
             julia: Arc::new(JuliaParser::with_config(config.clone())),
             kotlin: Arc::new(KotlinParser::with_config(config.clone())),
             lua: Arc::new(LuaParser::with_config(config.clone())),
+            objc: Arc::new(ObjcParser::with_config(config.clone())),
             ocaml: Arc::new(OcamlParser::with_config(config.clone())),
             perl: Arc::new(PerlParser::with_config(config.clone())),
             php: Arc::new(PhpParser::with_config(config.clone())),
@@ -107,6 +124,7 @@ impl ParserRegistry {
             ruby: Arc::new(RubyParser::with_config(config.clone())),
             rust: Arc::new(RustParser::with_config(config.clone())),
             scala: Arc::new(ScalaParser::with_config(config.clone())),
+            solidity: Arc::new(SolidityParser::with_config(config.clone())),
             swift: Arc::new(SwiftParser::with_config(config.clone())),
             tcl: Arc::new(TclParser::with_config(config.clone())),
             toml: Arc::new(TomlParser::with_config(config.clone())),
@@ -122,11 +140,15 @@ impl ParserRegistry {
         match language.to_lowercase().as_str() {
             "bash" | "shell" | "sh" => Some(self.bash.clone()),
             "c" => Some(self.c.clone()),
+            "clojure" => Some(self.clojure.clone()),
             "cobol" => Some(self.cobol.clone()),
             "cpp" | "c++" => Some(self.cpp.clone()),
+            "css" => Some(self.css.clone()),
             "csharp" | "c#" => Some(self.csharp.clone()),
             "dart" => Some(self.dart.clone()),
             "elixir" => Some(self.elixir.clone()),
+            "elm" => Some(self.elm.clone()),
+            "erlang" => Some(self.erlang.clone()),
             "fortran" => Some(self.fortran.clone()),
             "go" => Some(self.go.clone()),
             "groovy" => Some(self.groovy.clone()),
@@ -136,6 +158,7 @@ impl ParserRegistry {
             "julia" => Some(self.julia.clone()),
             "kotlin" => Some(self.kotlin.clone()),
             "lua" => Some(self.lua.clone()),
+            "objc" | "objective-c" | "objectivec" => Some(self.objc.clone()),
             "ocaml" => Some(self.ocaml.clone()),
             "perl" => Some(self.perl.clone()),
             "php" => Some(self.php.clone()),
@@ -144,6 +167,7 @@ impl ParserRegistry {
             "ruby" => Some(self.ruby.clone()),
             "rust" => Some(self.rust.clone()),
             "scala" => Some(self.scala.clone()),
+            "solidity" | "sol" => Some(self.solidity.clone()),
             "swift" => Some(self.swift.clone()),
             "tcl" => Some(self.tcl.clone()),
             "toml" => Some(self.toml.clone()),
@@ -163,14 +187,18 @@ impl ParserRegistry {
     /// C++-specific extensions (`.hpp`, `.cc`, `.cxx`, `.hh`, `.hxx`) are
     /// only claimed by the C++ parser and resolve correctly.
     pub fn parser_for_path(&self, path: &Path) -> Option<Arc<dyn CodeParser>> {
-        let parsers: [Arc<dyn CodeParser>; 31] = [
+        let parsers: [Arc<dyn CodeParser>; 37] = [
             self.bash.clone(),
             self.c.clone(),
+            self.clojure.clone(),
             self.cobol.clone(),
             self.cpp.clone(),
+            self.css.clone(),
             self.csharp.clone(),
             self.dart.clone(),
             self.elixir.clone(),
+            self.elm.clone(),
+            self.erlang.clone(),
             self.fortran.clone(),
             self.go.clone(),
             self.groovy.clone(),
@@ -180,6 +208,7 @@ impl ParserRegistry {
             self.julia.clone(),
             self.kotlin.clone(),
             self.lua.clone(),
+            self.objc.clone(),
             self.ocaml.clone(),
             self.perl.clone(),
             self.php.clone(),
@@ -188,6 +217,7 @@ impl ParserRegistry {
             self.ruby.clone(),
             self.rust.clone(),
             self.scala.clone(),
+            self.solidity.clone(),
             self.swift.clone(),
             self.tcl.clone(),
             self.toml.clone(),
@@ -205,11 +235,15 @@ impl ParserRegistry {
         let mut extensions = Vec::new();
         extensions.extend(self.bash.file_extensions().iter().copied());
         extensions.extend(self.c.file_extensions().iter().copied());
+        extensions.extend(self.clojure.file_extensions().iter().copied());
         extensions.extend(self.cobol.file_extensions().iter().copied());
         extensions.extend(self.cpp.file_extensions().iter().copied());
+        extensions.extend(self.css.file_extensions().iter().copied());
         extensions.extend(self.csharp.file_extensions().iter().copied());
         extensions.extend(self.dart.file_extensions().iter().copied());
         extensions.extend(self.elixir.file_extensions().iter().copied());
+        extensions.extend(self.elm.file_extensions().iter().copied());
+        extensions.extend(self.erlang.file_extensions().iter().copied());
         extensions.extend(self.fortran.file_extensions().iter().copied());
         extensions.extend(self.go.file_extensions().iter().copied());
         extensions.extend(self.groovy.file_extensions().iter().copied());
@@ -219,6 +253,7 @@ impl ParserRegistry {
         extensions.extend(self.julia.file_extensions().iter().copied());
         extensions.extend(self.kotlin.file_extensions().iter().copied());
         extensions.extend(self.lua.file_extensions().iter().copied());
+        extensions.extend(self.objc.file_extensions().iter().copied());
         extensions.extend(self.ocaml.file_extensions().iter().copied());
         extensions.extend(self.perl.file_extensions().iter().copied());
         extensions.extend(self.php.file_extensions().iter().copied());
@@ -227,6 +262,7 @@ impl ParserRegistry {
         extensions.extend(self.ruby.file_extensions().iter().copied());
         extensions.extend(self.rust.file_extensions().iter().copied());
         extensions.extend(self.scala.file_extensions().iter().copied());
+        extensions.extend(self.solidity.file_extensions().iter().copied());
         extensions.extend(self.swift.file_extensions().iter().copied());
         extensions.extend(self.tcl.file_extensions().iter().copied());
         extensions.extend(self.toml.file_extensions().iter().copied());
@@ -242,11 +278,15 @@ impl ParserRegistry {
         vec![
             ("bash", self.bash.metrics()),
             ("c", self.c.metrics()),
+            ("clojure", self.clojure.metrics()),
             ("cobol", self.cobol.metrics()),
             ("cpp", self.cpp.metrics()),
+            ("css", self.css.metrics()),
             ("csharp", self.csharp.metrics()),
             ("dart", self.dart.metrics()),
             ("elixir", self.elixir.metrics()),
+            ("elm", self.elm.metrics()),
+            ("erlang", self.erlang.metrics()),
             ("fortran", self.fortran.metrics()),
             ("go", self.go.metrics()),
             ("groovy", self.groovy.metrics()),
@@ -256,6 +296,7 @@ impl ParserRegistry {
             ("julia", self.julia.metrics()),
             ("kotlin", self.kotlin.metrics()),
             ("lua", self.lua.metrics()),
+            ("objc", self.objc.metrics()),
             ("ocaml", self.ocaml.metrics()),
             ("perl", self.perl.metrics()),
             ("php", self.php.metrics()),
@@ -264,6 +305,7 @@ impl ParserRegistry {
             ("ruby", self.ruby.metrics()),
             ("rust", self.rust.metrics()),
             ("scala", self.scala.metrics()),
+            ("solidity", self.solidity.metrics()),
             ("swift", self.swift.metrics()),
             ("tcl", self.tcl.metrics()),
             ("toml", self.toml.metrics()),
@@ -319,16 +361,24 @@ impl ParserRegistry {
             Some("c")
         } else if self.bash.can_parse(path) {
             Some("bash")
+        } else if self.clojure.can_parse(path) {
+            Some("clojure")
         } else if self.cobol.can_parse(path) {
             Some("cobol")
         } else if self.cpp.can_parse(path) {
             Some("cpp")
         } else if self.csharp.can_parse(path) {
             Some("csharp")
+        } else if self.css.can_parse(path) {
+            Some("css")
         } else if self.dart.can_parse(path) {
             Some("dart")
         } else if self.elixir.can_parse(path) {
             Some("elixir")
+        } else if self.elm.can_parse(path) {
+            Some("elm")
+        } else if self.erlang.can_parse(path) {
+            Some("erlang")
         } else if self.fortran.can_parse(path) {
             Some("fortran")
         } else if self.go.can_parse(path) {
@@ -347,6 +397,8 @@ impl ParserRegistry {
             Some("kotlin")
         } else if self.lua.can_parse(path) {
             Some("lua")
+        } else if self.objc.can_parse(path) {
+            Some("objc")
         } else if self.ocaml.can_parse(path) {
             Some("ocaml")
         } else if self.perl.can_parse(path) {
@@ -363,6 +415,8 @@ impl ParserRegistry {
             Some("rust")
         } else if self.scala.can_parse(path) {
             Some("scala")
+        } else if self.solidity.can_parse(path) {
+            Some("solidity")
         } else if self.swift.can_parse(path) {
             Some("swift")
         } else if self.tcl.can_parse(path) {
@@ -630,15 +684,16 @@ mod tests {
     fn test_all_metrics() {
         let registry = ParserRegistry::new();
         let metrics = registry.all_metrics();
-        assert_eq!(metrics.len(), 31);
+        assert_eq!(metrics.len(), 37);
         let names: Vec<&str> = metrics.iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
             vec![
-                "bash", "c", "cobol", "cpp", "csharp", "dart", "elixir",
-                "fortran", "go", "groovy", "haskell", "hcl", "java", "julia",
-                "kotlin", "lua", "ocaml", "perl", "php", "python", "r", "ruby",
-                "rust", "scala", "swift", "tcl", "toml", "typescript", "verilog",
+                "bash", "c", "clojure", "cobol", "cpp", "css", "csharp",
+                "dart", "elixir", "elm", "erlang", "fortran", "go", "groovy",
+                "haskell", "hcl", "java", "julia", "kotlin", "lua", "objc",
+                "ocaml", "perl", "php", "python", "r", "ruby", "rust", "scala",
+                "solidity", "swift", "tcl", "toml", "typescript", "verilog",
                 "yaml", "zig",
             ]
         );

@@ -41,6 +41,12 @@ members = [
     "crates/codegraph-ocaml",
     "crates/codegraph-perl",
     "crates/codegraph-toml",
+    "crates/codegraph-css",
+    "crates/codegraph-objc",
+    "crates/codegraph-elm",
+    "crates/codegraph-clojure",
+    "crates/codegraph-solidity",
+    "crates/codegraph-erlang",
 
     # Memory layer
     "crates/codegraph-memory",
@@ -114,6 +120,12 @@ codegraph-yaml = { path = "crates/codegraph-yaml" }
 codegraph-ocaml = { path = "crates/codegraph-ocaml" }
 codegraph-perl = { path = "crates/codegraph-perl" }
 codegraph-toml = { path = "crates/codegraph-toml" }
+codegraph-css = { path = "crates/codegraph-css" }
+codegraph-objc = { path = "crates/codegraph-objc" }
+codegraph-elm = { path = "crates/codegraph-elm" }
+codegraph-clojure = { path = "crates/codegraph-clojure" }
+codegraph-solidity = { path = "crates/codegraph-solidity" }
+codegraph-erlang = { path = "crates/codegraph-erlang" }
 codegraph-memory = { path = "crates/codegraph-memory" }
 
 [profile.release]

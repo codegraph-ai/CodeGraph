@@ -70,6 +70,12 @@ codegraph-ocaml.workspace = true
 codegraph-perl.workspace = true
 codegraph-toml.workspace = true
 codegraph-yaml.workspace = true
+codegraph-clojure.workspace = true
+codegraph-css.workspace = true
+codegraph-elm.workspace = true
+codegraph-erlang.workspace = true
+codegraph-objc.workspace = true
+codegraph-solidity.workspace = true
 
 # Memory layer
 codegraph-memory.workspace = true

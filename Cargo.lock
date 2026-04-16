@@ -576,6 +576,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codegraph-clojure"
+version = "0.2.1"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-clojure",
+]
+
+[[package]]
 name = "codegraph-cobol"
 version = "0.1.0"
 dependencies = [
@@ -624,6 +639,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codegraph-css"
+version = "0.2.1"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-css",
+]
+
+[[package]]
 name = "codegraph-dart"
 version = "0.2.1"
 dependencies = [
@@ -652,6 +682,36 @@ dependencies = [
  "thiserror 1.0.69",
  "tree-sitter 0.25.10",
  "tree-sitter-elixir",
+]
+
+[[package]]
+name = "codegraph-elm"
+version = "0.2.1"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-elm",
+]
+
+[[package]]
+name = "codegraph-erlang"
+version = "0.2.1"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-erlang",
 ]
 
 [[package]]
@@ -824,6 +884,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codegraph-objc"
+version = "0.2.1"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-objc",
+]
+
+[[package]]
 name = "codegraph-ocaml"
 version = "0.1.0"
 dependencies = [
@@ -969,11 +1044,15 @@ dependencies = [
  "codegraph",
  "codegraph-bash",
  "codegraph-c",
+ "codegraph-clojure",
  "codegraph-cobol",
  "codegraph-cpp",
  "codegraph-csharp",
+ "codegraph-css",
  "codegraph-dart",
  "codegraph-elixir",
+ "codegraph-elm",
+ "codegraph-erlang",
  "codegraph-fortran",
  "codegraph-go",
  "codegraph-groovy",
@@ -984,6 +1063,7 @@ dependencies = [
  "codegraph-kotlin",
  "codegraph-lua",
  "codegraph-memory",
+ "codegraph-objc",
  "codegraph-ocaml",
  "codegraph-parser-api",
  "codegraph-perl",
@@ -993,6 +1073,7 @@ dependencies = [
  "codegraph-ruby",
  "codegraph-rust",
  "codegraph-scala",
+ "codegraph-solidity",
  "codegraph-swift",
  "codegraph-tcl",
  "codegraph-toml",
@@ -1014,6 +1095,21 @@ dependencies = [
  "tower-lsp",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "codegraph-solidity"
+version = "0.2.1"
+dependencies = [
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-solidity",
 ]
 
 [[package]]
@@ -4143,6 +4239,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-clojure"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4004884cc509449a1d78fa3e1f02b4e953d0a8065984445304795e72e885338c"
+dependencies = [
+ "cc",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-cpp"
 version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4153,10 +4260,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-css"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5cbc5e18f29a2c6d6435891f42569525cf95435a3e01c2f1947abcde178686f"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-elixir"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66dd064a762ed95bfc29857fa3cb7403bb1e5cb88112de0f6341b7e47284ba40"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-elm"
+version = "5.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23840259bfc74d3fc7638047002703bac8624f4969fd73226d7ed516a1b91e9c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-erlang"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2091cce4eda19c03d77928c608ac6617445a6a25691dde1e93ac0102467a6be"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -4259,6 +4396,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-objc"
+version = "3.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ca8bb556423fc176f0535e79d525f783a6684d3c9da81bf9d905303c129e1d2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-ocaml"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4313,6 +4460,16 @@ name = "tree-sitter-scala"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83079f50ea7d03e0faf6be6260ed97538e6df7349ec3cbcbf5771f7b38e3c8b7"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-solidity"
+version = "1.2.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4eacf8875b70879f0cb670c60b233ad0b68752d9e1474e6c3ef168eea8a90b25"
 dependencies = [
  "cc",
  "tree-sitter-language",

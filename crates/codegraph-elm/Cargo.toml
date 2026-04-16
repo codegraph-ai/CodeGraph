@@ -1,0 +1,28 @@
+# Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-elm"
+version = "0.2.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Elm parser for CodeGraph"
+
+[dependencies]
+codegraph.workspace = true
+codegraph-parser-api.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tree-sitter = "0.25"
+tree-sitter-elm = "5.9"
+rayon = "1.10"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.0"
+
+[lib]
+name = "codegraph_elm"
+path = "src/lib.rs"
