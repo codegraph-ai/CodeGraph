@@ -12,6 +12,7 @@ use codegraph_cpp::CppParser;
 use codegraph_css::CssParser;
 use codegraph_csharp::CSharpParser;
 use codegraph_dart::DartParser;
+use codegraph_dockerfile::DockerfileParser;
 use codegraph_elixir::ElixirParser;
 use codegraph_elm::ElmParser;
 use codegraph_erlang::ErlangParser;
@@ -55,6 +56,7 @@ pub struct ParserRegistry {
     css: Arc<CssParser>,
     csharp: Arc<CSharpParser>,
     dart: Arc<DartParser>,
+    dockerfile: Arc<DockerfileParser>,
     elixir: Arc<ElixirParser>,
     elm: Arc<ElmParser>,
     erlang: Arc<ErlangParser>,
@@ -103,6 +105,7 @@ impl ParserRegistry {
             css: Arc::new(CssParser::with_config(config.clone())),
             csharp: Arc::new(CSharpParser::with_config(config.clone())),
             dart: Arc::new(DartParser::with_config(config.clone())),
+            dockerfile: Arc::new(DockerfileParser::with_config(config.clone())),
             elixir: Arc::new(ElixirParser::with_config(config.clone())),
             elm: Arc::new(ElmParser::with_config(config.clone())),
             erlang: Arc::new(ErlangParser::with_config(config.clone())),
@@ -146,6 +149,7 @@ impl ParserRegistry {
             "css" => Some(self.css.clone()),
             "csharp" | "c#" => Some(self.csharp.clone()),
             "dart" => Some(self.dart.clone()),
+            "dockerfile" | "containerfile" => Some(self.dockerfile.clone()),
             "elixir" => Some(self.elixir.clone()),
             "elm" => Some(self.elm.clone()),
             "erlang" => Some(self.erlang.clone()),
@@ -187,7 +191,7 @@ impl ParserRegistry {
     /// C++-specific extensions (`.hpp`, `.cc`, `.cxx`, `.hh`, `.hxx`) are
     /// only claimed by the C++ parser and resolve correctly.
     pub fn parser_for_path(&self, path: &Path) -> Option<Arc<dyn CodeParser>> {
-        let parsers: [Arc<dyn CodeParser>; 37] = [
+        let parsers: [Arc<dyn CodeParser>; 38] = [
             self.bash.clone(),
             self.c.clone(),
             self.clojure.clone(),
@@ -196,6 +200,7 @@ impl ParserRegistry {
             self.css.clone(),
             self.csharp.clone(),
             self.dart.clone(),
+            self.dockerfile.clone(),
             self.elixir.clone(),
             self.elm.clone(),
             self.erlang.clone(),
@@ -241,6 +246,7 @@ impl ParserRegistry {
         extensions.extend(self.css.file_extensions().iter().copied());
         extensions.extend(self.csharp.file_extensions().iter().copied());
         extensions.extend(self.dart.file_extensions().iter().copied());
+        extensions.extend(self.dockerfile.file_extensions().iter().copied());
         extensions.extend(self.elixir.file_extensions().iter().copied());
         extensions.extend(self.elm.file_extensions().iter().copied());
         extensions.extend(self.erlang.file_extensions().iter().copied());
@@ -284,6 +290,7 @@ impl ParserRegistry {
             ("css", self.css.metrics()),
             ("csharp", self.csharp.metrics()),
             ("dart", self.dart.metrics()),
+            ("dockerfile", self.dockerfile.metrics()),
             ("elixir", self.elixir.metrics()),
             ("elm", self.elm.metrics()),
             ("erlang", self.erlang.metrics()),
@@ -373,6 +380,8 @@ impl ParserRegistry {
             Some("css")
         } else if self.dart.can_parse(path) {
             Some("dart")
+        } else if self.dockerfile.can_parse(path) {
+            Some("dockerfile")
         } else if self.elixir.can_parse(path) {
             Some("elixir")
         } else if self.elm.can_parse(path) {
@@ -684,13 +693,13 @@ mod tests {
     fn test_all_metrics() {
         let registry = ParserRegistry::new();
         let metrics = registry.all_metrics();
-        assert_eq!(metrics.len(), 37);
+        assert_eq!(metrics.len(), 38);
         let names: Vec<&str> = metrics.iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
             vec![
                 "bash", "c", "clojure", "cobol", "cpp", "css", "csharp",
-                "dart", "elixir", "elm", "erlang", "fortran", "go", "groovy",
+                "dart", "dockerfile", "elixir", "elm", "erlang", "fortran", "go", "groovy",
                 "haskell", "hcl", "java", "julia", "kotlin", "lua", "objc",
                 "ocaml", "perl", "php", "python", "r", "ruby", "rust", "scala",
                 "solidity", "swift", "tcl", "toml", "typescript", "verilog",

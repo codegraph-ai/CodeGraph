@@ -76,6 +76,7 @@ codegraph-elm.workspace = true
 codegraph-erlang.workspace = true
 codegraph-objc.workspace = true
 codegraph-solidity.workspace = true
+codegraph-dockerfile.workspace = true
 
 # Memory layer
 codegraph-memory.workspace = true

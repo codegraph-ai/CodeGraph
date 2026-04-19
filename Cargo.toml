@@ -47,6 +47,7 @@ members = [
     "crates/codegraph-clojure",
     "crates/codegraph-solidity",
     "crates/codegraph-erlang",
+    "crates/codegraph-dockerfile",
 
     # Memory layer
     "crates/codegraph-memory",
@@ -126,6 +127,7 @@ codegraph-elm = { path = "crates/codegraph-elm" }
 codegraph-clojure = { path = "crates/codegraph-clojure" }
 codegraph-solidity = { path = "crates/codegraph-solidity" }
 codegraph-erlang = { path = "crates/codegraph-erlang" }
+codegraph-dockerfile = { path = "crates/codegraph-dockerfile" }
 codegraph-memory = { path = "crates/codegraph-memory" }
 
 [profile.release]

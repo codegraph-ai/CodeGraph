@@ -670,6 +670,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "codegraph-dockerfile"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "codegraph",
+ "codegraph-parser-api",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tree-sitter 0.25.10",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "codegraph-elixir"
 version = "0.1.0"
 dependencies = [
@@ -1050,6 +1066,7 @@ dependencies = [
  "codegraph-csharp",
  "codegraph-css",
  "codegraph-dart",
+ "codegraph-dockerfile",
  "codegraph-elixir",
  "codegraph-elm",
  "codegraph-erlang",
