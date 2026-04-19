@@ -22,4 +22,5 @@ mcp-package/*.tgz
 # Internal docs (not public)
 competitive-analysis.md
 TODO.md
+TODO_*.md
 .mcp.json
