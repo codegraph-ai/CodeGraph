@@ -68,7 +68,7 @@ Built-in exclusions (always skipped): `node_modules`, `target`, `dist`, `build`,
 
 ---
 
-## Tools (34 community + 11 pro)
+## Tools (34 community + 27 pro, 17 security)
 
 ### Code Analysis (11)
 
@@ -136,6 +136,24 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 | `find_similar` / `cluster_symbols` / `compare_symbols` | Embedding-based code similarity |
 | `cross_project_search` | Search across all indexed projects |
 | `mine_git_history` / `mine_git_history_for_file` / `search_git_history` | Git history mining and semantic search |
+| `security_control_flow` | Map every execution path through a function — "can this return without hitting the auth check?" |
+| `security_trace_data_flow` | Follow a variable from birth to death — "does user input reach this SQL query?" |
+| `security_generate_sbom` | CycloneDX SBOM from 8 lockfile formats |
+| `security_audit_deps` | OSV vulnerability check on dependencies |
+| `security_check_unchecked_returns` / `_resource_leaks` / `_misconfig` / `_input_validation` / `_error_exposure` | 5 heuristic analyzers covering ~80% of CWE Top 25 |
+| `security_scan_iac` | Docker / Kubernetes / Terraform misconfiguration scan |
+| `security_check_licenses` | Lockfile license policy enforcement (copyleft detection) |
+| `security_check_secrets_entropy` | Shannon-entropy hardcoded-secret detection |
+| `security_detect_injection` | Focused SQL/XSS/cmd/path/deser/template injection detection (20 patterns) |
+| `security_check_search_path` | Untrusted search-path / DLL-hijacking detection (CWE-426/CWE-427) |
+| `security_check_crypto` | Cryptographic misuse: weak ciphers/hashes/PRNG/keys, static IVs, timing-leak comparisons (CWE-208/326-330/338/916, 35 patterns) |
+| `security_export_sarif` | Aggregate findings as SARIF 2.1.0 (GitHub Code Scanning, GitLab SAST) |
+
+**Cross-cutting features (all `security_check_*` tools):**
+- `include_tests` / `treat_as_production` — first-class skip for tests/samples/vendored
+- `check_compile_gates` — C/C++ findings inside `#ifdef X` are marked DEFENSIVE_GATED_OFF when X isn't defined by CMake/Cargo/Makefile
+- 25-marker suppression honoring (`# nosec`, `// NOLINT`, etc.) at line and function level
+- Telemetry blocks: `path_filter` + `compile_gate` for transparent triage
 
 ---
 
