@@ -1,6 +1,6 @@
 # CodeGraph Tool Calling Guide
 
-Reference for calling all 61 CodeGraph MCP tools (34 community + 27 pro, 17 security). Each tool is prefixed with `codegraph_` (e.g., `codegraph_symbol_search`).
+Reference for calling all 66 CodeGraph MCP tools (34 community + 32 pro, 22 security). Each tool is prefixed with `codegraph_` (e.g., `codegraph_symbol_search`).
 
 > **Pro tool extras (apply to every `codegraph_security_*` tool):**
 > All security detectors accept three cross-cutting parameters and emit shared
@@ -655,7 +655,7 @@ No parameters required.
 
 ---
 
-## Pro Tools (26 tools)
+## Pro Tools (32 tools)
 
 ### Analysis & Similarity (10)
 
@@ -1056,7 +1056,7 @@ Focused injection vulnerability detection: SQL, XSS, command injection, path tra
 
 `injection_type`: `sql`, `xss`, `command`, `path_traversal`, `deserialization`, `template` (omit for all).
 
-### Security — Tier 3 / Bounty (3)
+### Security — Tier 3 / Bounty (8)
 
 ### security_check_search_path
 
@@ -1080,16 +1080,32 @@ Findings inside `#ifdef X` where X is never defined by the project's build syste
 
 ### security_check_crypto
 
-Detect cryptographic misuse — the bug class that historically pays Tier 1/2 bounties on attestation, HSM, key-management, and SDK targets. **35 patterns across 8 CWEs.**
+Detect cryptographic misuse — the bug class that historically pays Tier 1/2 bounties on attestation, HSM, key-management, and SDK targets. **113 patterns across 12 CWEs, 8 languages** (C/C++/Python/Java/Go/Rust/Ruby/PHP/Swift/JS/TS). Validated end-to-end on 5 confidential-computing targets (OE, CCF, Azure CVM SKR, AWS Nitro SDK-C, ROCm/clr) — ~100% precision after FP filtering.
 
 **Categories:**
-- **CWE-327 broken cipher:** AES-ECB (`EVP_aes_*_ecb`, `AES/ECB/`, `MODE_ECB`, `Aes128Ecb`, `Aes256Ecb`), DES/3DES (`DES_set_key`, `EVP_des_ecb/cbc/ede3`, `DESede`, `Cipher.getInstance("DES`)
-- **CWE-328 weak hash:** MD5 (`hashlib.md5`, `MD5.new`, `MessageDigest.getInstance("MD5")`, `EVP_md5`), SHA-1 (`hashlib.sha1`, `MessageDigest.getInstance("SHA-1")`, `EVP_sha1`)
-- **CWE-326 weak key size:** RSA <2048 (`RSA.generate(1024`, `RSA_generate_key(512`, `.initialize(1024)`)
-- **CWE-916 weak KDF:** PBKDF2 (verify iteration count ≥600k for SHA-256), PBKDF2-HMAC-SHA1
-- **CWE-330/338 weak PRNG for crypto:** `srand(time(`, `RAND_pseudo_bytes`, `Math.random()`, `java.util.Random`
-- **CWE-329 static IV:** `iv = b'\x00' * 16`, `iv = bytes(16)`, `[0u8; 16]`
-- **CWE-208 timing leak:** `memcmp`/`strcmp`/`strncmp` AND `==`/`===` on secret-typed identifiers (token, password, hmac, signature, digest, _key, csrf, session_id). Filters out `== 0`/`null`/`true`/`false` to avoid control-flow noise.
+- **CWE-327 broken cipher:** AES-ECB, DES/3DES, RC4, Blowfish (Sweet32), CAST5/IDEA/SEED — 6 languages incl. Ruby `OpenSSL::Cipher.new("DES...")`, Swift `CCAlgorithmDES/3DES/RC4`, PHP `mcrypt_*`/`openssl_encrypt("aes-*-ecb")`
+- **CWE-328 weak hash:** MD5, SHA-1, MD2, MD4 — **context-aware severity** via `classify_hash_context()`: `verify_*`/`sign_*`/`hash_password`/`hmac` + body with password/signature/auth_tag → high; `cache_key`/`etag`/`dedup` or bcrypt/argon2/scrypt/pbkdf2 present → low
+- **CWE-326 weak key size:** RSA <2048, DSA <2048, weak ECC curves (secp192r1/secp192k1/secp224r1, brainpoolP192), weak TLS (SSLv3/TLSv1.0/TLSv1.1 across OpenSSL/Python/Java/Go)
+- **CWE-916 weak KDF:** PBKDF2 iteration count <600k, bcrypt cost <12 (5 forms)
+- **CWE-330/338 weak PRNG:** `srand(time(`, `RAND_pseudo_bytes`, `Math.random()`, `java.util.Random`
+- **CWE-329 static IV/nonce**
+- **CWE-347 JWT auth bypass:** 12 literal patterns (PyJWT alg=none, jsonwebtoken verify=false, JJWT, jwt-go) + HS256-with-public-key algorithm-confusion detection via `check_jwt_algorithm_confusion()`
+- **CWE-798 hardcoded keys:** 6 PEM-header patterns + hex/base64 key-literal recognition on `key`/`aes_key`/`iv`/`nonce`/`secret`/`salt`/`encryption_key`/`signing_key`/`api_key` variables at standard key sizes (16/24/32 bytes)
+- **CWE-310 AES-CBC without MAC:** per-function padding-oracle check (Vaudenay/POODLE class) — flags when CBC is used without hmac/HMAC_Init/Mac.getInstance present in the same body
+- **CWE-780 RSA PKCS#1 v1.5 (Bleichenbacher):** 5 patterns across OpenSSL/PyCryptodome/Java
+- **CWE-1239 truncated MAC compare:** `memcmp`/`strncmp`/`bcmp` with literal length <16 on MAC-named variables
+- **CWE-208 timing leak:** `memcmp`/`strcmp`/`strncmp`/`bcmp` + `==`/`===` + method `.compare()`/`.equals()` on secret-typed identifiers (`token`, `password`, `hmac`, `_mac`, `signature`, `auth_tag`, `digest`, `checksum`, `_key`, `apikey`, `session_id`, `csrf`). **Suppressed entirely** when body uses any of 18 constant-time primitives: `hmac.compare_digest`, `subtle.ConstantTimeCompare`, `CRYPTO_memcmp`, `MessageDigest.isEqual`, `constant_time_eq`, `timingSafeEqual`, `Curl_timestrcmp`, `mbedtls_ct_memcmp`, `sodium_memcmp`, `sodium_compare`, `NSS_SECItemCompare`, `gnutls_memcmp`, `br_ssl_engine_memcmp`, `wolfssl_memcmp`, `IsEqual_TimingAttackResistant`, `CryptographicOperations.FixedTimeEquals` — teams using these primitives route secret compares through them, so the flagged memcmp is reliably on non-secret fields.
+
+**False-positive filters (validated on real bounty targets, including curl full-sweep 2026-04-23):**
+- **Public vs secret** — drops `memcmp` findings when operands reference `public_key`/`pub_key`/`pubkey`/`rsa_pub`/`verification_key`/`cert_pem`/`cert_chain`/`certificate`/`fingerprint`/`serial_number` etc.
+- **Content-addressable IDs** — drops findings on `object_id`/`commit_hash`/`content_id`/`etag`/`merkle`/`tree_hash`/`ipfs_cid`/`image_digest`/`manifest_digest`/`layer_digest`/`oci_digest`/`store_path`/`nix_hash`/`rekor_uuid` — public-by-construction
+- **Cleanup functions** — skips `*_destroy`/`*_free`/`*_cleanup`/`*_release`/`*_dispose`/`*_reset`/`*_finalize` (sentinel comparisons, not secrets)
+- **Magic-byte format detection** — drops when operand is a ≤8-byte string literal (ELF/PNG/PK/MZ/OggS) or a named magic constant (`ELFMAG`/`PNG_MAGIC`/`kOffloadBundleUncompressedMagicStr`, plus auth-protocol signatures `NTLMSSP_SIGNATURE`/`SMB_SIGNATURE`/`type2_marker`/`request_marker`/`_sentinel`/`_header_tag`). Applied to both CWE-208 (ct_compare) and CWE-1239 (truncated_mac).
+- **STL iterator boundaries** — drops `it == container.end()` / `.begin()` / `.cend()` patterns
+- **Function-signature meta** — distinguishes `kernel.signature().version()` (function meta) from crypto signatures
+- **Non-secret-compare functions** — skips public-key verifiers, validity sentinels (`*_is_valid`/`is_zero`/`sanity_check`), format detectors (`Is*Elf`/`isHsaCo`/`check_*_magic`), keygen (`*_generate_key_*`/`derive_key`/`keypair`/`*_from_private`), and content-addressable lookups (`lookup_*`/`find_by_hash`/`dedup_*`/`cache_lookup_*`/`compare_oid`) — gated on func name NOT containing `verify_`/`sign_`/`hmac_`/`auth_`/`crypto_`/`password`/`token`
+- **Comparison-region localization** — needles only fire when they appear inside the actual comparison region (bounded by `;`/`{}`/`()`/`,`/`?`/`&&`/`||`), not anywhere on the line; inline `//` and `/*` comments stripped before matching
+- **Protocol-mandated primitives** — weak-primitive findings in files matching a protocol-implementation pattern get severity downgraded to `low` and `status: "PROTOCOL_MANDATED: <protocol>"`. 6 mappings: NTLM/`ntlm` (DES/MD4/RC4), HTTP Digest/`digest` (MD5), Kerberos 5/`krb`|`kerberos` (DES/3DES), SASL/`sasl`|`vauth` (DES/MD4/RC4/MD5). Rationale: these primitives are RFC-required; removing them breaks interop rather than fixing a bug.
 
 ```json
 {
@@ -1137,9 +1153,211 @@ Detect cryptographic misuse — the bug class that historically pays Tier 1/2 bo
 }
 ```
 
+Each finding's `line` field points at the actual matching body line (not the function header) — jump straight to the sink. `status: "DEFENSIVE_GATED_OFF: X"` marks findings behind an `#ifdef X` that the build system never defines.
+
+### security_check_integer_overflow
+
+Detect integer-overflow patterns leading to buffer bugs (**CWE-190 → CWE-120**). Targets parsers (media codecs, model loaders, image/archive/video parsers), kernel drivers, and any C/C++ code that reads length fields from untrusted input. Integer-overflow bugs in parsers are one of the highest-paying bounty classes because they typically yield remote code execution. **C/C++ only** for v1.
+
+**Two patterns:**
+1. **Allocation multiply overflow** — `malloc(n*size)` / `kmalloc(a*b)` / `realloc(p, a*b)` / `new T[a*b]` where the product can overflow `size_t`, producing a small allocation followed by a buffer overflow on write. Covers 19 allocator APIs: `malloc`, `realloc`, `kmalloc`, `kzalloc`, `kvmalloc`, `kvzalloc`, `krealloc`, `vmalloc`, `vzalloc`, `g_malloc`/`g_malloc0`/`g_try_malloc`/`g_try_malloc0`, `aligned_alloc`, `HeapAlloc`, `LocalAlloc`, `GlobalAlloc`, `VirtualAlloc`, `mmap`, plus C++ `new T[expr]`.
+2. **Length-copy arithmetic** — `memcpy`/`memmove`/`memset`/`strncpy`/`strncat`/`bcopy`/`wmemcpy`/`wmemmove`/`wmemset`/`memcpy_s`/`memmove_s` with an arithmetic length expression (`len + offset`, `count * size`, `1 << n`) that can wrap and write past the destination.
+
+**FP guards:**
+- `calloc(n, size)` is deliberately **not** flagged — it performs the overflow check itself and is the recommended remediation.
+- Identifier-boundary match so `xmalloc`/`my_malloc`/custom wrappers don't match the bare `malloc` pattern.
+- C type-word filter (`void *p`, `char *buf`, `const *ptr`, `uint32_t *out`, etc.) avoids treating pointer declarations as multiplication.
+- `p->field` member access not flagged as arithmetic (skips `->`, `++`, `--`).
+- Struct-member access (`p->size`) and constant-size (`sizeof(T)`) lengths kept as safe.
+- **Compile-time-constant arithmetic** (added 2026-04-23 from curl triage) — suppressed when every operand is one of: `sizeof(...)`, integer/char literals, `strlen("literal")`, or SCREAMING_CASE identifiers (enum/define convention). `memset(dst, 0, STRING_LAST * sizeof(char *))` and `memset(&msg, 0, sizeof(msg) - sizeof(msg.bytes))` no longer flag — the product is known at compile time and cannot wrap at runtime.
+- **Bounds-check predecessor detection** (added 2026-04-23 from curl triage) — for a flagged `memcpy`/`memset`/`memmove`, scan 50 lines back within the same function body for a gate `if (len_ident >= dst_size) return|goto|abort;` that covers the length-expression identifiers. Suppresses when found. **Strict:** only `>=` / `>` accepted (rejects `<=` / `<` because `memcpy(dst, src, len + 1)` under a `<= dst_size` gate allows `len == dst_size` which is a 1-byte overflow). Gate body must exit the function (`return`/`goto`/`abort`/`exit`/`BUG`/`panic!`/`break`/`continue`).
+
+```json
+{
+  "scope": "src/parser",
+  "severity": "medium",
+  "include_tests": false
+}
+```
+
+**Response example:**
+```json
+{
+  "findings": [
+    {
+      "function_name": "parse_header",
+      "dangerous_call": "malloc with multiplication",
+      "file": "/src/parser/image.c",
+      "line": 142,
+      "category": "integer_overflow",
+      "severity": "medium",
+      "description": "malloc() size argument uses multiplication — if the operands are attacker-controlled or unbounded, the product can overflow size_t, producing a small allocation followed by a buffer overflow on write (CWE-190 → CWE-120).",
+      "language": "c",
+      "cwe": "CWE-190",
+      "owasp": "A04:2021",
+      "remediation": "Use calloc(n, size) — it returns NULL on overflow. Alternatively, check `n > SIZE_MAX / size` before multiplying, or use compiler built-ins like __builtin_mul_overflow."
+    },
+    {
+      "function_name": "copy_chunk",
+      "dangerous_call": "memcpy with arithmetic length",
+      "file": "/src/parser/image.c",
+      "line": 218,
+      "category": "integer_overflow",
+      "severity": "high",
+      "description": "memcpy() length argument is a computed expression — if operands can overflow or are attacker-controlled without bounds checks, the byte count wraps and the destination buffer is written beyond its bounds (CWE-190 → CWE-120).",
+      "cwe": "CWE-190",
+      "remediation": "Validate length ≤ destination buffer size BEFORE the copy. For length-prefixed formats, check `len + offset <= buf_size && len + offset >= len` (detects wrap). Prefer memcpy_s (C11 annex K) where available."
+    }
+  ],
+  "total": 2,
+  "actionable": 2,
+  "analyzer": "integer_overflow",
+  "cwe": ["CWE-190", "CWE-120", "CWE-680"],
+  "path_filter": {"files_examined": 1, "files_matched": 1, "skipped": {...}},
+  "compile_gate": {"checked": true, "gated_off": 0, "build_defines_count": 0}
+}
+```
+
+### security_check_null_deref
+
+Detect NULL-pointer dereferences (**CWE-476**). For each allocation site, scans the next 25 lines of the same function for either a NULL check or a dereference. If a deref appears first, flag it. Crashes are often a DoS primitive; under certain memory mappings an unchecked NULL deref becomes a write-to-NULL primitive exploitable for privilege escalation. **C/C++ only** for v1.
+
+**Allocators tracked (56 total):**
+- **C standard:** `malloc`, `calloc`, `realloc`, `aligned_alloc`, `valloc`, `reallocarray`, `strdup`, `strndup`
+- **Linux kernel:** `kmalloc`, `kzalloc`, `kcalloc`, `kmalloc_array`, `kvmalloc`, `kvzalloc`, `krealloc`, `vmalloc`, `vzalloc`, `alloc_skb`, `alloc_pages`, `__get_free_pages`
+- **GLib:** `g_malloc`, `g_malloc0`, `g_try_malloc`, `g_try_malloc0`, `g_strdup`, `g_strndup`, `g_new`, `g_new0`, `g_try_new`, `g_try_new0`
+- **I/O / environment:** `fopen`, `freopen`, `popen`, `tmpfile`, `getenv`, `secure_getenv`
+- **Windows heap:** `HeapAlloc`, `LocalAlloc`, `GlobalAlloc`, `VirtualAlloc`, `CoTaskMemAlloc`
+- **Project-specific wrappers** (added 2026-04-23): `curlx_malloc`, `curlx_calloc`, `curlx_realloc`, `curlx_strdup`, `curlx_strndup`, `Curl_saferealloc` (curl); `apr_palloc`, `apr_pcalloc` (Apache Portable Runtime); `talloc`, `talloc_zero`, `talloc_array` (Samba); `gnutls_malloc`, `gnutls_calloc`, `gnutls_strdup` (GnuTLS); `xstrdup`; `OPENSSL_malloc`, `OPENSSL_zalloc`, `OPENSSL_strdup`, `CRYPTO_malloc`, `CRYPTO_zalloc` (OpenSSL); `palloc`, `palloc0`, `repalloc`, `pstrdup` (PostgreSQL)
+
+`operator new` is excluded by design — it throws on failure; only `new (std::nothrow)` returns NULL (caught separately if needed).
+
+**NULL-check forms accepted (stops the scan):**
+- `if (!p)`, `if (p)`, `if (p == NULL)`, `if (NULL == p)`, `if (p != NULL)`, `if (p == 0)`, `if (p == nullptr)`
+- `BUG_ON(!p)`, `WARN_ON(!p)` (kernel idioms), `assert(p)` (userspace)
+
+**Deref forms that trigger the finding:**
+- `p->field` — arrow member access
+- `*p` — star deref (not `&p`, `**p`, or `*p2`)
+- `p[i]` — array index
+- `(*p)` — parenthesized deref
+
+**FP guards:**
+- Identifier-boundary match so `xmalloc`/`my_malloc`/custom non-null wrappers don't match `malloc`.
+- C-keyword filter on LHS (won't extract `void`/`int`/`const`/etc. as variable names).
+- Member/array LHS (`obj->ptr = malloc(...)`, `arr[i] = malloc(...)`) rejected — can't reliably track.
+- Reassignment tracking: if the variable is reassigned before a deref, the window resets.
+
+```json
+{
+  "scope": "src/driver",
+  "severity": "medium",
+  "include_tests": false
+}
+```
+
+**Response example:**
+```json
+{
+  "findings": [
+    {
+      "function_name": "handle_packet",
+      "dangerous_call": "kmalloc without NULL check",
+      "file": "/drivers/net/foo.c",
+      "line": 42,
+      "category": "null_deref",
+      "severity": "high",
+      "description": "Pointer `skb` is returned by kmalloc() (which may return NULL on failure) and is dereferenced before any NULL check — crash at minimum, often a DoS primitive and sometimes an exploitable write-to-NULL primitive under specific memory mappings (CWE-476).",
+      "language": "c",
+      "cwe": "CWE-476",
+      "owasp": "A04:2021",
+      "remediation": "Check for NULL before dereferencing: `if (!skb) return -ENOMEM;` (or appropriate error code). For kernel code, consider `unlikely(!skb)` for the hot path. Propagate allocation failures up to the caller rather than continuing with a NULL pointer."
+    }
+  ],
+  "total": 1,
+  "actionable": 1,
+  "analyzer": "null_deref",
+  "cwe": ["CWE-476"],
+  "path_filter": {"files_examined": 1, "files_matched": 1, "skipped": {...}},
+  "compile_gate": {"checked": true, "gated_off": 0, "build_defines_count": 0}
+}
+```
+
+### security_check_ssrf
+
+Detect Server-Side Request Forgery (**CWE-918**). For each HTTP request handler (or helper function called from one), checks whether the body extracts a URL from request input AND performs an outbound HTTP/network fetch WITHOUT an SSRF safeguard. Canonical targets: Grafana CVE-2020-13379 (avatar handler), CVE-2022-31107 (OAuth implicit grant), CVE-2024-1442 (multi-tenant DataSource URL).
+
+**Source patterns (4 tiers, in confidence order):**
+1. **Explicit request-extraction** — `c.Query(...)`, `req.body.url`, `params[:url]`, `@RequestParam`, `request.args.get(...)` etc. across Go (gin/chi/echo/fiber/Grafana), Python (Flask/FastAPI/Django/aiohttp), JS/TS (Express/Fastify/NestJS/Koa), Java (Spring/JAX-RS), Ruby (Rails), .NET (ASP.NET).
+2. **Receiver-style URL field access** — `ds.URL`, `proxy.ds.URL`, `route.URL`, `dsInfo.URL`, `webhook.Url`, `notifier.URL`. Catches the CVE-2024-1442 lane where DataSource URLs are stored as struct fields.
+3. **URL-like parameter on function signature** + a caller within MAX_DEPTH=6 has an explicit source — promotes the heuristic to high confidence (cross-function dataflow).
+4. **URL-like parameter only** (no explicit-source caller) — medium confidence.
+
+**Sink patterns:** 50+ across Go (`http.Get/Post/NewRequest`, `net.Dial*`, `httputil.NewSingleHostReverseProxy`), Python (`requests.get`, `urllib*.urlopen`, `httpx.*`, `aiohttp.*`), JS/TS (`fetch`, `axios.*`, `http.request/get`, `got`), Java (`URL.openConnection/openStream`, `HttpClient.send`, `OkHttpClient.newCall`, `RestTemplate.getForObject`), C/C++ (libcurl `CURLOPT_URL`), Rust (`reqwest::*`, `hyper::Client`, `ureq::*`, language-gated bare `.get(`/`.post(`), .NET (`WebRequest.Create`, `HttpClient.GetAsync`).
+
+**Safeguard patterns** (presence in body suppresses the finding) — 30+ across `ssrfprotect.*`, `safeurl.*`, `NewSafeHTTPTransport`, `IsPrivateIP`, `IsLoopback`, host allowlist forms, Grafana's `datasourceProxyTransport`, Facebook's `safeurl`, Wikimedia's `ssrfprotect`.
+
+**Round-6 refinements:**
+- **Trust-boundary tiering** — every finding is classified `server-admin` (single-tenant trust, demoted to LOW), `org-admin` (multi-tenant CVE lane, retained), `authenticated`, or `untrusted`. Field name + struct name + path heuristic. ServerAdmin: `authParams.Url`, `Plugin.*Url*`, `cfg.*Url*`, `setting.*`, `/pluginproxy/`. OrgAdmin: `DataSource.URL`, `dsInfo.*`, `webhook.*`, `notifier.*`, `/tsdb/`, `/ngalert/`, `/datasourceproxy/`.
+- **Admin-gating awareness** — caller-chain BFS for `c.IsGrafanaAdmin`/`c.HasRole`/`ReqGrafanaAdmin`/`ReqOrgAdmin`/`@Secured("ADMIN")`/`@PreAuthorize`/`requireAdmin`/`[Authorize(Roles="Admin")]`. When found, severity downgrades by one level.
+- **Upstream input-validation tracing** — caller-chain BFS for regex (`MatchString`/`re.fullmatch`/`Pattern.matches`/`RegExp.test`), allowlist (`slices.Contains`/`whitelist.contains`), or prefix bound (`strings.HasPrefix`) followed by abort (`return`/`panic`/`raise`/`throw`/`JsonApiErr`/`abort`). When the input is constrained upstream, the finding is suppressed entirely. Grafana's avatar gravatar-hash regex is the canonical case.
+- **Cross-project BFS scoping** (#M3 #26) — caller walks scoped to project root (`go.mod`/`Cargo.toml`/`package.json`/`.git` etc.) so multi-target sweeps don't produce phantom edges across separately-indexed repos.
+
+```json
+{
+  "scope": "pkg/api",
+  "severity": "medium",
+  "include_tests": false
+}
+```
+
+### security_check_idor
+
+Detect Insecure Direct Object Reference / missing-authorization-correlation (**CWE-639/284**). For each HTTP handler with an object-lookup but no body-local authz call, flag as candidate IDOR. Canonical targets: Grafana CVE-2022-21713 (dashboard IDOR), CVE-2023-4822 (org isolation bypass), Mattermost historical CVEs.
+
+**Lookup-by-ID patterns:** GORM/xorm/ent (`.First`, `.Take`, `db.Find`), named helpers (`*GetByID`, `*FindByID`, `*LoadByID`, `*LookupByID`), Django/SQLAlchemy (`.objects.get`, `.query.get`, `.filter_by`), Rails AR (`.find(params[:id])`), JPA/Hibernate (`repository.findById`, `entityManager.find`), raw SQL (`SELECT ... WHERE id = ?`).
+
+**Authz-evaluator patterns:** 50+ across Grafana (`ac.Evaluate`, `accesscontrol.EvalPermission`, `authorizeInOrg`, middleware role checks), Kubernetes (`authorizer.Authorize`, `SubjectAccessReview`), Django (`@permission_required`, `user.has_perm`), Rails Pundit/CanCan (`authorize @resource`, `policy(...).show?`), Spring Security (`@PreAuthorize`, `@Secured`), NestJS (`@UseGuards`), generic `*Authorize*`/`*CheckAccess*`/`*HasPermission*`/`*Permit*` named calls.
+
+**Round-6 refinements:**
+- **Route-level authz middleware recognition** — scans `**/api/**`, `*routes*.go`, `*router*.go` files (read directly from disk to bypass body_prefix truncation) for `routing.Wrap(handler)` and `<router>.<Verb>("/path", ..., handler)` calls. When the registration body also contains an authz pattern (`authorizeInOrg`, `@PreAuthorize`, `requireAuth`, etc.), the wrapped handler name is added to the gated set and IDOR findings on it are suppressed. Catches the dominant FP class on Grafana and most Go web frameworks.
+- **Session-derived ID exclusion** — when both URL `:id` and self-reference (`c.SignedInUser.UserID`, `request.user.id`, etc.) are present in the body, traces the variable used as the lookup-line ID back to its assignment site. If the assignment source is a self-reference expression, suppresses (the URL `:id` is for an unrelated entity; the actual lookup is on the caller's own data).
+- **Public-token URL-param suppression** — invite codes / password-reset tokens / email-verification codes are public-by-design (`:code`/`:token`/`:invite`/`:reset_token`); the token IS the authorization. Not flagged.
+
+```json
+{
+  "scope": "pkg/api",
+  "severity": "medium",
+  "include_tests": false
+}
+```
+
+### security_check_fail_open_verify
+
+Detect fail-open verification (**CWE-755 → CWE-347 / CWE-295**). Catches Go code where a verify call returns error, the caller enters the `if err != nil` branch, logs a warning, and continues past the check treating unverified input as verified. Canonical target: helm CVE-2026-35205 (`pkg/downloader/chart_downloader.go DownloadTo`).
+
+**Two detection passes:**
+
+1. **Verify-named-call shape** — `if err := Verify*(...); err != nil { warn(); /* no return */ }`. Verify keywords: `verify`, `validate`, `authenticate`, `checksig`, `checksum`, `authorize`, `checkauth`, `digest`, `hmaccheck`. Branch-exit detection: any of `return err`, `return nil, err`, `return nil, fmt.Errorf(...)`, `panic`, `os.Exit`, `log.Fatal*`. Logging without a return is fail-open.
+
+2. **Verify-flag-conditional shape** (round-6 #25) — any `if err != nil` branch that contains an inner conditional gated by a `verify`/`validate`/`strict`/`required`/`mandatory`/`enforce` flag (`if c.Verify == VerifyAlways`, `if opts.Strict`), where the strict path returns an error AND the default path warns and returns success-shaped (`return ..., nil`). The combined pattern is the signature of CVE-2026-35205-class bugs.
+
+**FP guards:**
+- **Truncation-fallback** — when `body_prefix` is at the 1024-char cap, the full function body is read from disk via brace-matching from `line_start`. The CVE-2026-35205 site lives ~80 lines into a >100-line function; the truncated prefix doesn't contain the fail-open shape.
+- **Aggregator-pattern recognition** (round-6 #24) — `errs = append(errs, err); ...; return errors.Join(errs...)` and analogues (`multierr.Combine`, `.ErrorOrNil()`, `AggregateError(errors)`, Python `ExceptionGroup`, JS `AggregateError`) — errors ARE propagated, just deferred to function exit. Suppressed.
+
+```json
+{
+  "scope": "pkg/downloader",
+  "severity": "medium"
+}
+```
+
+Go only for v1; Python/Java/Rust variants to follow.
+
 ### security_export_sarif
 
-Aggregate findings from all 10 security detectors into a single SARIF 2.1.0 document. Output is uploadable to GitHub Code Scanning, GitLab SAST, Azure DevOps. Each finding maps to a SARIF rule keyed by CWE.
+Aggregate findings from all 16 security detector classes into a single SARIF 2.1.0 document. Output is uploadable to GitHub Code Scanning, GitLab SAST, Azure DevOps. Each finding maps to a SARIF rule keyed by CWE.
 
 ```json
 {
@@ -1149,7 +1367,7 @@ Aggregate findings from all 10 security detectors into a single SARIF 2.1.0 docu
 }
 ```
 
-`detectors`: array of detector names. Omit or pass `[]` for all. Names: `scan`, `injection`, `search_path`, `iac`, `secrets_entropy`, `unchecked_returns`, `resource_leaks`, `misconfig`, `input_validation`, `error_exposure`.
+`detectors`: array of detector names. Omit or pass `[]` for all. Names: `scan`, `injection`, `search_path`, `iac`, `secrets_entropy`, `unchecked_returns`, `resource_leaks`, `misconfig`, `input_validation`, `error_exposure`, `crypto`, `integer_overflow`, `null_deref`, `ssrf`, `idor`, `fail_open_verify`.
 
 Severity mapping: `critical`/`high` → SARIF `error`, `medium` → `warning`, `low` → `note`.
 
@@ -1252,6 +1470,65 @@ Findings include an optional `status` field:
 
 The status is set by the compile_gate post-processor. Findings with status are kept in the result (so you can audit them) but don't count toward `actionable`.
 
+### `taint_reachability` (per-finding)
+
+Bounty round-5 #M3 — every security finding is annotated with whether the function is reachable from a request handler entry point.
+
+```json
+{
+  "taint_reachability": {
+    "reachable_from_request": true,
+    "source": "/repo/pkg/api/handler.go:42 (gin handler)"
+  }
+}
+```
+
+Tri-state semantics:
+- `Some(true)` — call-graph BFS reached an entry point within MAX_DEPTH=6 hops. `source` field shows the framework-detected handler.
+- `Some(false)` — fully exhausted; either no callers (orphan / startup code / test-only helper) or all transitive callers are non-handlers.
+- `None` (`null`) — unknown. BFS hit MAX_DEPTH without exhausting (chain longer than 6 hops, or passes through dynamic/interface dispatch / indexer miss / unresolved-import edge).
+
+Entry-point classifier covers Go (gin/chi/echo/fiber/iris/net-http/Grafana ReqContext), Python (Flask/FastAPI/Django REST/aiohttp decorators), Java (Spring `@RequestMapping`/`@GetMapping` etc., JAX-RS `@Path`), Ruby (Rails routes), NestJS (TypeScript decorators), plus Go `main` / `cobra.Command`.
+
+**Project-scoped BFS** (round-6 #26) — call-graph walks are bounded by project root (located via marker files: `go.mod`, `Cargo.toml`, `package.json`, `pyproject.toml`, `pom.xml`, `build.gradle`, `composer.json`, `Gemfile`, `.git`). When multiple repos are indexed in the same graph, an entry point in project B is rejected as a phantom edge for a finding in project A. Walk continues past the rejected node — its callers may still be in the right project.
+
+### `reachability` (scan-level aggregate)
+
+```json
+{
+  "reachability": {
+    "entry_points": 928,
+    "reachable_from_request": 10,
+    "unknown": 2,
+    "unreachable_from_request": 19
+  }
+}
+```
+
+Calibration data: lets a triager track precision over time. If `entry_points` is 0, the indexer didn't pick up any framework signature — the reachability signal is unreliable and should be ignored.
+
+### Trust-tier classification (SSRF only)
+
+`security_check_ssrf` adds a `Trust tier:` clause to every finding's description, classifying the source as one of:
+
+- `server-admin (single-tenant trust — exploit requires server-admin role)` — severity demoted to LOW. Examples: plugin metadata `JWTTokenAuth.Url`, `cfg.GravatarURL`, `setting.*` fields.
+- `org-admin (multi-tenant CVE lane — DataSource/webhook/integration URL configured per-org)` — KEPT at full severity. Historical Grafana SSRF lane.
+- `authenticated (any logged-in user)` — kept at default severity.
+- `untrusted (anonymous request input)` — highest urgency.
+
+Triagers should rank `org-admin` and `untrusted` highest; `server-admin` is rarely a real exploit primitive in single-tenant deployments.
+
+### Cross-function source promotion (SSRF / IDOR / fail-open)
+
+Helper functions that take a URL/ID parameter from a caller inherit the caller's source confidence. Example SSRF description:
+
+```
+Function `sendReqNoTimeout` ... AND performs an outbound HTTP/network call ...
+Cross-function source: caller `GetPluginArchive` extracts user input via `dlOpts.URL` URL field.
+```
+
+The walk is depth-bounded (MAX_DEPTH=6), cycle-safe, project-scoped, and excludes test-context callers (so tests building mock URLs don't masquerade as the source).
+
 ---
 
 ## Suppression Comment Honoring
@@ -1295,7 +1572,7 @@ codegraph_index_directory path=/tmp/intel-target/lib
 # Search-path / DLL-hijack class (CWE-426/427)
 codegraph_security_check_search_path scope=/tmp/intel-target severity=medium
 
-# Cryptographic misuse (CWE-208/326-330/338/916)
+# Cryptographic misuse (CWE-208/310/326-330/338/347/780/798/916/1239)
 codegraph_security_check_crypto scope=/tmp/intel-target severity=medium
 
 # Injection class (CWE-22/78/79/89/502/1336)
@@ -1303,6 +1580,21 @@ codegraph_security_detect_injection scope=/tmp/intel-target severity=high
 
 # TLS-verify class (CWE-295) via misconfig
 codegraph_security_check_misconfig scope=/tmp/intel-target severity=high
+
+# Integer overflow in parsers/codecs (CWE-190 → CWE-120)
+codegraph_security_check_integer_overflow scope=/tmp/intel-target severity=medium
+
+# NULL-pointer deref in C/C++ (CWE-476)
+codegraph_security_check_null_deref scope=/tmp/intel-target severity=medium
+
+# SSRF — multi-tenant SaaS DataSource/webhook URL → outbound HTTP (CWE-918)
+codegraph_security_check_ssrf scope=/tmp/intel-target severity=medium
+
+# IDOR — handler with object-lookup but no authz check (CWE-639/284)
+codegraph_security_check_idor scope=/tmp/intel-target severity=medium
+
+# Fail-open verification — error suppressed in error branch (CWE-755/347/295)
+codegraph_security_check_fail_open_verify scope=/tmp/intel-target severity=medium
 
 # Memory safety (CWE-120/134/787) via security_scan
 codegraph_security_scan scope=/tmp/intel-target severity=critical category=overflow
@@ -1325,7 +1617,12 @@ For each scan, check three numbers:
 ### 4. Verify each `actionable` finding
 
 - **search_path:** trace the path arg back to a literal. If it's a relative `.so`/`.dll`, confirm `RPATH`/`RUNPATH`/`SetDefaultDllDirectories` mitigation. Run `readelf -d` on the shipped binary.
-- **crypto:** check whether the algorithm is used for security purposes (passwords, signatures, HMAC) vs benign (cache keys). MD5/SHA1 for cache = OK; for passwords = real bug.
+- **crypto:** the detector's context-aware severity already classifies `verify_*`/`sign_*`/`hmac_*`/`hash_password` functions as high and `cache_key`/`etag`/`dedup` as low. Confirm the classification matches the actual use site. FP filters already drop public-key compares, cleanup functions, and content-addressable ID compares (git OIDs, OCI digests, etags).
+- **integer_overflow:** trace size/length operands back to their source. If the operand is bounded (small constant, validated against a maximum), mark as FP. High-severity cases: length derived from an attacker-supplied header field without a prior `if (len > MAX)` check.
+- **null_deref:** verify the allocation is actually reachable and not guarded by an earlier check (e.g., a custom panic-on-OOM wrapper). The detector's 25-line window can miss checks further down; confirm the pattern by reading the function body. Kernel `kmalloc` + dereference on the next line is almost always a real bug — ship as high.
+- **ssrf:** check the trust-tier classification in the description. `server-admin`-tier findings are demoted automatically. `org-admin` is the multi-tenant CVE lane — those are real-shape against multi-org self-hosted Grafana / GitLab / etc. Verify the URL flows from the configured field into the fetch sink without an `IsPrivateIP`/`safeurl` check; trace the per-request taint to confirm an org-admin-only attacker can hit internal endpoints (169.254.169.254, 10.0.0.0/8, etc.).
+- **idor:** the detector already suppresses route-level authz middleware (`routing.Wrap` + `authorizeInOrg`/`@PreAuthorize`/etc.) and session-derived ID lookups (`c.SignedInUser.UserID`). Remaining findings need cross-check: trace the lookup variable back to its source — if it's a URL `:id` parameter and the handler doesn't appear in the project's route registration with an authz wrap, that's a real candidate. Confirm by issuing a request as a low-privilege user against another tenant's resource.
+- **fail_open_verify:** `verify-flag-conditional` findings are typically real — check the strict branch returns the error AND the default branch only logs/warns then returns nil. Aggregator patterns (`return errors.Join(errs...)`) are auto-suppressed.
 - **injection:** trace the dangerous string back to its source. If it's a constant or sanitized variable, mark as FP.
 - **TLS-verify:** confirm the disabling code is reachable in production builds (not just behind a `--debug` flag).
 
@@ -1350,6 +1647,6 @@ Use the [`/bounty` skill](#) to scaffold a triage doc. The skill workflow:
 | Empty results after restart | Run `reindex_workspace` or wait for auto-indexing |
 | "Invalid URI" | Missing `file://` prefix on URI parameters |
 
-## Supported Languages (31)
+## Supported Languages (38)
 
-Bash, C, C++, C#, COBOL, Dart, Elixir, Fortran, Go, Groovy, Haskell, HCL/Terraform, Java, Julia, Kotlin, Lua, OCaml, Perl, PHP, Python, R, Ruby, Rust, Scala, Swift, Tcl, TOML, TypeScript/JS, Verilog/SystemVerilog, YAML, Zig
+Bash, C, C++, C#, Clojure, COBOL, CSS, Dart, Dockerfile, Elixir, Elm, Erlang, Fortran, Go, Groovy, Haskell, HCL/Terraform, Java, Julia, Kotlin, Lua, Objective-C, OCaml, Perl, PHP, Python, R, Ruby, Rust, Scala, Solidity, Swift, Tcl, TOML, TypeScript/JS, Verilog/SystemVerilog, YAML, Zig
