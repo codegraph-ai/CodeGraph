@@ -47,7 +47,10 @@ struct Args {
     #[arg(long, default_value = "5000")]
     max_files: usize,
 
-    /// Embedding model: bge-small (384d, fast) or jina-code-v2 (768d, 6x slower)
+    /// Embedding model: bge-small (384d, 512 ctx, fast — default),
+    /// jina-code-v2 (768d, 8K ctx, 6× slower), or granite-97m (384d, 32K ctx,
+    /// IBM ModernBERT multilingual, ~3× slower than bge-small but no
+    /// truncation on long function bodies).
     #[arg(long, default_value = "bge-small")]
     embedding_model: String,
 
@@ -91,6 +94,9 @@ async fn main() {
 
         let embedding_model = match args.embedding_model.as_str() {
             "jina-code-v2" => codegraph_memory::CodeGraphEmbeddingModel::JinaCodeV2,
+            "granite-97m" | "granite" | "granite-97m-multilingual-r2" => {
+                codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2
+            }
             _ => codegraph_memory::CodeGraphEmbeddingModel::BgeSmall,
         };
 

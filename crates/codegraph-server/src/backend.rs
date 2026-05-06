@@ -800,6 +800,9 @@ impl LanguageServer for CodeGraphBackend {
                         "jina-code-v2" => {
                             Some(codegraph_memory::CodeGraphEmbeddingModel::JinaCodeV2)
                         }
+                        "granite-97m" | "granite" | "granite-97m-multilingual-r2" => {
+                            Some(codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2)
+                        }
                         _ => {
                             tracing::warn!(
                                 "[LSP::initialize] Unknown embedding model: {:?}, using default",

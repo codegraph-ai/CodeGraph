@@ -34,7 +34,7 @@ impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             exclude_dirs: Self::default_exclude_dirs(),
-            exclude_patterns: Vec::new(),
+            exclude_patterns: Self::default_exclude_patterns(),
             max_file_size_bytes: 1024 * 1024, // 1 MiB
             max_depth: 20,
             max_files: 5_000,
@@ -64,6 +64,83 @@ impl IndexConfig {
         .iter()
         .map(|s| (*s).to_string())
         .collect()
+    }
+
+    /// Built-in glob patterns for files we should never index — binary
+    /// archives, prebuilt artifacts, OS metadata. These shapes are
+    /// near-universally non-source and dragging them through tree-sitter
+    /// + embedding wastes cycles. Bounty 2026-05-03: a `bounty/` workspace
+    /// containing thousands of `.tar.gz` / `.deb` proof bundles caused a
+    /// 4.3 GB / 644% CPU runaway during initial embedding because the
+    /// indexer didn't filter binary file extensions.
+    pub fn default_exclude_patterns() -> Vec<String> {
+        [
+            // Archives / packaged artifacts
+            "**/*.tar.gz", "**/*.tar.bz2", "**/*.tar.xz", "**/*.tgz", "**/*.tbz2",
+            "**/*.zip", "**/*.7z", "**/*.rar",
+            "**/*.deb", "**/*.rpm", "**/*.pkg", "**/*.dmg", "**/*.iso", "**/*.img",
+            // Compiled / native binaries
+            "**/*.exe", "**/*.dll", "**/*.so", "**/*.dylib", "**/*.bin",
+            "**/*.o", "**/*.a", "**/*.lib", "**/*.obj", "**/*.pdb",
+            // Compiled bytecode (already in __pycache__/ etc. but glob covers stragglers)
+            "**/*.pyc", "**/*.pyo", "**/*.class", "**/*.jar", "**/*.war",
+            // Disk images / proof bundles
+            "**/*.qcow2", "**/*.vmdk", "**/*.vdi", "**/*.vhd",
+            // Office / PDF / media (not code)
+            "**/*.pdf", "**/*.docx", "**/*.xlsx", "**/*.pptx",
+            "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.bmp", "**/*.svg",
+            "**/*.mp3", "**/*.mp4", "**/*.mov", "**/*.avi", "**/*.webm",
+            // OS metadata
+            "**/.DS_Store", "**/Thumbs.db",
+            // Misc bulky non-source
+            "**/*.sqlite", "**/*.db", "**/*.lock",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+    }
+
+    /// Bounty 2026-05-03 — extend the exclude_patterns from a workspace's
+    /// `.codegraphignore` file if present. Format is simple gitignore-like:
+    /// one pattern per line, `#` for comments, blank lines ignored. Not a
+    /// full gitignore parser (no `!` negation, no path-anchored `/`-prefix
+    /// semantics) — keeps complexity bounded while solving the bounty
+    /// workspace runaway.
+    ///
+    /// If `.codegraphignore` doesn't exist, this is a no-op (returns
+    /// without modifying `self`). Errors reading the file are logged
+    /// and ignored.
+    pub fn extend_from_codegraphignore(&mut self, workspace_root: &Path) {
+        let path = workspace_root.join(".codegraphignore");
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        "Failed to read {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+                return;
+            }
+        };
+        let mut added = 0usize;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            self.exclude_patterns.push(trimmed.to_string());
+            added += 1;
+        }
+        if added > 0 {
+            tracing::info!(
+                "Loaded {} patterns from {}",
+                added,
+                path.display()
+            );
+        }
     }
 
     /// Build a `GlobSet` from `exclude_patterns`.
@@ -137,8 +214,14 @@ impl Indexer {
         let mut result = IndexResult::default();
 
         for folder in folders {
+            // Bounty 2026-05-03 — extend exclude_patterns from this
+            // folder's `.codegraphignore` if present. Per-folder so each
+            // workspace can have its own rules; doesn't pollute other
+            // folders' configs.
+            let mut folder_config = config.clone();
+            folder_config.extend_from_codegraphignore(folder);
             let (total, parsed, skipped) = self
-                .index_directory(graph, folder, config, 0, counter.clone())
+                .index_directory(graph, folder, &folder_config, 0, counter.clone())
                 .await;
             result.total_files += total;
             result.files_parsed += parsed;
@@ -360,5 +443,82 @@ impl Indexer {
                 Err(e) => Err(format!("{:?}", e)),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_exclude_patterns_includes_binary_archives() {
+        let patterns = IndexConfig::default_exclude_patterns();
+        // Bounty 2026-05-03 specifically called out these archive shapes.
+        assert!(patterns.iter().any(|p| p.contains("tar.gz")));
+        assert!(patterns.iter().any(|p| p.contains("zip")));
+        assert!(patterns.iter().any(|p| p.contains("deb")));
+        assert!(patterns.iter().any(|p| p.contains("DS_Store")));
+    }
+
+    #[test]
+    fn default_config_has_default_exclude_patterns() {
+        let config = IndexConfig::default();
+        assert!(
+            !config.exclude_patterns.is_empty(),
+            "default IndexConfig must populate exclude_patterns"
+        );
+    }
+
+    #[test]
+    fn extend_from_codegraphignore_appends_patterns() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        std::fs::write(
+            tmp.path().join(".codegraphignore"),
+            "# comment line\n\nproof-*-*/\n*.poc.cpp\n  spaced-pattern.zip  \n",
+        )
+        .unwrap();
+        let mut config = IndexConfig {
+            exclude_dirs: vec![],
+            exclude_patterns: vec!["already-here".to_string()],
+            max_file_size_bytes: 1024,
+            max_depth: 5,
+            max_files: 100,
+        };
+        config.extend_from_codegraphignore(tmp.path());
+        // Pre-existing patterns are kept.
+        assert!(config.exclude_patterns.iter().any(|p| p == "already-here"));
+        // New patterns appended (3 valid lines, comment + blank skipped).
+        assert!(config.exclude_patterns.iter().any(|p| p == "proof-*-*/"));
+        assert!(config.exclude_patterns.iter().any(|p| p == "*.poc.cpp"));
+        // Whitespace trimmed.
+        assert!(config.exclude_patterns.iter().any(|p| p == "spaced-pattern.zip"));
+    }
+
+    #[test]
+    fn extend_from_codegraphignore_no_op_when_file_missing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut config = IndexConfig::default();
+        let before_len = config.exclude_patterns.len();
+        config.extend_from_codegraphignore(tmp.path());
+        assert_eq!(
+            config.exclude_patterns.len(),
+            before_len,
+            "missing .codegraphignore must not change exclude_patterns"
+        );
+    }
+
+    #[test]
+    fn build_exclude_set_matches_default_archive_patterns() {
+        let config = IndexConfig::default();
+        let set = config.build_exclude_set();
+        // Files matching defaults should be filtered.
+        assert!(set.is_match("/repo/proof-bundle.tar.gz"));
+        assert!(set.is_match("/repo/MSRC-VULN-12345.zip"));
+        assert!(set.is_match("/path/to/.DS_Store"));
+        assert!(set.is_match("/path/to/binary.so"));
+        // Source files should NOT be filtered.
+        assert!(!set.is_match("/repo/src/main.rs"));
+        assert!(!set.is_match("/repo/src/handler.go"));
+        assert!(!set.is_match("/repo/lib/foo.cpp"));
     }
 }

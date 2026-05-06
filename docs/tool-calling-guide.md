@@ -585,6 +585,47 @@ Add an entire directory alongside existing data.
 }
 ```
 
+### Workspace exclusion: `.codegraphignore` + default skip list
+
+`reindex_workspace` and `index_directory` honor a per-folder `.codegraphignore` file (gitignore-like syntax — one pattern per line, `#` comments, blank lines ignored; no `!` negation in v1) plus a built-in skip list for binary archives, compiled artifacts, OS metadata, and bulky non-source:
+
+- Archives: `**/*.tar.gz`, `**/*.tar.bz2`, `**/*.tar.xz`, `**/*.tgz`, `**/*.tbz2`, `**/*.zip`, `**/*.7z`, `**/*.rar`, `**/*.deb`, `**/*.rpm`, `**/*.pkg`, `**/*.dmg`, `**/*.iso`, `**/*.img`
+- Binaries: `**/*.exe`, `**/*.dll`, `**/*.so`, `**/*.dylib`, `**/*.bin`, `**/*.o`, `**/*.a`, `**/*.lib`, `**/*.obj`, `**/*.pdb`, `**/*.pyc`, `**/*.class`, `**/*.jar`
+- Disk images: `**/*.qcow2`, `**/*.vmdk`, `**/*.vdi`, `**/*.vhd`
+- Non-source media: `**/*.pdf`, `**/*.docx`, `**/*.png`, `**/*.mp4`, etc.
+- OS metadata: `**/.DS_Store`, `**/Thumbs.db`
+- Misc: `**/*.sqlite`, `**/*.db`, `**/*.lock`
+
+Prevents fastembed/ONNX runaway on workspaces containing proof bundles, cloned upstream targets, prebuilt binaries, or triage doc folders. Per-folder so each workspace can have its own rules.
+
+Example `.codegraphignore` for a bounty workspace:
+
+```
+# Cloned target trees and proof bundles
+proof-*-*/
+*-MSRC-*.tar.gz
+*-PSIRT-*.zip
+
+# Cache + scratch
+.poc.sh
+*.poc.cpp
+
+# Internal triage doc directories not worth indexing
+triage/
+```
+
+### Embedding model selection
+
+The MCP server accepts `--embedding-model <name>` at startup or `embeddingModel` in the LSP init options:
+
+| Name | Dimensions | Context | Notes |
+|---|---|---|---|
+| `bge-small` *(default)* | 384 | 512 | Fast, English-only, 33M params |
+| `jina-code-v2` | 768 | 8K | Code-aware, 6× slower than BGE |
+| `granite-97m` *(or `granite`)* | 384 | 32K | IBM ModernBERT multilingual, 7.7× slower than BGE on Rust corpora; 200+ languages, +0.04 mean similarity vs BGE on related-code pairs in evals |
+
+`granite-97m` is the long-context option for workspaces with multilingual code, generated stubs with large match arms, or functions exceeding ~2k chars (where BGE silently truncates). Storage-compatible with BGE (same 384d) but the vectors are not interchangeable; clear `~/.codegraph/graph.db/` and re-embed when switching.
+
 ---
 
 ## Memory (7 tools)
@@ -655,7 +696,7 @@ No parameters required.
 
 ---
 
-## Pro Tools (32 tools)
+## Pro Tools (35 tools)
 
 ### Analysis & Similarity (10)
 
@@ -979,7 +1020,7 @@ Detects:
   "actionable": 1,
   "analyzer": "misconfig",
   "cwe": ["CWE-16", "CWE-295", "CWE-614", "CWE-1004"],
-  "path_filter": {"files_examined": 1, "files_matched": 1, "skipped": {...}},
+  "path_filter": {"findings_examined": 1, "findings_kept": 1, "skipped": {...}},
   "compile_gate": {"checked": true, "gated_off": 0, "build_defines_count": 12}
 }
 ```
@@ -1056,7 +1097,7 @@ Focused injection vulnerability detection: SQL, XSS, command injection, path tra
 
 `injection_type`: `sql`, `xss`, `command`, `path_traversal`, `deserialization`, `template` (omit for all).
 
-### Security — Tier 3 / Bounty (8)
+### Security — Tier 3 / Bounty (11)
 
 ### security_check_search_path
 
@@ -1148,7 +1189,7 @@ Detect cryptographic misuse — the bug class that historically pays Tier 1/2 bo
   "actionable": 2,
   "analyzer": "crypto_misuse",
   "cwe": ["CWE-208", "CWE-326", "CWE-327", "CWE-328", "CWE-329", "CWE-330", "CWE-338", "CWE-916"],
-  "path_filter": {"files_examined": 2, "files_matched": 2, "skipped": {...}},
+  "path_filter": {"findings_examined": 2, "findings_kept": 2, "skipped": {...}},
   "compile_gate": {"checked": true, "gated_off": 0, "build_defines_count": 0}
 }
 ```
@@ -1213,7 +1254,7 @@ Detect integer-overflow patterns leading to buffer bugs (**CWE-190 → CWE-120**
   "actionable": 2,
   "analyzer": "integer_overflow",
   "cwe": ["CWE-190", "CWE-120", "CWE-680"],
-  "path_filter": {"files_examined": 1, "files_matched": 1, "skipped": {...}},
+  "path_filter": {"findings_examined": 1, "findings_kept": 1, "skipped": {...}},
   "compile_gate": {"checked": true, "gated_off": 0, "build_defines_count": 0}
 }
 ```
@@ -1278,7 +1319,7 @@ Detect NULL-pointer dereferences (**CWE-476**). For each allocation site, scans 
   "actionable": 1,
   "analyzer": "null_deref",
   "cwe": ["CWE-476"],
-  "path_filter": {"files_examined": 1, "files_matched": 1, "skipped": {...}},
+  "path_filter": {"findings_examined": 1, "findings_kept": 1, "skipped": {...}},
   "compile_gate": {"checked": true, "gated_off": 0, "build_defines_count": 0}
 }
 ```
@@ -1355,6 +1396,106 @@ Detect fail-open verification (**CWE-755 → CWE-347 / CWE-295**). Catches Go co
 
 Go only for v1; Python/Java/Rust variants to follow.
 
+### security_check_fd_path_asymmetry
+
+Detect functions that use path-resolving filesystem ops (`os.Remove`, `os.Symlink`, `os.MkdirAll`, `os.OpenFile`, etc.) on a security-boundary path string (`rootfs`, `containerRoot`, `chroot`, etc.) when the same file ALSO opens an fd-handle (`os.OpenFile(p, O_DIRECTORY|O_PATH|O_NOFOLLOW)`) for the same root, OR uses fd-based ops elsewhere (`Openat`, `Symlinkat`, `pathrs.*`). The asymmetry signals an incomplete migration to fd-anchored fs ops — the file is mid-migration but a helper got missed (**CWE-367**, TOCTOU).
+
+Bug class behind **runc CVE-2025-31133** (maskedPaths /dev/null source-swap), **CVE-2025-52565** (/dev/console bind-mount source-swap), **CVE-2025-52881** (procfs write redirect). All three were fixed by migrating to fd-based + safe-procfs API.
+
+```json
+{
+  "scope": "/path/to/runc",
+  "severity": "medium"
+}
+```
+
+**Identifier sub-classification (v1.1):**
+- **HIGH-prior:** `Rootfs`, `RootFS`, `containerRoot`, `chroot`, `attestation_root` — capitalized + container-specific.
+- **MEDIUM-prior:** `rootfs` (lowercase), `RootDir`, `rootDir` — ambiguous shapes.
+- **LOW-prior:** `stateDir`, `cacheDir`, `dataDir`, `workDir`, `imagesDir`, `confDir` — operator-controlled paths.
+
+**Severity matrix:**
+
+| Identifier prior | fd-holder/fd-ops in file | Severity |
+|---|---|---|
+| HIGH | yes | HIGH (mid-migration TP) |
+| HIGH | no | MEDIUM (unmigrated container code) |
+| MEDIUM | yes | HIGH (mid-migration on ambiguous identifier) |
+| MEDIUM | no | suppressed (operator-controlled false positive class) |
+| LOW | yes | MEDIUM (path-only helper alongside fd ops; might be a real miss) |
+| LOW | no | suppressed (operator state dir, no migration signal) |
+
+**Validated:** runc rootfs_linux.go (4 HIGH TPs including bonus `mountToRootfs:628 os.Lstat(dest)` that manual triage missed); containerd `cleanupWorkDirs` and incus-migrate `transferRootfs` correctly suppressed under the LOW/MEDIUM-prior + no-fd-signal rule.
+
+v0: Go only. Cross-file analysis deferred to v1.
+
+### security_check_path_join_absolute_rhs
+
+Detect Rust `<base>.join(<rhs>)` calls where `<rhs>` is attacker-controlled (tar/zip entry path, or derived from one) AND no absolute-path guard precedes AND a write-class filesystem sink (`fs::hard_link`, `fs::symlink`, `fs::write`, `xattr::set`, `nix::sys::stat::mknod`) consumes the result (**CWE-22**).
+
+Detector key insight: Rust `Path::join` silently returns rhs verbatim when rhs is absolute — `dest.join("/etc")` yields `/etc`. String-concat path-traversal detectors miss this method-call shape entirely.
+
+Bug class behind **GHSA-84rc-2q4r-45pc** (image-rs `try_hardlink_fallback`, CVE-class fixed) and the image-rs `convert_whiteout` opaque-dir whiteout escape (sibling found by bounty session 2026-05-05).
+
+```json
+{
+  "scope": "/path/to/image-rs",
+  "severity": "low"
+}
+```
+
+**Severity bands:**
+- **HIGH:** write-class sink, no upstream guard, no downstream check.
+- **MEDIUM:** write-class sink + downstream `canonicalize() / fs::canonicalize(...)` + `starts_with(<base>...)` check.
+- **LOW (audit):** read-only sink (`fs::read`, `fs::metadata`, `Path::exists`).
+
+**Suppressed:**
+- rhs is a string literal (no taint).
+- Upstream guard: `<rhs>.is_absolute()`, `<rhs>.is_relative()`, `<rhs>.strip_prefix("/")`, `Component::RootDir` filter — bound to the specific variable being guarded.
+- `Iterator::join` (rhs is a separator string like `","`).
+- Commented-out joins.
+
+**Taint sources recognized:** `tar::Entry::path()`, `tokio_tar::Entry`, `astral_tokio_tar::Entry`, `zip::name`, `header().path_bytes()`, `file.path()`, `entry.link_name()`, plus archive-shaped param names (`entry`, `entry_path`, `path`, `linkname`, `header`, `name`, `tar_path`, `archive_path`, `zip_path`).
+
+Multi-line `let X = expr;` assignments are followed via the full expression (paren/brace-balanced) — required to catch the canonical `try_hardlink_fallback` shape where the taint-providing `.path()` call lives on a continuation line.
+
+v0: Rust only. Python `os.path.join` has the same quirk and is queued for v1.
+
+### security_check_rest_handler_missing_auth
+
+Detect REST handler functions that lack authorization checks when sibling handlers in the same file or directory have them. Asymmetry signals copy-paste oversight, mid-migration miss, or undocumented intentional exemption (**CWE-862**).
+
+Bug class behind iotedge mgmt API `restart_or_start_or_stop.rs:77 fn post` (only mutating mgmt endpoint missing `auth_agent`), seven GET endpoints across `module/`, `identity/`, `system_info/`, and the workload-API `module/list.rs:43 fn get` (leaks env vars + registry credentials across module isolation boundary).
+
+```json
+{
+  "scope": "/path/to/edgelet-http-mgmt",
+  "severity": "medium"
+}
+```
+
+**Detection:**
+- Handlers identified as `async fn (get|post|put|delete|head|patch)(...)` definitions (covers `impl Route for ...` trait impls and axum/hyper-direct shapes).
+- Auth-call detection: 17 patterns (`auth_agent`, `auth_caller`, `require_auth`, `check_auth`, `verify_token`, `current_user.is_authenticated`, axum extractors `AuthenticatedUser`/`RequireAuth`/`AuthBearer`, etc.).
+- Sibling comparison scope: same directory.
+- Test-module truncation: analysis stops at `#[cfg(test)] mod tests { ... }` boundary so nested test-helper fns aren't mis-classified.
+
+**Severity bands:**
+- **HIGH:** state-changing method (POST/PUT/DELETE/PATCH) without auth, ≥1 sibling has auth — copy-paste signal.
+- **MEDIUM:** GET/HEAD without auth, ≥1 mutating sibling has auth — sensitive read leak.
+- **LOW (audit):** solo handler with no sibling for comparison.
+
+**Suppressed:**
+- `// PUBLIC` / `// UNAUTH` / `// intentionally unauthenticated` / `#[unauth]` doc markers (5-line lookback above the handler).
+- Health-check paths: `/health`, `/livez`, `/readyz`, `/metrics`, `/version`, `/openapi`, `/docs/`, `/swagger`, `health_check`, `readiness`, `liveness`.
+- Static-literal-only handler bodies (no `self.runtime` / `.lock` / `.query` / `.await` AND ≤200 chars).
+- Auth via signature extractor (`AuthenticatedUser` etc. as a fn-signature param type).
+- Symmetric-absence (all siblings also lack auth = consistent design choice).
+
+**Validated:** edgelet-http-mgmt — 5 of 5 production TPs caught (1 HIGH POST + 4 MEDIUM GETs), 0 FPs. The 4 nested-test FPs from `#[tokio::test] async fn auth() { async fn delete(...) }` shape correctly suppressed.
+
+v0: Rust only. Multi-language (Go chi/gin/echo, Python FastAPI/Flask) queued for v1.
+
 ### security_export_sarif
 
 Aggregate findings from all 16 security detector classes into a single SARIF 2.1.0 document. Output is uploadable to GitHub Code Scanning, GitLab SAST, Azure DevOps. Each finding maps to a SARIF rule keyed by CWE.
@@ -1367,7 +1508,7 @@ Aggregate findings from all 16 security detector classes into a single SARIF 2.1
 }
 ```
 
-`detectors`: array of detector names. Omit or pass `[]` for all. Names: `scan`, `injection`, `search_path`, `iac`, `secrets_entropy`, `unchecked_returns`, `resource_leaks`, `misconfig`, `input_validation`, `error_exposure`, `crypto`, `integer_overflow`, `null_deref`, `ssrf`, `idor`, `fail_open_verify`.
+`detectors`: array of detector names. Omit or pass `[]` for all. Names: `scan`, `injection`, `search_path`, `iac`, `secrets_entropy`, `unchecked_returns`, `resource_leaks`, `misconfig`, `input_validation`, `error_exposure`, `crypto`, `integer_overflow`, `null_deref`, `ssrf`, `idor`, `fail_open_verify`, `fd_path_asymmetry`, `path_join_absolute_rhs`, `rest_handler_missing_auth`.
 
 Severity mapping: `critical`/`high` → SARIF `error`, `medium` → `warning`, `low` → `note`.
 
@@ -1426,8 +1567,8 @@ Count of findings WITHOUT a `status` (i.e., not gated off). This is the number t
 
 ```json
 {
-  "files_examined": 18,
-  "files_matched": 14,
+  "findings_examined": 18,
+  "findings_kept": 14,
   "skipped": {
     "test": 2,
     "sample": 0,
@@ -1437,8 +1578,8 @@ Count of findings WITHOUT a `status` (i.e., not gated off). This is the number t
 }
 ```
 
-- `files_examined` — total findings considered before path filtering
-- `files_matched` — findings kept after path filtering (= `examined - sum(skipped)`)
+- `findings_examined` — total findings considered before path filtering
+- `findings_kept` — findings retained after path filtering (= `examined - sum(skipped)`)
 - `skipped` — breakdown by category
 
 Surfaces "silent omissions" so you can verify the scan actually examined what you expected.

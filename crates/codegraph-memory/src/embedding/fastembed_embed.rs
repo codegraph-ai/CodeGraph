@@ -4,29 +4,45 @@
 //! Fastembed wrapper for codegraph-memory
 //!
 //! Supports configurable embedding models:
-//! - Jina Code V2 (768d) — code-aware, trained on 150M+ code pairs. Best quality for clone detection.
-//! - BGE-Small-EN-v1.5 (384d) — fast general-purpose. 4-5x faster, lower quality on code similarity.
+//! - **BGE-Small-EN-v1.5** (384d, 512-tok context) — fast general-purpose default.
+//! - **Jina Code V2** (768d, 8K context) — code-aware, 6× slower than BGE.
+//! - **Granite-97M-Multilingual-R2** (384d, 32K context) — IBM's
+//!   ModernBERT-based multilingual embedder. 200+ languages, 9
+//!   programming languages explicitly trained, MTEB Code Retrieval 57.
+//!   Loaded via fastembed's `UserDefinedEmbeddingModel` path because
+//!   fastembed-rs <= 4.9.x doesn't yet ship the model in its built-in
+//!   enum.
 
 use crate::error::{MemoryError, Result};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{
+    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding,
+    TokenizerFiles, UserDefinedEmbeddingModel,
+};
 use std::path::PathBuf;
 
 /// Configurable embedding model selection
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodeGraphEmbeddingModel {
-    /// Jina Code V2 (768d) — code-aware, 6x slower than BGE
+    /// Jina Code V2 (768d, 8K context) — code-aware, 6× slower than BGE
     JinaCodeV2,
-    /// BGE-Small-EN-v1.5 (384d) — fast, good quality with full-body embeddings
+    /// BGE-Small-EN-v1.5 (384d, 512-tok context) — fast, good quality with full-body embeddings
     #[default]
     BgeSmall,
+    /// Granite-97M-Multilingual-R2 (384d, 32K context) — IBM ModernBERT-based,
+    /// 200+ languages, 9 programming languages explicitly trained.
+    /// Storage-compatible with BgeSmall (same 384 dim).
+    Granite97mMultilingualR2,
 }
 
 impl CodeGraphEmbeddingModel {
-    fn to_fastembed(self) -> EmbeddingModel {
+    /// Map to fastembed's built-in enum where one exists. Returns None
+    /// for user-defined models that fastembed doesn't ship.
+    fn to_fastembed_builtin(self) -> Option<EmbeddingModel> {
         match self {
-            Self::JinaCodeV2 => EmbeddingModel::JinaEmbeddingsV2BaseCode,
-            Self::BgeSmall => EmbeddingModel::BGESmallENV15,
+            Self::JinaCodeV2 => Some(EmbeddingModel::JinaEmbeddingsV2BaseCode),
+            Self::BgeSmall => Some(EmbeddingModel::BGESmallENV15),
+            Self::Granite97mMultilingualR2 => None,
         }
     }
 
@@ -34,16 +50,52 @@ impl CodeGraphEmbeddingModel {
         match self {
             Self::JinaCodeV2 => 768,
             Self::BgeSmall => 384,
+            Self::Granite97mMultilingualR2 => 384,
+        }
+    }
+
+    /// Maximum input length the model accepts before truncation. The
+    /// existing BGE-Small / Jina path uses fastembed's defaults (~512
+    /// for BGE, ~8192 for Jina). Granite supports 32K natively.
+    pub fn max_length(self) -> usize {
+        match self {
+            Self::JinaCodeV2 => 8192,
+            Self::BgeSmall => 512,
+            Self::Granite97mMultilingualR2 => 32_768,
         }
     }
 
     pub fn display_name(self) -> &'static str {
         match self {
-            Self::JinaCodeV2 => "Jina Code V2 (768d)",
-            Self::BgeSmall => "BGE-Small-EN-v1.5 (384d)",
+            Self::JinaCodeV2 => "Jina Code V2 (768d, 8K context)",
+            Self::BgeSmall => "BGE-Small-EN-v1.5 (384d, 512-tok context)",
+            Self::Granite97mMultilingualR2 => {
+                "Granite-Embedding-97M-Multilingual-R2 (384d, 32K context)"
+            }
+        }
+    }
+
+    /// Stable identifier persisted alongside vectors so we can detect
+    /// model swaps (even when dimensions match) and trigger
+    /// re-embedding. The format is `<name>:<version>` and is forward-
+    /// compatible — old vectors without this tag are treated as
+    /// `bge-small:v15` for backwards compatibility.
+    pub fn model_id_tag(self) -> &'static str {
+        match self {
+            Self::JinaCodeV2 => "jina-code:v2",
+            Self::BgeSmall => "bge-small:v15",
+            Self::Granite97mMultilingualR2 => "granite-97m-multi:r2",
         }
     }
 }
+
+/// HuggingFace repo ID for the Granite 97M multilingual R2 model.
+const GRANITE_97M_REPO: &str = "ibm-granite/granite-embedding-97m-multilingual-r2";
+
+/// ONNX file path within the repo. IBM ships a default and several
+/// optimised variants (`model_O1.onnx`, `model_O2.onnx`); use the
+/// default for portability.
+const GRANITE_97M_ONNX_PATH: &str = "onnx/model.onnx";
 
 /// ONNX Runtime version required by ort-sys 2.0.0-rc.9
 #[cfg(target_os = "windows")]
@@ -72,14 +124,69 @@ impl FastembedEmbedding {
 
         log::info!("Loading embedding model: {}", model_type.display_name());
 
-        let options = InitOptions::new(model_type.to_fastembed())
+        let model = match model_type.to_fastembed_builtin() {
+            Some(builtin) => Self::load_builtin(cache_dir, builtin, model_type)?,
+            None => Self::load_user_defined(cache_dir, model_type)?,
+        };
+
+        Ok(Self { model, model_type })
+    }
+
+    fn load_builtin(
+        cache_dir: PathBuf,
+        builtin: EmbeddingModel,
+        model_type: CodeGraphEmbeddingModel,
+    ) -> Result<TextEmbedding> {
+        let options = InitOptions::new(builtin)
             .with_cache_dir(cache_dir)
             .with_show_download_progress(true);
 
-        let model = TextEmbedding::try_new(options)
-            .map_err(|e| MemoryError::model(format!("Failed to load {} model: {e}", model_type.display_name())))?;
+        TextEmbedding::try_new(options).map_err(|e| {
+            MemoryError::model(format!(
+                "Failed to load {} model: {e}",
+                model_type.display_name()
+            ))
+        })
+    }
 
-        Ok(Self { model, model_type })
+    /// Load Granite (or other user-defined) ONNX + tokenizer files
+    /// from HuggingFace via hf-hub, then hand them to fastembed's
+    /// `try_new_from_user_defined` path.
+    fn load_user_defined(
+        cache_dir: PathBuf,
+        model_type: CodeGraphEmbeddingModel,
+    ) -> Result<TextEmbedding> {
+        let (repo, pooling) = match model_type {
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2 => {
+                (GRANITE_97M_REPO, Pooling::Cls)
+            }
+            other => {
+                return Err(MemoryError::model(format!(
+                    "load_user_defined called for non-user-defined model: {other:?}"
+                )));
+            }
+        };
+
+        let bundle = download_user_defined_model(repo, &cache_dir, model_type)?;
+        let user_model = UserDefinedEmbeddingModel::new(
+            bundle.onnx_bytes,
+            TokenizerFiles {
+                tokenizer_file: bundle.tokenizer_file,
+                config_file: bundle.config_file,
+                special_tokens_map_file: bundle.special_tokens_map_file,
+                tokenizer_config_file: bundle.tokenizer_config_file,
+            },
+        )
+        .with_pooling(pooling);
+
+        let options = InitOptionsUserDefined::new().with_max_length(model_type.max_length());
+
+        TextEmbedding::try_new_from_user_defined(user_model, options).map_err(|e| {
+            MemoryError::model(format!(
+                "Failed to load {} from user-defined ONNX: {e}",
+                model_type.display_name()
+            ))
+        })
     }
 
     /// Generate embedding for a single text
@@ -103,8 +210,16 @@ impl FastembedEmbedding {
         }
 
         let owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+        // Granite-97m's intermediate tensors at 32K tokens are larger
+        // than BGE-small's at 512. Halve the batch when we know we're
+        // running the long-context model — peak memory stays bounded
+        // even when full-body texts approach the upper context bound.
+        let batch_size = match self.model_type {
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2 => 32,
+            _ => 64,
+        };
         self.model
-            .embed(owned, Some(64))
+            .embed(owned, Some(batch_size))
             .map_err(|e| MemoryError::embedding(format!("Batch embedding failed: {e}")))
     }
 
@@ -117,6 +232,85 @@ impl FastembedEmbedding {
     pub(crate) fn model_type(&self) -> CodeGraphEmbeddingModel {
         self.model_type
     }
+}
+
+/// Bundle of bytes needed to construct a `UserDefinedEmbeddingModel`.
+struct UserDefinedModelBundle {
+    onnx_bytes: Vec<u8>,
+    tokenizer_file: Vec<u8>,
+    config_file: Vec<u8>,
+    special_tokens_map_file: Vec<u8>,
+    tokenizer_config_file: Vec<u8>,
+}
+
+/// Download the ONNX file + tokenizer config bundle for `repo` via
+/// hf-hub, caching to `cache_dir/<repo>`. Returns the bytes loaded.
+///
+/// hf-hub's cache structure differs from fastembed's; we deliberately
+/// use a sub-namespace so a user's existing fastembed cache isn't
+/// disturbed.
+fn download_user_defined_model(
+    repo: &str,
+    cache_dir: &std::path::Path,
+    model_type: CodeGraphEmbeddingModel,
+) -> Result<UserDefinedModelBundle> {
+    use hf_hub::api::sync::ApiBuilder;
+
+    let api_cache = cache_dir.join("hf_hub");
+    std::fs::create_dir_all(&api_cache).map_err(|e| {
+        MemoryError::model(format!(
+            "Failed to create hf-hub cache dir at {}: {e}",
+            api_cache.display()
+        ))
+    })?;
+
+    let api = ApiBuilder::new()
+        .with_cache_dir(api_cache)
+        .with_progress(true)
+        .build()
+        .map_err(|e| {
+            MemoryError::model(format!(
+                "Failed to initialise hf-hub API for {}: {e}",
+                model_type.display_name()
+            ))
+        })?;
+
+    let model_repo = api.model(repo.to_string());
+
+    // Required files for UserDefinedEmbeddingModel + TokenizerFiles.
+    let onnx_path = match model_type {
+        CodeGraphEmbeddingModel::Granite97mMultilingualR2 => GRANITE_97M_ONNX_PATH,
+        _ => GRANITE_97M_ONNX_PATH,
+    };
+    let onnx_local = model_repo.get(onnx_path).map_err(|e| {
+        MemoryError::model(format!(
+            "Failed to download {onnx_path} from {repo}: {e}"
+        ))
+    })?;
+    let onnx_bytes = std::fs::read(&onnx_local).map_err(|e| {
+        MemoryError::model(format!(
+            "Failed to read {} after download: {e}",
+            onnx_local.display()
+        ))
+    })?;
+
+    let read_required =
+        |name: &str, repo: &hf_hub::api::sync::ApiRepo| -> Result<Vec<u8>> {
+            let local = repo.get(name).map_err(|e| {
+                MemoryError::model(format!("Failed to download {name}: {e}"))
+            })?;
+            std::fs::read(&local).map_err(|e| {
+                MemoryError::model(format!("Failed to read {}: {e}", local.display()))
+            })
+        };
+
+    Ok(UserDefinedModelBundle {
+        onnx_bytes,
+        tokenizer_file: read_required("tokenizer.json", &model_repo)?,
+        config_file: read_required("config.json", &model_repo)?,
+        special_tokens_map_file: read_required("special_tokens_map.json", &model_repo)?,
+        tokenizer_config_file: read_required("tokenizer_config.json", &model_repo)?,
+    })
 }
 
 /// Ensure onnxruntime.dll is present for ort-load-dynamic on Windows.
@@ -206,4 +400,56 @@ fn ensure_ort_dll(cache_dir: &std::path::Path) -> Result<()> {
     std::env::set_var("ORT_DYLIB_PATH", &dll_path);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enum_dimensions_are_correct() {
+        assert_eq!(CodeGraphEmbeddingModel::BgeSmall.dimension(), 384);
+        assert_eq!(CodeGraphEmbeddingModel::JinaCodeV2.dimension(), 768);
+        assert_eq!(
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2.dimension(),
+            384
+        );
+    }
+
+    #[test]
+    fn max_length_reflects_context_window() {
+        assert_eq!(CodeGraphEmbeddingModel::BgeSmall.max_length(), 512);
+        assert_eq!(CodeGraphEmbeddingModel::JinaCodeV2.max_length(), 8192);
+        assert_eq!(
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2.max_length(),
+            32_768
+        );
+    }
+
+    #[test]
+    fn granite_is_user_defined_only() {
+        // Granite is loaded via the user-defined path because fastembed
+        // doesn't ship it in its enum.
+        assert!(CodeGraphEmbeddingModel::Granite97mMultilingualR2
+            .to_fastembed_builtin()
+            .is_none());
+        assert!(CodeGraphEmbeddingModel::BgeSmall.to_fastembed_builtin().is_some());
+        assert!(CodeGraphEmbeddingModel::JinaCodeV2.to_fastembed_builtin().is_some());
+    }
+
+    #[test]
+    fn model_id_tags_are_distinct() {
+        let tags = [
+            CodeGraphEmbeddingModel::BgeSmall.model_id_tag(),
+            CodeGraphEmbeddingModel::JinaCodeV2.model_id_tag(),
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2.model_id_tag(),
+        ];
+        for (i, a) in tags.iter().enumerate() {
+            for (j, b) in tags.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "model_id_tag must be unique across variants");
+                }
+            }
+        }
+    }
 }

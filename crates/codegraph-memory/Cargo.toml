@@ -57,6 +57,15 @@ fastembed = { version = "4", default-features = false, features = ["ort-load-dyn
 ureq = { version = "2.9", features = ["tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Direct hf-hub dep for user-defined models (e.g. Granite Embedding 97M
+# Multilingual R2). fastembed exposes `UserDefinedEmbeddingModel` but
+# doesn't help us fetch the ONNX + tokenizer; we drive hf-hub directly.
+# Version pinned to match fastembed's transitive dep.
+[dependencies.hf-hub]
+version = "0.4"
+default-features = false
+features = ["ureq", "rustls-tls"]
+
 [dev-dependencies]
 tempfile = "3.0"
 criterion = "0.5"
