@@ -54,10 +54,13 @@ members = [
 
     # MCP/LSP server
     "crates/codegraph-server",
+
+    # Test harness — JSON-RPC integration tests, golden-file comparison
+    "crates/codegraph-harness",
 ]
 
 [workspace.package]
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/codegraph-ai/codegraph"

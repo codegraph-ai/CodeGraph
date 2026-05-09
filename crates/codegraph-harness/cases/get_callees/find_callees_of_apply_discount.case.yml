@@ -1,0 +1,40 @@
+id: get_callees.apply_discount.rust_basic
+description: Find callees of apply_discount — calls compute_total
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_get_callees
+  args:
+    uri: "file://${fixture}"
+    line: 17
+    depth: 1
+
+expect:
+  match: exact
+  data:
+    callees:
+      - call_site:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 9
+        depth: 1
+        symbol:
+          docstring: null
+          is_public: true
+          kind: Function
+          location:
+            column: 0
+            end_column: 10000
+            end_line: 11
+            file: ${fixture}
+            line: 9
+          name: compute_total
+          signature: "pub fn compute_total(order: &Order) -> u32 {"
+          visibility: public
+    fallback_message: "No symbol at line 17. Using nearest symbol 'apply_discount' instead."
+    symbol_name: apply_discount
+    used_fallback: true

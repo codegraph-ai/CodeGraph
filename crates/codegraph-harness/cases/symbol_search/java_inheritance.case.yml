@@ -1,0 +1,24 @@
+id: symbol_search.java_inheritance_generics_packages
+description: |
+  P5 Java fixture coverage. Searches for `Box` — a bounded-generic
+  static inner class. Verifies Java parsing through the harness.
+
+setup:
+  fixture: languages/java/Inheritance.java
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: Box
+    compact: true
+
+expect:
+  match: contains
+  data:
+    results:
+      - match_reason: SymbolName
+        symbol:
+          kind: Class
+          # Java parser emits fully-qualified names — `Box` is the
+          # static inner class `fixtures.basic.Box`.
+          name: fixtures.basic.Box

@@ -1,0 +1,23 @@
+# Copyright 2025-2026 Andrey Vasilevsky <anvanster@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "codegraph-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JSON-RPC integration test harness for codegraph-server. Drives codegraph-server --mcp via stdio, runs cases against curated fixtures, compares responses to hand-verified expected JSON. Pure programmatic match — no AI assessment."
+
+[[bin]]
+name = "codegraph-harness"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+anyhow = "1.0"
+walkdir = "2.5"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3.0"
+which = "6"

@@ -1,0 +1,34 @@
+id: get_symbol_info.order_struct.rust_basic
+description: Symbol info for the Order struct
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_get_symbol_info
+  args:
+    uri: "file://${fixture}"
+    line: 4
+
+expect:
+  match: exact
+  data:
+    complexity: null
+    has_tests: false
+    is_deprecated: false
+    is_public: true
+    lines_of_code: 4
+    reference_count: 3
+    symbol:
+      docstring: null
+      is_public: true
+      kind: Class
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 7
+        file: ${fixture}
+        line: 4
+      name: Order
+      signature: null
+      visibility: public

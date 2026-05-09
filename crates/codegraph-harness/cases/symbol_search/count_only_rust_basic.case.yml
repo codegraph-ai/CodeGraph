@@ -1,0 +1,22 @@
+id: symbol_search.count_only.rust_basic
+description: |
+  P3 sanity: only assert that the search returns exactly 2 results
+  (the Function definition and the re-export Module entry). Element
+  contents are not compared — useful when expected payload is messy
+  but you care about cardinality.
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: compute_total
+    compact: true
+
+expect:
+  match: count_only
+  data:
+    results:
+      - null
+      - null

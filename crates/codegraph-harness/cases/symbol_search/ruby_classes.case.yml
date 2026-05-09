@@ -1,0 +1,41 @@
+id: symbol_search.ruby_classes_modules_blocks
+description: P8 Ruby fixture coverage. Searches for DiscountedOrder — a class including a module mixin.
+setup:
+  fixture: languages/ruby/basic.rb
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: DiscountedOrder
+    compact: true
+expect:
+  match: contains
+  data:
+    results:
+    - match_reason: SymbolName
+      symbol:
+        docstring: null
+        is_public: true
+        kind: Class
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 15
+          file: ${fixture}
+          line: 4
+        name: Shop::Order
+        signature: null
+        visibility: public
+    - match_reason: SymbolName
+      symbol:
+        docstring: null
+        is_public: true
+        kind: Class
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 26
+          file: ${fixture}
+          line: 24
+        name: Shop::DiscountedOrder
+        signature: null
+        visibility: public

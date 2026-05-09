@@ -1,0 +1,25 @@
+id: get_symbol_info.order_struct_structural.rust_basic
+description: |
+  P3 sanity: assert only the structural shape of the Order-symbol
+  response (kind, name, is_public, visibility). Other fields like
+  lines_of_code or reference_count are tolerated regardless of value
+  — the case verifies presence-of-shape, not exact numeric equality.
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_get_symbol_info
+  args:
+    uri: "file://${fixture}"
+    line: 4
+
+expect:
+  match: structural
+  data:
+    is_public: true
+    symbol:
+      is_public: true
+      kind: Class
+      name: Order
+      visibility: public

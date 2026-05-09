@@ -1,0 +1,59 @@
+id: analyze_complexity.rust_basic
+description: 'P8 analysis-family: complexity scores for basic.rs functions.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_analyze_complexity
+  args:
+    uri: file://${fixture}
+expect:
+  match: contains
+  data:
+    functions:
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 11
+      line_start: 9
+      name: compute_total
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 26
+      line_start: 24
+      name: final_price
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 4
+      grade: A
+      line_end: 21
+      line_start: 18
+      name: apply_discount
+    recommendations: []
+    summary:
+      above_threshold: 0
+      average_complexity: 1.0
+      max_complexity: 1
+      overall_grade: A
+      threshold: 10
+      total_functions: 3

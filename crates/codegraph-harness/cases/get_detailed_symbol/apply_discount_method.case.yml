@@ -1,0 +1,124 @@
+id: get_detailed_symbol.apply_discount.rust_basic
+description: Detailed info for apply_discount impl method (callers + callees)
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_get_detailed_symbol
+  args:
+    uri: "file://${fixture}"
+    line: 17
+
+expect:
+  match: exact
+  data:
+    callees:
+      - call_site:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 9
+        depth: 1
+        symbol:
+          docstring: null
+          is_public: true
+          kind: Function
+          location:
+            column: 0
+            end_column: 10000
+            end_line: 11
+            file: ${fixture}
+            line: 9
+          name: compute_total
+          signature: "pub fn compute_total(order: &Order) -> u32 {"
+          visibility: public
+    callers:
+      - call_site:
+          column: 0
+          end_column: 10000
+          end_line: 26
+          file: ${fixture}
+          line: 24
+        depth: 1
+        symbol:
+          docstring: null
+          is_public: true
+          kind: Function
+          location:
+            column: 0
+            end_column: 10000
+            end_line: 26
+            file: ${fixture}
+            line: 24
+          name: final_price
+          signature: "pub fn final_price(order: &Order, discount_percent: u32) -> u32 {"
+          visibility: public
+    fallback_message: "No symbol at line 17. Using nearest symbol 'apply_discount' instead."
+    source: "    fn apply_discount(&self, percent: u32) -> u32 {\n        let total = compute_total(self);\n        total - (total * percent / 100)\n    }"
+    symbol:
+      callees:
+        - call_site:
+            column: 0
+            end_column: 10000
+            end_line: 11
+            file: ${fixture}
+            line: 9
+          depth: 1
+          symbol:
+            docstring: null
+            is_public: true
+            kind: Function
+            location:
+              column: 0
+              end_column: 10000
+              end_line: 11
+              file: ${fixture}
+              line: 9
+            name: compute_total
+            signature: "pub fn compute_total(order: &Order) -> u32 {"
+            visibility: public
+      callers:
+        - call_site:
+            column: 0
+            end_column: 10000
+            end_line: 26
+            file: ${fixture}
+            line: 24
+          depth: 1
+          symbol:
+            docstring: null
+            is_public: true
+            kind: Function
+            location:
+              column: 0
+              end_column: 10000
+              end_line: 26
+              file: ${fixture}
+              line: 24
+            name: final_price
+            signature: "pub fn final_price(order: &Order, discount_percent: u32) -> u32 {"
+            visibility: public
+      complexity: 1
+      dependencies: []
+      dependents: []
+      has_tests: false
+      is_deprecated: false
+      is_public: false
+      lines_of_code: 4
+      reference_count: 2
+      symbol:
+        docstring: null
+        is_public: false
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 21
+          file: ${fixture}
+          line: 18
+        name: apply_discount
+        signature: "fn apply_discount(&self, percent: u32) -> u32 {"
+        visibility: private
+    used_fallback: true

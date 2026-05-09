@@ -1,0 +1,43 @@
+id: symbol_search.sort_arrays.rust_basic
+description: |
+  P2/P4 sanity: same query as exact_match.rust_basic but expected
+  results are written in *flipped* order. P2 originally needed an
+  explicit `sort_arrays: true` here; with P4 the symbol_search profile
+  defaults sort_arrays=on, so the case YAML doesn't have to specify
+  it. Proves both that canonical-sort works and that profile
+  inheritance kicks in — drop the profile entry and this case fails.
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: compute_total
+    compact: true
+
+expect:
+  match: exact
+  data:
+    results:
+      # Deliberately flipped — Module entry first, Function second.
+      # canonical_sort orders by JSON-string lex, so both sides land
+      # in the same order before compare.
+      - match_reason: SymbolName
+        symbol:
+          docstring: null
+          is_public: true
+          kind: Module
+          location: {column: 0, end_column: 10000, end_line: 1, file: "", line: 1}
+          name: "compute_total as total"
+          signature: null
+          visibility: public
+      - match_reason: SymbolName
+        symbol:
+          docstring: null
+          is_public: true
+          kind: Function
+          location: {column: 0, end_column: 10000, end_line: 11, file: "${fixture}", line: 9}
+          name: compute_total
+          signature: null
+          visibility: public

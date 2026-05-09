@@ -1,0 +1,23 @@
+id: symbol_search.python_classes_decorators_comprehensions
+description: |
+  P5 Python fixture coverage. Searches for the `Dog` class —
+  a subclass with a decorated method. Verifies the harness can
+  drive the Python parser through the same MCP path.
+
+setup:
+  fixture: languages/python/classes_decorators_comprehensions.py
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: Dog
+    compact: true
+
+expect:
+  match: contains
+  data:
+    results:
+      - match_reason: SymbolName
+        symbol:
+          kind: Class
+          name: Dog

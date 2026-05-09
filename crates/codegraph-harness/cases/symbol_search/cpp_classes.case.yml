@@ -1,0 +1,55 @@
+id: symbol_search.cpp_classes_templates_namespaces
+description: P8 C++ fixture coverage. Searches for FixedOrder — a class implementing a virtual interface.
+setup:
+  fixture: languages/cpp/basic.cpp
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: FixedOrder
+    compact: true
+expect:
+  match: contains
+  data:
+    results:
+    - match_reason: SymbolName
+      symbol:
+        docstring: null
+        is_public: false
+        kind: Class
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 43
+          file: ${fixture}
+          line: 33
+        name: shop::FixedOrder
+        signature: null
+        visibility: private
+    - match_reason: SymbolName
+      symbol:
+        docstring: null
+        is_public: false
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 35
+          file: ${fixture}
+          line: 35
+        name: FixedOrder
+        signature: null
+        visibility: private
+    - match_reason: SymbolName
+      symbol:
+        docstring: null
+        is_public: true
+        kind: Class
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 8
+        name: shop::Order
+        signature: null
+        visibility: public

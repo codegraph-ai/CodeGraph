@@ -1,0 +1,23 @@
+id: symbol_search.typescript_generics_decorators_modules
+description: |
+  P5 TypeScript fixture coverage. Searches for `InMemoryRepo` — a
+  generic class implementing a generic interface. Verifies TS parsing
+  through the harness.
+
+setup:
+  fixture: languages/typescript/generics_decorators_modules.ts
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: InMemoryRepo
+    compact: true
+
+expect:
+  match: contains
+  data:
+    results:
+      - match_reason: SymbolName
+        symbol:
+          kind: Class
+          name: InMemoryRepo

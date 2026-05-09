@@ -1,0 +1,23 @@
+id: symbol_search.rust_generics_modules
+description: |
+  P5 Rust generics+modules fixture coverage. Searches for `Cache` —
+  a generic struct inside a nested module, also re-exported at the
+  crate root.
+
+setup:
+  fixture: languages/rust/generics_modules.rs
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: Cache
+    compact: true
+
+expect:
+  match: contains
+  data:
+    results:
+      - match_reason: SymbolName
+        symbol:
+          kind: Class
+          name: Cache

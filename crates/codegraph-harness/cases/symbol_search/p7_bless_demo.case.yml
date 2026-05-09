@@ -1,0 +1,27 @@
+id: symbol_search.p7_bless_demo.rust_basic
+description: P7 record/bless workflow demo — stub created without expected.
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: final_price
+    compact: true
+expect:
+  match: contains
+  data:
+    results:
+    - match_reason: SymbolName
+      symbol:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 26
+          file: ${fixture}
+          line: 24
+        name: final_price
+        signature: null
+        visibility: public

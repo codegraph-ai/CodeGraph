@@ -1,0 +1,22 @@
+id: symbol_search.go_interfaces_goroutines_packages
+description: |
+  P5 Go fixture coverage. Searches for `FanOutSquares` — a function
+  that spawns goroutines. Verifies Go parsing through the harness.
+
+setup:
+  fixture: languages/go/interfaces_goroutines_packages.go
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: FanOutSquares
+    compact: true
+
+expect:
+  match: contains
+  data:
+    results:
+      - match_reason: SymbolName
+        symbol:
+          kind: Function
+          name: FanOutSquares

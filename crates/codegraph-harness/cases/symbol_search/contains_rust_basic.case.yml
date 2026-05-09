@@ -1,0 +1,26 @@
+id: symbol_search.contains.rust_basic
+description: |
+  P3 sanity: assert that the `compute_total` Function entry exists
+  in the search results, regardless of how many other results are
+  also returned (the re-export adds a second entry). `contains` mode
+  matches expected elements against any element in actual.
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: compute_total
+    compact: true
+
+expect:
+  match: contains
+  data:
+    results:
+      - match_reason: SymbolName
+        symbol:
+          is_public: true
+          kind: Function
+          name: compute_total
+          visibility: public

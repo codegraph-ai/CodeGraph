@@ -1,0 +1,46 @@
+id: symbol_search.exact_match.rust_basic
+description: Exact-name search for a top-level fn in basic.rs
+
+setup:
+  fixture: languages/rust/basic.rs
+  workspace_layout: single_file
+  pre_index: true
+
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: compute_total
+    compact: true
+
+expect:
+  match: exact
+  data:
+    results:
+      - match_reason: SymbolName
+        symbol:
+          docstring: null
+          is_public: true
+          kind: Function
+          location:
+            column: 0
+            end_column: 10000
+            end_line: 11
+            file: ${fixture}
+            line: 9
+          name: compute_total
+          signature: null
+          visibility: public
+      - match_reason: SymbolName
+        symbol:
+          docstring: null
+          is_public: true
+          kind: Module
+          location:
+            column: 0
+            end_column: 10000
+            end_line: 1
+            file: ""
+            line: 1
+          name: "compute_total as total"
+          signature: null
+          visibility: public

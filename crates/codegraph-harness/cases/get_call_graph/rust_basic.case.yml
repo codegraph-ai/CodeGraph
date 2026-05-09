@@ -1,0 +1,56 @@
+id: get_call_graph.rust_basic
+description: 'P8 analysis-family: call graph rooted at final_price (calls apply_discount → compute_total).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_get_call_graph
+  args:
+    uri: file://${fixture}
+    line: 24
+    depth: 2
+expect:
+  match: contains
+  data:
+    edges:
+    - from: '3'
+      to: '1'
+      type: calls
+    - from: '3'
+      to: '2'
+      type: calls
+    nodes:
+    - col_end: 10000
+      col_start: 0
+      depth: 1
+      direction: callee
+      id: '2'
+      language: ''
+      line_end: 21
+      line_start: 18
+      name: apply_discount
+      path: ${fixture}
+      signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+    - col_end: 10000
+      col_start: 0
+      depth: 2
+      direction: callee
+      id: '1'
+      language: ''
+      line_end: 11
+      line_start: 9
+      name: compute_total
+      path: ${fixture}
+      signature: 'pub fn compute_total(order: &Order) -> u32 {'
+    root: '3'
+    root_node:
+      col_end: 10000
+      col_start: 0
+      depth: 0
+      id: '3'
+      language: ''
+      line_end: 26
+      line_start: 24
+      name: final_price
+      path: ${fixture}
+      signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+    symbol_name: final_price
