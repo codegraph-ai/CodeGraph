@@ -1,0 +1,45 @@
+id: get_module_summary.python_multifile
+description: 'P8 OSS analysis: summary of a 2-file Python directory (mod_a, mod_b from circular fixture).'
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+invoke:
+  tool: codegraph_get_module_summary
+  args:
+    path: ${workspace}
+expect:
+  match: contains
+  data:
+    directory: ${workspace}
+    external_deps:
+    - mod_a
+    - mod_b
+    files: 2
+    languages:
+    - files: 0
+      functions: 4
+      language: unknown
+    - files: 2
+      functions: 0
+      language: python
+    top_complex_functions:
+    - complexity: 1
+      line_start: 10
+      name: describe
+      path: ${workspace}/mod_a.py
+    - complexity: 1
+      line_start: 10
+      name: describe
+      path: ${workspace}/mod_b.py
+    - complexity: 1
+      line_start: 7
+      name: __init__
+      path: ${workspace}/mod_a.py
+    - complexity: 1
+      line_start: 7
+      name: __init__
+      path: ${workspace}/mod_b.py
+    total_classes: 2
+    total_functions: 4
+    total_imports: 0
+    total_lines: 22

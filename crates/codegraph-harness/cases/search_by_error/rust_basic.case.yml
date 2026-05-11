@@ -1,0 +1,13 @@
+id: search_by_error.rust_basic
+description: 'P8 OSS search: error-flow scan on basic.rs (no error handling — expect empty).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_search_by_error
+  args: {}
+expect:
+  match: contains
+  data:
+    error_type_filter: null
+    functions: []
+    mode: any

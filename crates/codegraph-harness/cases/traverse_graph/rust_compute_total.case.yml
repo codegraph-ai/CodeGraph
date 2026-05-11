@@ -1,0 +1,14 @@
+id: traverse_graph.rust_compute_total
+description: 'P8 OSS analysis: traverse graph starting from compute_total following Calls edges.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_traverse_graph
+  args:
+    uri: file://${fixture}
+    line: 8
+    edgeTypes:
+    - calls
+expect:
+  match: contains
+  data: []

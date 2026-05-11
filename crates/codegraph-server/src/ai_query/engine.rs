@@ -1952,11 +1952,31 @@ impl QueryEngine {
                             self.node_to_symbol_info(&graph, entries[i].0),
                             self.node_to_symbol_info(&graph, entries[j].0),
                         ) {
+                            // Canonicalise pair direction: symbol_a always
+                            // has the lexicographically smaller name (ties
+                            // broken by path + line). `entries` comes from
+                            // a HashMap iterator with non-deterministic
+                            // order, so without this, (a,b) and (b,a)
+                            // appearances flip between runs and break
+                            // regression tests.
+                            let (sa, sb, ida, idb) = if (
+                                sym_a.name.as_str(),
+                                sym_a.location.file.as_str(),
+                                sym_a.location.line,
+                            ) <= (
+                                sym_b.name.as_str(),
+                                sym_b.location.file.as_str(),
+                                sym_b.location.line,
+                            ) {
+                                (sym_a, sym_b, entries[i].0, entries[j].0)
+                            } else {
+                                (sym_b, sym_a, entries[j].0, entries[i].0)
+                            };
                             pairs.push(DuplicatePair {
-                                symbol_a: sym_a,
-                                node_id_a: entries[i].0,
-                                symbol_b: sym_b,
-                                node_id_b: entries[j].0,
+                                symbol_a: sa,
+                                node_id_a: ida,
+                                symbol_b: sb,
+                                node_id_b: idb,
                                 similarity: sim,
                             });
                         }

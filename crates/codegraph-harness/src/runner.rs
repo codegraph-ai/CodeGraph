@@ -144,11 +144,23 @@ fn run_inner(
         &workspace_str,
     );
 
-    // 4. Call tool
+    // 4. Call tool. If `retry_on_warmup` is set, retry every 2s
+    //    for up to 30s while the response shape indicates the
+    //    embedding pipeline is still warming up. Stabilises
+    //    similarity-family cases that race against ONNX startup.
     let timeout = Duration::from_millis(case.invoke.timeout_ms);
-    let response = client
+    let mut response = client
         .call_tool(&case.invoke.tool, &args, timeout)
         .with_context(|| format!("call_tool({})", case.invoke.tool))?;
+    if case.invoke.retry_on_warmup {
+        let started = std::time::Instant::now();
+        while is_warmup_response(&response) && started.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_secs(2));
+            response = client
+                .call_tool(&case.invoke.tool, &args, timeout)
+                .with_context(|| format!("retry call_tool({})", case.invoke.tool))?;
+        }
+    }
 
     // 5. Shutdown
     let _ = client.shutdown();
@@ -237,6 +249,32 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// True if the response indicates the embedding pipeline is still
+/// warming up. The MCP envelope wraps the payload as
+/// `{ content: [{ type: "text", text: "<json>" }] }` and tools emit
+/// either `{status: "embeddings_in_progress", message: "..."}` or a
+/// `message` containing the canonical "Embeddings are building"
+/// substring. Either signal causes a retry under `retry_on_warmup`.
+fn is_warmup_response(response: &serde_json::Value) -> bool {
+    let candidates = [
+        response.clone(),
+        unwrap_mcp_content(response).unwrap_or(serde_json::Value::Null),
+    ];
+    for v in &candidates {
+        if let Some(obj) = v.as_object() {
+            if obj.get("status").and_then(|s| s.as_str()) == Some("embeddings_in_progress") {
+                return true;
+            }
+            if let Some(msg) = obj.get("message").and_then(|s| s.as_str()) {
+                if msg.contains("Embeddings are building") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Initialise a git repo in `workspace` with one deterministic commit

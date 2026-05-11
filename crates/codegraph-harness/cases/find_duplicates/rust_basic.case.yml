@@ -1,22 +1,105 @@
 id: find_duplicates.rust_basic
 description: |
-  P8 pro-tool: find duplicate symbols in basic.rs. Similarity values
-  are embedding-derived and drift in the 2nd decimal between ONNX
-  runs near rounding boundaries. Case-side `extra_volatile:
-  [similarity]` overrides the similarity_profile's `keep_volatile`
-  default (case-strip beats profile-keep, per merge logic) so the
-  assertion checks pair *structure* without depending on float drift.
+  P8 pro-tool: find duplicate symbols in basic.rs. Uses
+  `retry_on_warmup: true` so the runner re-invokes every 2s for up
+  to 30s while the ONNX embedding pipeline finishes warming up.
+  Without this, the case would race ONNX startup (~5s) and capture
+  either `embeddings_in_progress` (cold) or `pairs` (warm). With
+  retry, every run sees the warm-state pairs deterministically.
+  Case-side `extra_volatile: [similarity]` overrides the
+  similarity_profile's `keep_volatile` default so the assertion
+  checks pair *structure* without depending on 2nd-decimal
+  embedding drift.
 setup:
   fixture: languages/rust/basic.rs
 invoke:
   tool: codegraph_find_duplicates
   binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
   args: {}
+  retry_on_warmup: true
 expect:
   match: contains
   normalize:
     extra_volatile:
     - similarity
   data:
-    message: Embeddings are building in the background. This tool requires embeddings to work. Please try again in a moment.
-    status: embeddings_in_progress
+    pairs:
+    - symbol_a:
+        docstring: null
+        is_public: false
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 21
+          file: ${fixture}
+          line: 18
+        name: apply_discount
+        signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+        visibility: private
+      symbol_b:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 9
+        name: compute_total
+        signature: 'pub fn compute_total(order: &Order) -> u32 {'
+        visibility: public
+    - symbol_a:
+        docstring: null
+        is_public: false
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 21
+          file: ${fixture}
+          line: 18
+        name: apply_discount
+        signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+        visibility: private
+      symbol_b:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 26
+          file: ${fixture}
+          line: 24
+        name: final_price
+        signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+        visibility: public
+    - symbol_a:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 9
+        name: compute_total
+        signature: 'pub fn compute_total(order: &Order) -> u32 {'
+        visibility: public
+      symbol_b:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 26
+          file: ${fixture}
+          line: 24
+        name: final_price
+        signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+        visibility: public
+    threshold: 0.7

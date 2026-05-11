@@ -85,6 +85,14 @@ pub struct Invoke {
     /// auto-discovered in target/release).
     #[serde(default)]
     pub binary: Option<String>,
+    /// When `true`, the runner re-invokes the tool every 2s for up
+    /// to 30s if the response shape indicates the embedding pipeline
+    /// is still warming up (status == "embeddings_in_progress" OR
+    /// message containing "Embeddings are building"). Use for
+    /// similarity-family tools that need warm embeddings to return
+    /// real results.
+    #[serde(default)]
+    pub retry_on_warmup: bool,
 }
 
 fn default_timeout_ms() -> u64 {
