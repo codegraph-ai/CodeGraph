@@ -43,6 +43,12 @@ pub struct Setup {
     #[serde(default = "default_pre_index")]
     #[allow(dead_code)]
     pub pre_index: bool,
+    /// When `true`, the runner inits a git repo inside the tempdir
+    /// (`git init` + `git add .` + a single `git commit` with
+    /// deterministic author/email) before spawning the server. Use
+    /// for git-family tools that need a real git history.
+    #[serde(default)]
+    pub init_git: bool,
 }
 
 fn default_workspace_layout() -> WorkspaceLayout {
@@ -72,6 +78,13 @@ pub struct Invoke {
     /// Per-tool timeout in milliseconds. Default 10000.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// Optional per-case binary override. Use to point pro-only cases
+    /// at codegraph-pro while the rest of the suite uses the
+    /// OSS binary. Absolute path. If unset, the harness's default
+    /// resolved binary is used (controlled by `--binary` flag or
+    /// auto-discovered in target/release).
+    #[serde(default)]
+    pub binary: Option<String>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -152,6 +165,11 @@ impl NormalizeOpts {
     /// profile entries first. Used by the runner after looking up
     /// `profiles::default_for(tool_name)`.
     pub fn merge(base: NormalizeOpts, overlay: NormalizeOpts) -> NormalizeOpts {
+        // Snapshot overlay's explicit strip list before consuming it
+        // in the merge loop. Used below to override base's
+        // keep_volatile — a case-side strip beats a profile-side keep.
+        let overlay_strip: Vec<String> = overlay.extra_volatile.clone();
+
         let mut extra_volatile = base.extra_volatile;
         for v in overlay.extra_volatile {
             if !extra_volatile.contains(&v) {
@@ -164,6 +182,13 @@ impl NormalizeOpts {
                 keep_volatile.push(v);
             }
         }
+        // Case-side extra_volatile wins over profile-side keep_volatile.
+        // Without this, a case asking to strip `similarity` (or any
+        // field a profile keeps for downstream comparison) is silently
+        // ignored. Profile authors decide defaults; case authors decide
+        // overrides.
+        keep_volatile.retain(|k| !overlay_strip.contains(k));
+
         let mut drop_where = base.drop_where;
         for p in overlay.drop_where {
             if !drop_where.contains(&p) {

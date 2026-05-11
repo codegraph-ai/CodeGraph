@@ -1,0 +1,33 @@
+id: get_symbol_info.typescript_repo
+description: 'P8 cross-lang nav: symbol info for InMemoryRepo in the TS fixture.'
+setup:
+  fixture: languages/typescript/generics_decorators_modules.ts
+invoke:
+  tool: codegraph_get_symbol_info
+  args:
+    uri: file://${fixture}
+    line: 7
+expect:
+  match: contains
+  data:
+    complexity: null
+    fallback_message: No symbol at line 7. Using nearest symbol 'InMemoryRepo' instead.
+    has_tests: false
+    is_deprecated: false
+    is_public: true
+    lines_of_code: 15
+    reference_count: 1
+    symbol:
+      docstring: null
+      is_public: true
+      kind: Class
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 22
+        file: ${fixture}
+        line: 8
+      name: InMemoryRepo
+      signature: null
+      visibility: public
+    used_fallback: true

@@ -341,6 +341,15 @@ impl CodeGraphBackend {
     ) -> std::result::Result<(), String> {
         use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
 
+        // Ephemeral workspaces (test harness tempdirs) skip
+        // persistence to the shared graph.db entirely. The in-memory
+        // graph is enough for a single test case; persisting it would
+        // pollute the shared registry with namespaces that no other
+        // run can dereference.
+        if crate::memory::is_ephemeral_workspace(workspace) {
+            return Ok(());
+        }
+
         let db_path = crate::memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
@@ -859,7 +868,7 @@ impl LanguageServer for CodeGraphBackend {
             if let Some(first) = workspace_folders.first() {
                 let slug = crate::memory::project_slug(first);
                 let mut state = self.index_state.lock().await;
-                *state = crate::index_state::IndexState::new(&slug);
+                *state = crate::index_state::IndexState::for_workspace(&slug, first);
                 let loaded = state.load();
                 if loaded > 0 {
                     tracing::info!("Loaded previous index state ({} files)", loaded);

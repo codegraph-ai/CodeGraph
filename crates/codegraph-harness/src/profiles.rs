@@ -164,15 +164,25 @@ fn memory_profile() -> NormalizeOpts {
 }
 
 /// Git history tools return commits with hashes / dates that change.
+/// Even with `init_git` pinning author + committer dates, response
+/// metadata like `queryTime` (wallclock) and `date` strings (which
+/// may render in the local timezone) are still volatile. Strip them.
 fn git_profile() -> NormalizeOpts {
     NormalizeOpts {
         sort_arrays: Some(true),
         extra_volatile: vec![
+            // Hash-shaped fields under various names tools use.
             "sha".to_string(),
             "commit_hash".to_string(),
+            "hash".to_string(),
+            "fullHash".to_string(),
+            // Date-shaped fields under various names.
             "author_date".to_string(),
             "commit_date".to_string(),
             "timestamp".to_string(),
+            "date".to_string(),
+            // Wallclock metadata.
+            "queryTime".to_string(),
         ],
         ..Default::default()
     }
@@ -329,5 +339,24 @@ mod tests {
         };
         let merged = NormalizeOpts::merge(base, overlay);
         assert_eq!(merged.extra_volatile, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn merge_case_extra_volatile_beats_profile_keep_volatile() {
+        // Profile says "keep similarity". Case says "strip similarity".
+        // The case wins — without this, find_duplicates can't be
+        // de-flaked when embedding similarity drifts.
+        let base = NormalizeOpts {
+            keep_volatile: vec!["similarity".to_string(), "score".to_string()],
+            ..Default::default()
+        };
+        let overlay = NormalizeOpts {
+            extra_volatile: vec!["similarity".to_string()],
+            ..Default::default()
+        };
+        let merged = NormalizeOpts::merge(base, overlay);
+        assert!(merged.extra_volatile.contains(&"similarity".to_string()));
+        // `score` stays kept (profile only); `similarity` is removed.
+        assert_eq!(merged.keep_volatile, vec!["score".to_string()]);
     }
 }

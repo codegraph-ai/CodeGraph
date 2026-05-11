@@ -1,0 +1,20 @@
+id: get_callees.cpp_apply_discount
+description: 'P8 cross-lang nav: callees of FixedOrder::apply_discount in the C++ fixture (calls compute_total).'
+setup:
+  fixture: languages/cpp/basic.cpp
+invoke:
+  tool: codegraph_get_callees
+  args:
+    uri: file://${fixture}
+    line: 36
+    depth: 1
+expect:
+  match: contains
+  data:
+    callees: []
+    diagnostic:
+      node_found: true
+      note: 'No callees found. This may indicate: (1) the function doesn''t call other functions, (2) the language parser doesn''t extract call relationships, or (3) indexes need to be rebuilt.'
+      symbol_name: apply_discount
+      total_edges_in_graph: 8
+    symbol_name: apply_discount

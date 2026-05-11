@@ -1,0 +1,20 @@
+id: get_callers.ruby_compute_total
+description: 'P8 cross-lang nav: callers of Order#compute_total in the Ruby fixture (called by Discountable#apply_discount mixin).'
+setup:
+  fixture: languages/ruby/basic.rb
+invoke:
+  tool: codegraph_get_callers
+  args:
+    uri: file://${fixture}
+    line: 11
+    depth: 1
+expect:
+  match: contains
+  data:
+    callers: []
+    diagnostic:
+      node_found: true
+      note: 'No callers found. This may indicate: (1) the function is not called anywhere, (2) the language parser doesn''t extract call relationships, or (3) indexes need to be rebuilt.'
+      symbol_name: Shop::Order
+      total_edges_in_graph: 5
+    symbol_name: Shop::Order

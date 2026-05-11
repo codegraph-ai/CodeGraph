@@ -307,14 +307,21 @@ pub fn record_from_result(
     }
 }
 
-/// Pull the language token out of `languages/<lang>/<file>` fixture
-/// paths. Falls back to `unknown` for off-convention paths.
+/// Pull the language token out of fixture paths. Recognised conventions:
+/// - `languages/<lang>/<file>` — single-file fixtures
+/// - `multifile/<lang>_<scenario>/...` — multi-file fixtures, where
+///   `<lang>` is everything before the first `_` of the directory name
+/// Falls back to `unknown` for off-convention paths.
 fn language_from_fixture(fixture: &str) -> String {
     let parts: Vec<&str> = fixture.split('/').collect();
     let mut prev = "";
     for p in &parts {
         if prev == "languages" {
             return (*p).to_string();
+        }
+        if prev == "multifile" {
+            // multifile/python_circular -> python
+            return p.split_once('_').map(|(l, _)| l.to_string()).unwrap_or_else(|| (*p).to_string());
         }
         prev = p;
     }
@@ -336,6 +343,24 @@ mod tests {
             "python"
         );
         assert_eq!(language_from_fixture("misc/foo.txt"), "unknown");
+    }
+
+    #[test]
+    fn language_from_fixture_handles_multifile() {
+        assert_eq!(
+            language_from_fixture("multifile/python_circular/mod_a.py"),
+            "python"
+        );
+        assert_eq!(
+            language_from_fixture("multifile/rust_workspace"),
+            "rust"
+        );
+        // Bare directory name without underscore — fall back to the
+        // segment itself so the row is still informative.
+        assert_eq!(
+            language_from_fixture("multifile/python"),
+            "python"
+        );
     }
 
     #[test]

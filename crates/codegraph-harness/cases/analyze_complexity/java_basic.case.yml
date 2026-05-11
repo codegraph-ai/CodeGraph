@@ -1,0 +1,137 @@
+id: analyze_complexity.java_basic
+description: 'P8 cross-lang analysis: complexity per function in the Java fixture.'
+setup:
+  fixture: languages/java/Inheritance.java
+invoke:
+  tool: codegraph_analyze_complexity
+  args:
+    uri: file://${fixture}
+expect:
+  match: contains
+  data:
+    functions:
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 1
+      grade: A
+      line_end: 19
+      line_start: 19
+      name: describe
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 1
+      grade: A
+      line_end: 9
+      line_start: 9
+      name: walk
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 17
+      line_start: 15
+      name: Animal
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 23
+      line_start: 21
+      name: getName
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 52
+      line_start: 50
+      name: add
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 4
+      grade: A
+      line_end: 34
+      line_start: 31
+      name: Dog
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 4
+      grade: A
+      line_end: 39
+      line_start: 36
+      name: describe
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 4
+      grade: A
+      line_end: 44
+      line_start: 41
+      name: walk
+    - complexity: 3
+      details:
+        complexity_branches: 1
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 1
+        complexity_nesting: 2
+        lines_of_code: 9
+      grade: A
+      line_end: 62
+      line_start: 54
+      name: max
+    recommendations: []
+    summary:
+      above_threshold: 0
+      average_complexity: 1.2222222222222223
+      max_complexity: 3
+      overall_grade: A
+      threshold: 10
+      total_functions: 9

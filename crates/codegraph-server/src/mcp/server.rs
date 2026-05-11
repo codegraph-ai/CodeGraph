@@ -106,7 +106,7 @@ impl McpBackend {
         query_engine.set_full_body_embedding(full_body_embedding);
 
         let parsers = Arc::new(ParserRegistry::new());
-        let index_state = Arc::new(Mutex::new(IndexState::new(&slug)));
+        let index_state = Arc::new(Mutex::new(IndexState::for_workspace(&slug, primary)));
         let indexer = Arc::new(Indexer::new(Arc::clone(&parsers), Arc::clone(&index_state)));
 
         Self {
@@ -155,6 +155,15 @@ impl McpBackend {
     ///
     /// Opens RocksDB briefly, writes registry entry + all data with namespace prefix, then closes.
     fn persist_graph(&self, graph: &CodeGraph) -> Result<(), String> {
+        // Ephemeral workspaces (test harness tempdirs) skip
+        // persistence to the shared graph.db. See
+        // `persist_graph_to_rocksdb` for the LSP-side equivalent.
+        if let Some(ws) = self.workspace_folders.first() {
+            if memory::is_ephemeral_workspace(ws) {
+                return Ok(());
+            }
+        }
+
         let db_path = memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
 
         // Ensure parent directory exists
@@ -494,7 +503,10 @@ impl McpBackend {
 
     /// Check if there is a saved index state (has been indexed before).
     pub fn has_index_state(&self) -> bool {
-        IndexState::new(&self.project_slug).exists_on_disk()
+        match self.workspace_folders.first() {
+            Some(ws) => IndexState::for_workspace(&self.project_slug, ws).exists_on_disk(),
+            None => IndexState::new(&self.project_slug).exists_on_disk(),
+        }
     }
 
     /// Build an [`IndexConfig`] from this backend's settings.

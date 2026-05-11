@@ -1,0 +1,22 @@
+id: find_duplicates.rust_basic
+description: |
+  P8 pro-tool: find duplicate symbols in basic.rs. Similarity values
+  are embedding-derived and drift in the 2nd decimal between ONNX
+  runs near rounding boundaries. Case-side `extra_volatile:
+  [similarity]` overrides the similarity_profile's `keep_volatile`
+  default (case-strip beats profile-keep, per merge logic) so the
+  assertion checks pair *structure* without depending on float drift.
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_duplicates
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - similarity
+  data:
+    message: Embeddings are building in the background. This tool requires embeddings to work. Please try again in a moment.
+    status: embeddings_in_progress

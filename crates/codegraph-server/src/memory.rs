@@ -71,8 +71,42 @@ pub(crate) fn shared_graph_db_path() -> Result<PathBuf, MemoryError> {
     Ok(PathBuf::from(home).join(".codegraph").join("graph.db"))
 }
 
+/// True for workspaces that should NOT pollute the persistent
+/// `~/.codegraph/projects/<slug>/` registry. Currently matches
+/// integration-test tempdirs created by `codegraph-harness` (any
+/// path component starting with `codegraph-harness-`). Their state
+/// is routed to `<workspace>/.codegraph-state/` so it dies with the
+/// tempdir instead of accumulating one stale entry per test case.
+pub fn is_ephemeral_workspace(workspace_path: &Path) -> bool {
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    canonical.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .map(|s| s.starts_with("codegraph-harness-"))
+            .unwrap_or(false)
+    })
+}
+
+/// True for slugs derived from ephemeral workspaces (test harness
+/// tempdirs). Used by cross-project scans to filter out stale
+/// ephemeral entries in the shared graph.db AND to short-circuit
+/// cross-project lookups when the current workspace is itself
+/// ephemeral (the test harness only cares about isolated results).
+pub fn is_ephemeral_slug(slug: &str) -> bool {
+    slug.starts_with("codegraph-harness-")
+}
+
 /// Derive a global data directory for a workspace under `~/.codegraph/projects/<slug>/`.
+/// Ephemeral workspaces (test harness tempdirs) route to
+/// `<workspace>/.codegraph-state/` instead so they don't accumulate
+/// in the global registry.
 fn project_data_dir(workspace_path: &Path) -> Result<PathBuf, MemoryError> {
+    if is_ephemeral_workspace(workspace_path) {
+        return Ok(workspace_path.join(".codegraph-state"));
+    }
+
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .ok_or_else(|| MemoryError::Other("Cannot determine home directory".to_string()))?;

@@ -1,0 +1,30 @@
+id: search_by_pattern.rust_pub_fn
+description: 'P8 search-family: regex search for `pub fn` declarations in basic.rs.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_search_by_pattern
+  args:
+    pattern: pub fn
+expect:
+  match: contains
+  data:
+    matches:
+    - kind: function
+      line_end: 11
+      line_start: 9
+      matched_in: signature
+      matched_text: 'pub fn compute_total(order: &Order) -> u32 {'
+      name: compute_total
+      path: ${fixture}
+      signature: 'pub fn compute_total(order: &Order) -> u32 {'
+    - kind: function
+      line_end: 26
+      line_start: 24
+      matched_in: signature
+      matched_text: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+      name: final_price
+      path: ${fixture}
+      signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+    pattern: pub fn
+    scope: any

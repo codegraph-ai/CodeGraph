@@ -1,0 +1,124 @@
+id: analyze_complexity.python_basic
+description: 'P8 cross-lang analysis: complexity per function in the Python fixture.'
+setup:
+  fixture: languages/python/classes_decorators_comprehensions.py
+invoke:
+  tool: codegraph_analyze_complexity
+  args:
+    uri: file://${fixture}
+expect:
+  match: contains
+  data:
+    functions:
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 2
+      grade: A
+      line_end: 22
+      line_start: 21
+      name: description
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 2
+      grade: A
+      line_end: 26
+      line_start: 25
+      name: kingdom
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 2
+      grade: A
+      line_end: 36
+      line_start: 35
+      name: bark
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 18
+      line_start: 16
+      name: __init__
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 32
+      line_start: 30
+      name: __init__
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 7
+      grade: A
+      line_end: 12
+      line_start: 6
+      name: trace
+    - complexity: 2
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 1
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 46
+      line_start: 44
+      name: name_to_age
+    - complexity: 3
+      details:
+        complexity_branches: 1
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 1
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 41
+      line_start: 39
+      name: collect_names
+    recommendations: []
+    summary:
+      above_threshold: 0
+      average_complexity: 1.375
+      max_complexity: 3
+      overall_grade: A
+      threshold: 10
+      total_functions: 8

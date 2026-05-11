@@ -1,0 +1,60 @@
+id: search_by_pattern.python_def
+description: 'P8 cross-lang search: regex search for `def ` in the Python fixture.'
+setup:
+  fixture: languages/python/classes_decorators_comprehensions.py
+invoke:
+  tool: codegraph_search_by_pattern
+  args:
+    pattern: 'def '
+expect:
+  match: contains
+  data:
+    matches:
+    - kind: class
+      line_end: 26
+      line_start: 15
+      matched_in: body
+      matched_text: |-
+        def __init__(self, name: str, age: int) -> None:
+                self.name = name
+                self.age = age
+
+            @property
+            def description(self) -> str:
+                return f"{self.name} ({self.age})"
+
+            @stati…
+      name: Animal
+      path: ${fixture}
+      signature: ''
+    - kind: class
+      line_end: 36
+      line_start: 29
+      matched_in: body
+      matched_text: |-
+        def __init__(self, name: str, age: int, breed: str) -> None:
+                super().__init__(name, age)
+                self.breed = breed
+
+            @trace
+            def bark(self) -> str:
+                return f"{self.name} says woo…
+      name: Dog
+      path: ${fixture}
+      signature: ''
+    - kind: function
+      line_end: 12
+      line_start: 6
+      matched_in: body
+      matched_text: |-
+        """Decorator that prints calls — exercises decorator analysis."""
+            @wraps(fn)
+            def wrapper(*args, **kwargs):
+                print(f"calling {fn.__name__}")
+                return fn(*args, **kwargs)
+            return…
+      name: trace
+      path: ${fixture}
+      signature: trace
+    pattern: 'def '
+    scope: any

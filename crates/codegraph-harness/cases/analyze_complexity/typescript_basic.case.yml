@@ -1,0 +1,72 @@
+id: analyze_complexity.typescript_basic
+description: 'P8 cross-lang analysis: complexity per function in the TypeScript fixture.'
+setup:
+  fixture: languages/typescript/generics_decorators_modules.ts
+invoke:
+  tool: codegraph_analyze_complexity
+  args:
+    uri: file://${fixture}
+expect:
+  match: contains
+  data:
+    functions:
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 13
+      line_start: 11
+      name: save
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 17
+      line_start: 15
+      name: findById
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 21
+      line_start: 19
+      name: countAll
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 6
+      grade: A
+      line_end: 29
+      line_start: 24
+      name: logged
+    recommendations: []
+    summary:
+      above_threshold: 0
+      average_complexity: 1.0
+      max_complexity: 1
+      overall_grade: A
+      threshold: 10
+      total_functions: 4

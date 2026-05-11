@@ -1,0 +1,18 @@
+id: mine_git_history.rust_basic
+description: 'P8 pro-tool: mine git history on a single-commit fixture repo.'
+setup:
+  fixture: languages/rust/basic.rs
+  init_git: true
+invoke:
+  tool: codegraph_mine_git_history
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    commits_processed: 1
+    commits_skipped: 1
+    memories_created: 0
+    memory_ids: []
+    status: success
+    warnings: []

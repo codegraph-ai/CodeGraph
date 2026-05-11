@@ -1,0 +1,20 @@
+id: get_callees.ruby_apply_discount
+description: 'P8 cross-lang nav: callees of Discountable#apply_discount in the Ruby fixture (calls compute_total via self).'
+setup:
+  fixture: languages/ruby/basic.rb
+invoke:
+  tool: codegraph_get_callees
+  args:
+    uri: file://${fixture}
+    line: 17
+    depth: 1
+expect:
+  match: contains
+  data:
+    callees: []
+    diagnostic:
+      node_found: true
+      note: 'No callees found. This may indicate: (1) the function doesn''t call other functions, (2) the language parser doesn''t extract call relationships, or (3) indexes need to be rebuilt.'
+      symbol_name: Shop::Discountable
+      total_edges_in_graph: 5
+    symbol_name: Shop::Discountable

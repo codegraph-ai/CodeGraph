@@ -1,0 +1,14 @@
+id: search_by_pattern.java_public_class
+description: 'P8 cross-lang search: regex search for `public class` in the Java fixture.'
+setup:
+  fixture: languages/java/Inheritance.java
+invoke:
+  tool: codegraph_search_by_pattern
+  args:
+    pattern: public class
+expect:
+  match: contains
+  data:
+    matches: []
+    pattern: public class
+    scope: any

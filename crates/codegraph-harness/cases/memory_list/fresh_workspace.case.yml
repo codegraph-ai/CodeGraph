@@ -1,0 +1,14 @@
+id: memory_list.fresh_workspace
+description: 'P8 memory-family: list memories on a fresh tempdir workspace.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_memory_list
+  args: {}
+expect:
+  match: contains
+  data:
+    limit: 50
+    memories: []
+    offset: 0
+    total: 0

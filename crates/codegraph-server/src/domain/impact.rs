@@ -311,6 +311,17 @@ fn find_cross_project_consumers(
         return Vec::new();
     }
 
+    // Short-circuit: when the current workspace is ephemeral (test
+    // harness tempdir), cross-project answers from leftover slugs in
+    // the shared graph.db are noise — the harness only cares about
+    // results from the isolated tempdir under test.
+    if current_project_slug
+        .map(crate::memory::is_ephemeral_slug)
+        .unwrap_or(false)
+    {
+        return Vec::new();
+    }
+
     tracing::debug!(
         "[cross-project] Searching for '{}' (source: {:?}, change: {}, current: {:?})",
         symbol_name,
@@ -375,7 +386,7 @@ fn find_cross_project_consumers(
             .unwrap_or("")
             .to_string();
 
-        if slug == current_slug || slug.is_empty() {
+        if slug == current_slug || slug.is_empty() || crate::memory::is_ephemeral_slug(&slug) {
             continue;
         }
 

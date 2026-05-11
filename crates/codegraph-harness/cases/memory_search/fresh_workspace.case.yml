@@ -1,0 +1,13 @@
+id: memory_search.fresh_workspace
+description: 'P8 memory-family: search memories on a fresh tempdir — should return empty results.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_memory_search
+  args:
+    query: anything
+expect:
+  match: contains
+  data:
+    results: []
+    total: 0

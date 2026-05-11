@@ -1,0 +1,25 @@
+id: search_git_history.rust_basic
+description: 'P8 pro-tool: search git history with a query term on a single-commit fixture repo.'
+setup:
+  fixture: languages/rust/basic.rs
+  init_git: true
+invoke:
+  tool: codegraph_search_git_history
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    query: harness
+expect:
+  match: contains
+  data:
+    metadata:
+      keywordMatches: 1
+      semanticMatches: 0
+      total: 1
+    query: harness
+    results:
+    - author: Harness
+      files:
+      - basic.rs
+      source: keyword
+      subject: harness fixture
+    since: null

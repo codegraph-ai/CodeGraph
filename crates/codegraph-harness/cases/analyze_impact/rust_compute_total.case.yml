@@ -1,0 +1,51 @@
+id: analyze_impact.compute_total.rust_basic
+description: 'P8 analysis-family: blast radius of modifying compute_total. Strips cross_project_impacts (registry contamination from prior harness tempdirs).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_analyze_impact
+  args:
+    uri: file://${fixture}
+    line: 8
+    changeType: modify
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - cross_project_impacts
+    - symbol_id
+    - total_impacted
+  data:
+    breaking_changes: 0
+    change_type: modify
+    direct_impacted: 2
+    fallback_message: No symbol at line 8. Using nearest symbol 'compute_total' instead.
+    files_affected: 1
+    impacted:
+    - col_end: 10000
+      col_start: 0
+      depth: 1
+      edge_type_str: Calls
+      impact_type: caller
+      is_test: false
+      line_end: 21
+      line_start: 18
+      name: apply_discount
+      path: ${fixture}
+      severity: warning
+    - col_end: 10000
+      col_start: 0
+      depth: 1
+      edge_type_str: Contains
+      impact_type: reference
+      is_test: false
+      line_end: 0
+      line_start: 0
+      name: basic
+      path: ${fixture}
+      severity: warning
+    indirect_impacted: []
+    risk_level: low
+    symbol_name: compute_total
+    used_fallback: true
+    warnings: 2

@@ -1,0 +1,22 @@
+id: get_callers.cpp_compute_total
+description: 'P8 cross-lang nav: callers of shop::compute_total in the C++ fixture (called by FixedOrder::apply_discount).'
+setup:
+  fixture: languages/cpp/basic.cpp
+invoke:
+  tool: codegraph_get_callers
+  args:
+    uri: file://${fixture}
+    line: 12
+    depth: 1
+expect:
+  match: contains
+  data:
+    callers: []
+    diagnostic:
+      node_found: true
+      note: 'No callers found. This may indicate: (1) the function is not called anywhere, (2) the language parser doesn''t extract call relationships, or (3) indexes need to be rebuilt.'
+      symbol_name: shop::compute_total
+      total_edges_in_graph: 8
+    fallback_message: No symbol at line 12. Using nearest symbol 'shop::compute_total' instead.
+    symbol_name: shop::compute_total
+    used_fallback: true

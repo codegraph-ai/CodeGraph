@@ -1,0 +1,47 @@
+id: search_by_pattern.typescript_async
+description: 'P8 cross-lang search: regex search for `async ` in the TS fixture.'
+setup:
+  fixture: languages/typescript/generics_decorators_modules.ts
+invoke:
+  tool: codegraph_search_by_pattern
+  args:
+    pattern: 'async '
+expect:
+  match: contains
+  data:
+    matches:
+    - kind: class
+      line_end: 22
+      line_start: 8
+      matched_in: body
+      matched_text: |-
+        {
+            private store: Map<string, T> = new Map();
+
+            async save(item: T): Promise<void> {
+                this.store.set(item.id, item);
+            }
+
+            async findById(id: string): Promise<T | null> {
+                ret…
+      name: InMemoryRepo
+      path: ${fixture}
+      signature: ''
+    - kind: function
+      line_end: 13
+      line_start: 11
+      matched_in: signature
+      matched_text: 'async save(item: T): Promise<void> {'
+      name: save
+      path: ${fixture}
+      signature: 'async save(item: T): Promise<void> {'
+    - kind: function
+      line_end: 17
+      line_start: 15
+      matched_in: signature
+      matched_text: 'async findById(id: string): Promise<T | null> {'
+      name: findById
+      path: ${fixture}
+      signature: 'async findById(id: string): Promise<T | null> {'
+    pattern: 'async '
+    scope: any

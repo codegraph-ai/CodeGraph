@@ -1,0 +1,14 @@
+id: search_by_pattern.cpp_class
+description: 'P8 cross-lang search: regex search for `class ` in the C++ fixture.'
+setup:
+  fixture: languages/cpp/basic.cpp
+invoke:
+  tool: codegraph_search_by_pattern
+  args:
+    pattern: 'class '
+expect:
+  match: contains
+  data:
+    matches: []
+    pattern: 'class '
+    scope: any

@@ -1,0 +1,22 @@
+id: security_check_secrets_entropy.python_aws_key
+description: 'P8 pro-tool: secrets_entropy detector against a fixture with a fake AWS key.'
+setup:
+  fixture: secrets_demo/hardcoded_secret.py
+invoke:
+  tool: codegraph_security_check_secrets_entropy
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    findings: []
+    functions_scanned: 1
+    path_filter:
+      findings_examined: 0
+      findings_kept: 0
+      skipped:
+        build_or_docs: 0
+        sample: 0
+        test: 0
+        vendored: 0
+    total: 0

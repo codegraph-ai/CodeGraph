@@ -1,0 +1,63 @@
+id: search_by_pattern.ruby_def
+description: 'P8 cross-lang search: regex search for `def ` in the Ruby fixture.'
+setup:
+  fixture: languages/ruby/basic.rb
+invoke:
+  tool: codegraph_search_by_pattern
+  args:
+    pattern: 'def '
+expect:
+  match: contains
+  data:
+    matches:
+    - kind: class
+      line_end: 15
+      line_start: 4
+      matched_in: body
+      matched_text: |-
+        attr_reader :item_count, :unit_price_cents
+
+            def initialize(item_count, unit_price_cents)
+              @item_count = item_count
+              @unit_price_cents = unit_price_cents
+            end
+
+            def compute_total
+          …
+      name: Shop::Order
+      path: ${fixture}
+      signature: ''
+    - kind: function
+      line_end: 10
+      line_start: 7
+      matched_in: signature
+      matched_text: def initialize(item_count, unit_price_cents)
+      name: initialize
+      path: ${fixture}
+      signature: def initialize(item_count, unit_price_cents)
+    - kind: function
+      line_end: 14
+      line_start: 12
+      matched_in: signature
+      matched_text: def compute_total
+      name: compute_total
+      path: ${fixture}
+      signature: def compute_total
+    - kind: function
+      line_end: 21
+      line_start: 18
+      matched_in: signature
+      matched_text: def apply_discount(percent)
+      name: apply_discount
+      path: ${fixture}
+      signature: def apply_discount(percent)
+    - kind: function
+      line_end: 30
+      line_start: 28
+      matched_in: signature
+      matched_text: def self.collect_totals(orders)
+      name: collect_totals
+      path: ${fixture}
+      signature: def self.collect_totals(orders)
+    pattern: 'def '
+    scope: any

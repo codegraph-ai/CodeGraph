@@ -1,0 +1,14 @@
+id: find_circular_deps.python_cycle
+description: 'P8 multi-file: detect a 2-file Python import cycle (mod_a ↔ mod_b).'
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+invoke:
+  tool: codegraph_find_circular_deps
+  args: {}
+expect:
+  match: contains
+  data:
+    cycles: []
+    has_circular_deps: false
+    total_cycles: 0

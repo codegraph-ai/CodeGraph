@@ -1,0 +1,38 @@
+id: search_by_pattern.go_func
+description: 'P8 cross-lang search: regex search for `func ` in the Go fixture.'
+setup:
+  fixture: languages/go/interfaces_goroutines_packages.go
+invoke:
+  tool: codegraph_search_by_pattern
+  args:
+    pattern: 'func '
+expect:
+  match: contains
+  data:
+    matches:
+    - kind: function
+      line_end: 22
+      line_start: 20
+      matched_in: signature
+      matched_text: func NewMemReader(data []byte) *MemReader {
+      name: NewMemReader
+      path: ${fixture}
+      signature: func NewMemReader(data []byte) *MemReader {
+    - kind: function
+      line_end: 32
+      line_start: 25
+      matched_in: signature
+      matched_text: func (r *MemReader) Read(p []byte) (int, error) {
+      name: Read
+      path: ${fixture}
+      signature: func (r *MemReader) Read(p []byte) (int, error) {
+    - kind: function
+      line_end: 47
+      line_start: 35
+      matched_in: signature
+      matched_text: func FanOutSquares(nums []int) []int {
+      name: FanOutSquares
+      path: ${fixture}
+      signature: func FanOutSquares(nums []int) []int {
+    pattern: 'func '
+    scope: any

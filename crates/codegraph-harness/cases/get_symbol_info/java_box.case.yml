@@ -1,0 +1,31 @@
+id: get_symbol_info.java_box
+description: 'P8 cross-lang nav: symbol info for the Box static inner class in the Java fixture.'
+setup:
+  fixture: languages/java/Inheritance.java
+invoke:
+  tool: codegraph_get_symbol_info
+  args:
+    uri: file://${fixture}
+    line: 47
+expect:
+  match: contains
+  data:
+    complexity: null
+    has_tests: false
+    is_deprecated: false
+    is_public: true
+    lines_of_code: 17
+    reference_count: 1
+    symbol:
+      docstring: null
+      is_public: true
+      kind: Class
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 63
+        file: ${fixture}
+        line: 47
+      name: fixtures.basic.Box
+      signature: null
+      visibility: public

@@ -1,0 +1,15 @@
+id: security_generate_sbom.empty_workspace
+description: 'P8 pro-tool: generate SBOM on a workspace with no lockfile — should return empty CycloneDX.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_generate_sbom
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    message: 'No supported lockfiles found in workspace. Supported: Cargo.lock, package-lock.json, yarn.lock, requirements.txt, Pipfile.lock, go.sum, Gemfile.lock, pom.xml, packages.lock.json, *.csproj'
+    status: no_lockfiles
+    workspace_paths:
+    - ${workspace}

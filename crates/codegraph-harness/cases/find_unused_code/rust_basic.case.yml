@@ -1,0 +1,17 @@
+id: find_unused_code.rust_basic
+description: 'P8 pro-tool: find unused symbols in basic.rs.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_unused_code
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    summary:
+      min_confidence: 0.7
+      scope: file
+      total_checked: 0
+      unused_count: 0
+    unused_items: []

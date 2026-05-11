@@ -1,0 +1,31 @@
+id: get_symbol_info.cpp_fixed_order
+description: 'P8 cross-lang nav: symbol info for shop::FixedOrder in the C++ fixture.'
+setup:
+  fixture: languages/cpp/basic.cpp
+invoke:
+  tool: codegraph_get_symbol_info
+  args:
+    uri: file://${fixture}
+    line: 33
+expect:
+  match: contains
+  data:
+    complexity: null
+    has_tests: false
+    is_deprecated: false
+    is_public: false
+    lines_of_code: 11
+    reference_count: 1
+    symbol:
+      docstring: null
+      is_public: false
+      kind: Class
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 43
+        file: ${fixture}
+        line: 33
+      name: shop::FixedOrder
+      signature: null
+      visibility: private

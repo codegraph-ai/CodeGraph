@@ -101,8 +101,35 @@ fn run_inner(
     let workspace_path = workspace.path().to_path_buf();
     let fixture_in_workspace = resolve_fixture_path(&case.setup, &workspace_path)?;
 
-    // 2. Spawn server, complete handshake
-    let mut client = McpClient::spawn(binary, &workspace_path)?;
+    // 1b. Optionally init a git repo. Deterministic author + email so
+    //     the resulting commit hash is stable across runs on the same
+    //     fixture content + git version. The hash *can* still shift
+    //     between git versions or across OSes, so git-history cases
+    //     should not assert on sha values directly (mark them volatile
+    //     via the global VOLATILE_FIELDS list).
+    if case.setup.init_git {
+        init_git_repo(&workspace_path)?;
+    }
+
+    // 2. Resolve effective binary — per-case override wins over the
+    //    harness-default. Used to point pro-only cases at codegraph-pro
+    //    while OSS cases use the OSS binary.
+    let owned_binary;
+    let effective_binary: &Path = match case.invoke.binary.as_deref() {
+        Some(p) => {
+            owned_binary = std::path::PathBuf::from(p);
+            if !owned_binary.exists() {
+                return Err(anyhow!(
+                    "case {} pins binary `{}` but path does not exist",
+                    case.id,
+                    p
+                ));
+            }
+            owned_binary.as_path()
+        }
+        None => binary,
+    };
+    let mut client = McpClient::spawn(effective_binary, &workspace_path)?;
 
     // 3. Substitute ${fixture} / ${workspace} in args (case YAMLs use
     //    these so the real tempdir path can be injected at runtime).
@@ -209,6 +236,40 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             std::fs::copy(entry.path(), &target)?;
         }
     }
+    Ok(())
+}
+
+/// Initialise a git repo in `workspace` with one deterministic commit
+/// containing the fixture contents. Used by cases that flip
+/// `setup.init_git: true` to exercise git-history tools. Fails loudly
+/// if `git` is not on PATH.
+fn init_git_repo(workspace: &Path) -> Result<()> {
+    fn run(cmd: &mut std::process::Command) -> Result<()> {
+        let out = cmd.output().context("spawn git subprocess")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "git command failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(())
+    }
+    run(std::process::Command::new("git").arg("init").arg("-q").current_dir(workspace))?;
+    run(std::process::Command::new("git").args(["add", "."]).current_dir(workspace))?;
+    // Pin author + committer dates so the commit content (and the
+    // SHA derived from it) is byte-stable across runs. Without these,
+    // git uses wallclock and every run produces a different hash.
+    run(std::process::Command::new("git")
+        .args([
+            "-c", "user.email=harness@codegraph.test",
+            "-c", "user.name=Harness",
+            "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "harness fixture",
+        ])
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00+0000")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00+0000")
+        .current_dir(workspace))?;
     Ok(())
 }
 

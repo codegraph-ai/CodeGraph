@@ -1,0 +1,15 @@
+id: memory_stats.fresh_workspace
+description: 'P8 memory-family: stats on a fresh tempdir workspace — probes whether memory state is per-workspace or global.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_memory_stats
+  args: {}
+expect:
+  match: contains
+  data:
+    byKind: {}
+    byTag: {}
+    currentMemories: 0
+    invalidatedMemories: 0
+    totalMemories: 0

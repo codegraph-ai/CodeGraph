@@ -1,0 +1,59 @@
+id: analyze_complexity.go_basic
+description: 'P8 cross-lang analysis: complexity per function in the Go fixture.'
+setup:
+  fixture: languages/go/interfaces_goroutines_packages.go
+invoke:
+  tool: codegraph_analyze_complexity
+  args:
+    uri: file://${fixture}
+expect:
+  match: contains
+  data:
+    functions:
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 22
+      line_start: 20
+      name: NewMemReader
+    - complexity: 2
+      details:
+        complexity_branches: 1
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 1
+        lines_of_code: 8
+      grade: A
+      line_end: 32
+      line_start: 25
+      name: Read
+    - complexity: 3
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 1
+        complexity_logical_ops: 0
+        complexity_loops: 1
+        complexity_nesting: 1
+        lines_of_code: 13
+      grade: A
+      line_end: 47
+      line_start: 35
+      name: FanOutSquares
+    recommendations: []
+    summary:
+      above_threshold: 0
+      average_complexity: 2.0
+      max_complexity: 3
+      overall_grade: A
+      threshold: 10
+      total_functions: 3

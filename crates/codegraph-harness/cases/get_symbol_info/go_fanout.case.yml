@@ -1,0 +1,33 @@
+id: get_symbol_info.go_fanout
+description: 'P8 cross-lang nav: symbol info for FanOutSquares in the Go fixture.'
+setup:
+  fixture: languages/go/interfaces_goroutines_packages.go
+invoke:
+  tool: codegraph_get_symbol_info
+  args:
+    uri: file://${fixture}
+    line: 33
+expect:
+  match: contains
+  data:
+    complexity: 3
+    fallback_message: No symbol at line 33. Using nearest symbol 'FanOutSquares' instead.
+    has_tests: false
+    is_deprecated: false
+    is_public: true
+    lines_of_code: 13
+    reference_count: 1
+    symbol:
+      docstring: null
+      is_public: true
+      kind: Function
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 47
+        file: ${fixture}
+        line: 35
+      name: FanOutSquares
+      signature: func FanOutSquares(nums []int) []int {
+      visibility: public
+    used_fallback: true

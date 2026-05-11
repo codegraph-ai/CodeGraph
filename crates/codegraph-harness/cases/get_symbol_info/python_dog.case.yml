@@ -1,0 +1,31 @@
+id: get_symbol_info.python_dog
+description: 'P8 cross-lang nav: symbol info for the Dog subclass in the Python fixture.'
+setup:
+  fixture: languages/python/classes_decorators_comprehensions.py
+invoke:
+  tool: codegraph_get_symbol_info
+  args:
+    uri: file://${fixture}
+    line: 24
+expect:
+  match: contains
+  data:
+    complexity: null
+    has_tests: false
+    is_deprecated: false
+    is_public: true
+    lines_of_code: 12
+    reference_count: 2
+    symbol:
+      docstring: null
+      is_public: true
+      kind: Class
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 26
+        file: ${fixture}
+        line: 15
+      name: Animal
+      signature: null
+      visibility: public

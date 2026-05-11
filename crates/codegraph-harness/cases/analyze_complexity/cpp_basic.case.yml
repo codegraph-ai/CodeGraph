@@ -1,0 +1,111 @@
+id: analyze_complexity.cpp_basic
+description: 'P8 cross-lang analysis: complexity per function in the C++ fixture.'
+setup:
+  fixture: languages/cpp/basic.cpp
+invoke:
+  tool: codegraph_analyze_complexity
+  args:
+    uri: file://${fixture}
+expect:
+  match: contains
+  data:
+    functions:
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 1
+      grade: A
+      line_end: 20
+      line_start: 20
+      name: add
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 1
+      grade: A
+      line_end: 21
+      line_start: 21
+      name: size
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 1
+      grade: A
+      line_end: 29
+      line_start: 29
+      name: apply_discount
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 1
+      grade: A
+      line_end: 30
+      line_start: 30
+      name: ~Discountable
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 1
+      grade: A
+      line_end: 35
+      line_start: 35
+      name: FixedOrder
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 3
+      grade: A
+      line_end: 15
+      line_start: 13
+      name: shop::compute_total
+    - complexity: 1
+      details:
+        complexity_branches: 0
+        complexity_early_returns: 0
+        complexity_exceptions: 0
+        complexity_logical_ops: 0
+        complexity_loops: 0
+        complexity_nesting: 0
+        lines_of_code: 4
+      grade: A
+      line_end: 39
+      line_start: 36
+      name: apply_discount
+    recommendations: []
+    summary:
+      above_threshold: 0
+      average_complexity: 1.0
+      max_complexity: 1
+      overall_grade: A
+      threshold: 10
+      total_functions: 7

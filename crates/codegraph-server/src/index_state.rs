@@ -15,6 +15,11 @@ pub struct IndexState {
     slug: String,
     /// File content hashes: path → FNV-1a hash
     hashes: HashMap<PathBuf, u64>,
+    /// Some when the workspace is ephemeral (test harness tempdir).
+    /// Routes the state file to `<root>/.codegraph-state/index_state.json`
+    /// instead of `~/.codegraph/projects/<slug>/` so we don't pollute
+    /// the global registry.
+    ephemeral_root: Option<PathBuf>,
 }
 
 impl IndexState {
@@ -23,11 +28,33 @@ impl IndexState {
         Self {
             slug: slug.to_string(),
             hashes: HashMap::new(),
+            ephemeral_root: None,
         }
     }
 
-    /// Path to the state file: ~/.codegraph/projects/<slug>/index_state.json
+    /// Create state for a workspace, detecting whether the path is
+    /// an ephemeral test-harness tempdir and routing state-file
+    /// storage appropriately.
+    pub fn for_workspace(slug: &str, workspace_path: &Path) -> Self {
+        let ephemeral_root = if crate::memory::is_ephemeral_workspace(workspace_path) {
+            Some(workspace_path.to_path_buf())
+        } else {
+            None
+        };
+        Self {
+            slug: slug.to_string(),
+            hashes: HashMap::new(),
+            ephemeral_root,
+        }
+    }
+
+    /// Path to the state file:
+    /// - global:    `~/.codegraph/projects/<slug>/index_state.json`
+    /// - ephemeral: `<workspace>/.codegraph-state/index_state.json`
     fn state_path(&self) -> PathBuf {
+        if let Some(root) = &self.ephemeral_root {
+            return root.join(".codegraph-state").join("index_state.json");
+        }
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| "/tmp".to_string());
