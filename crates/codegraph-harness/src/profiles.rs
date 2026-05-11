@@ -27,6 +27,7 @@ pub enum Family {
     Security,
     Memory,
     Git,
+    Indexing,
     Other,
 }
 
@@ -40,6 +41,7 @@ impl Family {
             Family::Security => "security",
             Family::Memory => "memory",
             Family::Git => "git",
+            Family::Indexing => "indexing",
             Family::Other => "other",
         }
     }
@@ -67,6 +69,9 @@ pub fn family_of(tool: &str) -> Family {
     }
     if GIT_TOOLS.contains(&tool) {
         return Family::Git;
+    }
+    if INDEXING_TOOLS.contains(&tool) {
+        return Family::Indexing;
     }
     Family::Other
 }
@@ -258,6 +263,12 @@ const GIT_TOOLS: &[&str] = &[
     "codegraph_mine_git_history",
     "codegraph_mine_git_history_for_file",
     "codegraph_search_git_history",
+];
+
+const INDEXING_TOOLS: &[&str] = &[
+    "codegraph_index_directory",
+    "codegraph_index_files",
+    "codegraph_reindex_workspace",
 ];
 
 #[cfg(test)]

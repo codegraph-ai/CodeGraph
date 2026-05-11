@@ -1,0 +1,16 @@
+id: reindex_workspace.rust_basic
+description: 'P8 other-family: full workspace reindex against a single-file rust fixture.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_reindex_workspace
+  args:
+    force: true
+expect:
+  match: contains
+  data:
+    files_indexed: 1
+    files_parsed: 1
+    files_skipped: 0
+    message: Reindexed 1 files (1 changed, 0 skipped)
+    status: success

@@ -1,0 +1,17 @@
+id: index_directory.python_multifile
+description: 'P8 other-family: add a multifile python directory to the index.'
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+invoke:
+  tool: codegraph_index_directory
+  args:
+    path: ${workspace}
+expect:
+  match: contains
+  data:
+    directory: ${workspace}
+    embedded: false
+    files_indexed: 2
+    message: Added 2 files from ${workspace}
+    status: success
