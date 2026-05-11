@@ -569,6 +569,13 @@ impl McpBackend {
                         "Loaded {} persisted symbol vectors — semantic search ready",
                         loaded
                     );
+                    // No embedding work needed: persisted vectors are
+                    // fully aligned with the graph (which itself was
+                    // loaded from persistence — files_parsed == 0).
+                    // Skip the embed task entirely. Prior behaviour
+                    // re-embedded every symbol on every restart, which
+                    // is `O(symbols)` of wasted ONNX work for the
+                    // common steady-state restart.
                 } else {
                     // Embeddings need building — do it in background so server can
                     // start handling requests immediately. Graph-based tools (34 of 37)
