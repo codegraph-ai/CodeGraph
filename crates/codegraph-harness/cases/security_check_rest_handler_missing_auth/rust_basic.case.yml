@@ -1,0 +1,29 @@
+id: security_check_rest_handler_missing_auth.rust_basic
+description: |
+  P9 pro security: rest_handler_missing_auth check on rust/basic.rs.
+  Counts drift because the detector pulls candidates from the shared
+  graph.db. Strip the counts and assert only the deterministic
+  envelope.
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_security_check_rest_handler_missing_auth
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+      - actionable
+      - total
+      - path_filter
+      - compile_gate
+  data:
+    analyzer: rest_handler_missing_auth_asymmetry
+    cwe:
+      - CWE-862
+    findings: []
+    reachability: {}

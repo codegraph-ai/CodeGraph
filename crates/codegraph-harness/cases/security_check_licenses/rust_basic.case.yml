@@ -1,0 +1,15 @@
+id: security_check_licenses.rust_basic
+description: 'P9 pro security: security_check_licenses scan against rust/basic.rs.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_check_licenses
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    message: 'No supported lockfiles found in workspace. Supported: Cargo.lock, package-lock.json, yarn.lock, requirements.txt, Pipfile.lock, go.sum, Gemfile.lock, pom.xml, packages.lock.json, *.csproj'
+    status: no_lockfiles
+    workspace_paths:
+    - ${workspace}

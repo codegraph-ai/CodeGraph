@@ -1,0 +1,36 @@
+id: security_detect_injection.rust_basic
+description: 'P9 pro security: detect_injection on rust/basic.rs (no injection sites).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_detect_injection
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    actionable: 0
+    analyzer: injection_detection
+    by_type: {}
+    compile_gate:
+      build_defines_count: 0
+      checked: true
+      gated_off: 0
+    cwe:
+    - CWE-1336
+    - CWE-22
+    - CWE-502
+    - CWE-78
+    - CWE-79
+    - CWE-89
+    findings: []
+    path_filter:
+      findings_examined: 0
+      findings_kept: 0
+      skipped:
+        build_or_docs: 0
+        sample: 0
+        test: 0
+        vendored: 0
+    reachability: {}
+    total: 0

@@ -1,0 +1,32 @@
+id: get_call_graph.ruby_basic
+description: 'P9 cross-lang: get_call_graph for the ruby fixture at line 25.'
+setup:
+  fixture: languages/ruby/basic.rb
+invoke:
+  tool: codegraph_get_call_graph
+  args:
+    uri: file://${fixture}
+    line: 25
+    depth: 1
+expect:
+  match: contains
+  data:
+    diagnostic:
+      node_found: true
+      note: No call relationships found. Call graph analysis depends on language parser support for extracting call edges. Some parsers may have limited call extraction capabilities.
+      total_edges_in_graph: 5
+    edges: []
+    nodes: []
+    root: '6'
+    root_node:
+      col_end: 10000
+      col_start: 0
+      depth: 0
+      id: '6'
+      language: ''
+      line_end: 26
+      line_start: 24
+      name: Shop::DiscountedOrder
+      path: ${fixture}
+      signature: ''
+    symbol_name: Shop::DiscountedOrder

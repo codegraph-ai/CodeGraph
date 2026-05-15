@@ -1,0 +1,45 @@
+id: find_entry_points.entry_type_all
+description: 'P9 options: find_entry_points with entryType=all includes tests and public APIs.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_entry_points
+  args:
+    entryType: all
+expect:
+  match: contains
+  data:
+  - description: null
+    entry_type: public_api
+    method: null
+    route: null
+    symbol:
+      docstring: null
+      is_public: true
+      kind: Function
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 11
+        file: ${fixture}
+        line: 9
+      name: compute_total
+      signature: 'pub fn compute_total(order: &Order) -> u32 {'
+      visibility: public
+  - description: null
+    entry_type: public_api
+    method: null
+    route: null
+    symbol:
+      docstring: null
+      is_public: true
+      kind: Function
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 26
+        file: ${fixture}
+        line: 24
+      name: final_price
+      signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+      visibility: public

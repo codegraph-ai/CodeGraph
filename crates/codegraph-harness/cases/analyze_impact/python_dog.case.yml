@@ -1,0 +1,39 @@
+id: analyze_impact.python_dog
+description: 'P9 cross-lang: analyze_impact on Python Dog class (impacts of modifying Dog).'
+setup:
+  fixture: languages/python/classes_decorators_comprehensions.py
+invoke:
+  tool: codegraph_analyze_impact
+  args:
+    uri: file://${fixture}
+    line: 28
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - cross_project_impacts
+    - symbol_id
+    - total_impacted
+  data:
+    breaking_changes: 0
+    change_type: modify
+    direct_impacted: 1
+    fallback_message: No symbol at line 28. Using nearest symbol 'Dog' instead.
+    files_affected: 1
+    impacted:
+    - col_end: 10000
+      col_start: 0
+      depth: 1
+      edge_type_str: Contains
+      impact_type: reference
+      is_test: false
+      line_end: 0
+      line_start: 0
+      name: classes_decorators_comprehensions
+      path: ${fixture}
+      severity: warning
+    indirect_impacted: []
+    risk_level: low
+    symbol_name: Dog
+    used_fallback: true
+    warnings: 1

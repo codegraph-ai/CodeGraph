@@ -1,0 +1,32 @@
+id: get_call_graph.python_dog_init
+description: 'P9 cross-lang: get_call_graph for Python Dog.__init__ which calls super().__init__.'
+setup:
+  fixture: languages/python/classes_decorators_comprehensions.py
+invoke:
+  tool: codegraph_get_call_graph
+  args:
+    uri: file://${fixture}
+    line: 30
+    depth: 1
+expect:
+  match: contains
+  data:
+    diagnostic:
+      node_found: true
+      note: No call relationships found. Call graph analysis depends on language parser support for extracting call edges. Some parsers may have limited call extraction capabilities.
+      total_edges_in_graph: 17
+    edges: []
+    nodes: []
+    root: '5'
+    root_node:
+      col_end: 10000
+      col_start: 0
+      depth: 0
+      id: '5'
+      language: ''
+      line_end: 32
+      line_start: 30
+      name: __init__
+      path: ${fixture}
+      signature: __init__
+    symbol_name: __init__

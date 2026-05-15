@@ -1,0 +1,24 @@
+id: analyze_impact.summary_true
+description: 'P9 options: analyze_impact with summary=true returns a condensed summary.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_analyze_impact
+  args:
+    uri: file://${fixture}
+    line: 8
+    changeType: modify
+    summary: true
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - cross_project_impacts
+    - symbol_id
+    - total_impacted
+  data:
+    summary:
+      change_type: modify
+      direct_impacted: 2
+      risk_level: low
+    symbol: compute_total

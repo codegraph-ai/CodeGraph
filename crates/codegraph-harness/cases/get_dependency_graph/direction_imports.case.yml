@@ -1,0 +1,40 @@
+id: get_dependency_graph.direction_imports
+description: 'P9 options: get_dependency_graph with direction=imports (what mod_a imports).'
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+invoke:
+  tool: codegraph_get_dependency_graph
+  args:
+    uri: file://${workspace}/mod_a.py
+    direction: imports
+    depth: 1
+expect:
+  match: contains
+  data:
+    edges:
+    - from: '5'
+      to: '3'
+      type: import
+    - from: '5'
+      to: '9'
+      type: import
+    nodes:
+    - id: '3'
+      is_external: false
+      language: unknown
+      name: B
+      path: ${workspace}/mod_b.py
+      type: class
+    - id: '5'
+      is_external: false
+      language: python
+      name: mod_a
+      path: ${workspace}/mod_a.py
+      type: codefile
+    - id: '9'
+      is_external: false
+      language: unknown
+      name: mod_b
+      path: ''
+      type: module

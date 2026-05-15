@@ -1,0 +1,11 @@
+id: find_entry_points.compact_true
+description: 'P9 options: find_entry_points with compact=true returns minimal info.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_entry_points
+  args:
+    compact: true
+expect:
+  match: contains
+  data: []

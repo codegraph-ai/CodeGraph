@@ -1,0 +1,67 @@
+id: get_ai_context.intent_modify
+description: 'P9 options: get_ai_context with intent=modify selects code relevant to modification.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_get_ai_context
+  args:
+    uri: file://${fixture}
+    line: 8
+    intent: modify
+expect:
+  match: contains
+  data:
+    architecture:
+      layer: null
+      module: basic
+      neighbors: []
+    dependencies: []
+    imports:
+    - compute_total as total
+    metadata:
+      fallbackMessage: No symbol at cursor position. Using nearest symbol 'compute_total' instead.
+      totalTokens: 57
+      usedFallback: true
+    primaryContext:
+      code: |-
+        pub fn compute_total(order: &Order) -> u32 {
+            order.item_count * order.unit_price_cents
+        }
+      language: rs
+      location:
+        range:
+          end:
+            character: 0
+            line: 11
+          start:
+            character: 0
+            line: 9
+        uri: file://${fixture}
+      name: compute_total
+      type: function
+    relatedSymbols: []
+    siblingFunctions:
+    - lineStart: 18
+      name: apply_discount
+      signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+      visibility: private
+    - lineStart: 24
+      name: final_price
+      signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+      visibility: public
+    usageExamples:
+    - code: |2-
+            fn apply_discount(&self, percent: u32) -> u32 {
+                let total = compute_total(self);
+                total - (total * percent / 100)
+            }
+      description: '`apply_discount` calls `compute_total`'
+      location:
+        range:
+          end:
+            character: 0
+            line: 21
+          start:
+            character: 0
+            line: 18
+        uri: file://${fixture}

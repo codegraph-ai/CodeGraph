@@ -1,0 +1,14 @@
+id: search_by_error.error_type_filter
+description: 'P9 options: search_by_error with error_type filter (no IoError in basic.rs).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_search_by_error
+  args:
+    error_type: IoError
+expect:
+  match: contains
+  data:
+    error_type_filter: IoError
+    functions: []
+    mode: any

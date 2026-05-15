@@ -1,0 +1,19 @@
+id: find_related_tests.limit_five
+description: 'P9 options: find_related_tests with limit=5 caps the result list.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_related_tests
+  args:
+    uri: file://${fixture}
+    line: 8
+    limit: 5
+expect:
+  match: contains
+  data:
+    fallback_message: No symbol at line 8. Using nearest symbol 'compute_total' instead.
+    symbol_name: compute_total
+    target_id: '1'
+    tests: []
+    total: 0
+    used_fallback: true

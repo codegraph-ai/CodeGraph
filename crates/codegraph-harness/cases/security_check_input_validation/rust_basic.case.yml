@@ -1,0 +1,43 @@
+id: security_check_input_validation.rust_basic
+description: 'P9 pro security: input-validation check on rust/basic.rs (no I/O entry points).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_check_input_validation
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    actionable: 1
+    analyzer: input_validation
+    compile_gate:
+      build_defines_count: 0
+      checked: true
+      gated_off: 0
+    cwe:
+    - CWE-129
+    - CWE-20
+    findings:
+    - category: input_validation
+      cwe: CWE-20
+      dangerous_call: param:discount_percent
+      description: Parameter 'discount_percent' used in dangerous operation without prior validation
+      file: ${fixture}
+      function_name: final_price
+      language: rust
+      line: 25
+      owasp: A03:2021
+      remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+      severity: medium
+      taint_reachability: {}
+    path_filter:
+      findings_examined: 1
+      findings_kept: 1
+      skipped:
+        build_or_docs: 0
+        sample: 0
+        test: 0
+        vendored: 0
+    reachability: {}
+    total: 1

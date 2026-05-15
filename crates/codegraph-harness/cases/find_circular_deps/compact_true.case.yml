@@ -1,0 +1,14 @@
+id: find_circular_deps.compact_true
+description: 'P9 options: find_circular_deps with compact=true returns counts only.'
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+invoke:
+  tool: codegraph_find_circular_deps
+  args:
+    compact: true
+expect:
+  match: contains
+  data:
+    has_circular_deps: false
+    total_cycles: 0

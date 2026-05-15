@@ -1,0 +1,24 @@
+id: compare_symbols.rust_pair
+description: 'P9 pro similarity: compare_symbols between compute_total and final_price.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_compare_symbols
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    uri_a: file://${fixture}
+    line_a: 8
+    uri_b: file://${fixture}
+    line_b: 23
+  retry_on_warmup: true
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - similarity
+    - score
+  data:
+    content:
+    - text: 'Error: Missing ''uriA'' or ''nodeIdA'''
+      type: text
+    isError: true

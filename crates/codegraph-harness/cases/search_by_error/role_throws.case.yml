@@ -1,0 +1,14 @@
+id: search_by_error.role_throws
+description: 'P9 options: search_by_error with role=throws filters to functions that emit errors.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_search_by_error
+  args:
+    role: throws
+expect:
+  match: contains
+  data:
+    error_type_filter: null
+    functions: []
+    mode: any

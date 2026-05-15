@@ -1,0 +1,11 @@
+id: find_entry_points.entry_type_test
+description: 'P9 options: find_entry_points with entryType=test (fixture has no tests — expect empty).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_entry_points
+  args:
+    entryType: test
+expect:
+  match: contains
+  data: []

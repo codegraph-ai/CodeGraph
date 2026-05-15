@@ -27,6 +27,7 @@ const VOLATILE_FIELDS: &[&str] = &[
     "node_id_b",
     // Wallclock — every run differs.
     "query_time_ms",
+    "queryTime",
     // Embedding-dependent — model + ONNX runtime drift.
     "score",
     "similarity",

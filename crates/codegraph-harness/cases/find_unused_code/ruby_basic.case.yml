@@ -1,0 +1,17 @@
+id: find_unused_code.ruby_basic
+description: 'P9 pro cross-lang: find_unused_code on ruby fixture.'
+setup:
+  fixture: languages/ruby/basic.rb
+invoke:
+  tool: codegraph_find_unused_code
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    summary:
+      min_confidence: 0.7
+      scope: file
+      total_checked: 0
+      unused_count: 0
+    unused_items: []

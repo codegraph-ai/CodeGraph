@@ -1,0 +1,19 @@
+id: analyze_coupling.rust_basic
+description: 'P9 pro: analyze_coupling on rust/basic.rs (single-file fixture, minimal coupling).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_analyze_coupling
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    avg_instability: 0.0
+    modules:
+    - afferent: 0
+      efferent: 0
+      file: ${fixture}
+      instability: 0.0
+      module: basic
+    total_modules: 1

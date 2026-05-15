@@ -1,0 +1,25 @@
+id: find_by_signature.rust_pub_fn
+description: 'P9 search-family: find_by_signature with namePattern=''*compute*'' matches compute_total.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_by_signature
+  args:
+    namePattern: '*compute*'
+expect:
+  match: contains
+  data:
+  - match_reason: name matches /*compute*/
+    symbol:
+      docstring: null
+      is_public: true
+      kind: Function
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 11
+        file: ${fixture}
+        line: 9
+      name: compute_total
+      signature: 'pub fn compute_total(order: &Order) -> u32 {'
+      visibility: public

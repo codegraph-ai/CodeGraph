@@ -1,0 +1,19 @@
+id: security_scan.rust_basic
+description: 'P9 pro security: full security_scan on rust/basic.rs (no vulnerabilities expected).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_scan
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    findings: []
+    summary:
+      categories: []
+      critical: 0
+      high: 0
+      low: 0
+      medium: 0
+    total_functions_scanned: 3

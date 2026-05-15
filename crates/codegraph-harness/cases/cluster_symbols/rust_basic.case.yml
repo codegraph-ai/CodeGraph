@@ -1,0 +1,26 @@
+id: cluster_symbols.rust_basic
+description: |
+  P9 pro similarity: cluster_symbols groups functions by embedding
+  similarity. The `clusters` array is fundamentally non-deterministic
+  (cluster labels, member ordering, and similarity_to_centroid all
+  drift with embedding values). Strip clusters entirely; assert the
+  deterministic envelope (total_symbols=3, unclustered=0 for our
+  3-fn fixture).
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_cluster_symbols
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+  retry_on_warmup: true
+
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+      - clusters
+  data:
+    total_symbols: 3
+    unclustered: 0

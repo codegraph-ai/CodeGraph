@@ -1,0 +1,52 @@
+id: get_edit_context.rust_basic
+description: 'P9 context-family: get_edit_context for compute_total.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_get_edit_context
+  args:
+    uri: file://${fixture}
+    line: 8
+expect:
+  match: contains
+  data:
+    callers:
+    - code: |2-
+            fn apply_discount(&self, percent: u32) -> u32 {
+                let total = compute_total(self);
+                total - (total * percent / 100)
+            }
+      file: ${fixture}
+      line: 18
+      name: apply_discount
+    memories: []
+    metadata:
+      fallbackMessage: No symbol at line 8. Using nearest symbol 'compute_total' instead.
+      maxTokens: 8000
+      sections:
+        callers: true
+        memories: false
+        recentChanges: false
+        symbol: true
+        tests: false
+      totalTokens: 57
+      usedFallback: true
+    recentChanges: []
+    symbol:
+      code: |-
+        pub fn compute_total(order: &Order) -> u32 {
+            order.item_count * order.unit_price_cents
+        }
+      language: rs
+      location:
+        range:
+          end:
+            character: 0
+            line: 11
+          start:
+            character: 0
+            line: 9
+        uri: file://${fixture}
+      name: compute_total
+      type: function
+    tests: []

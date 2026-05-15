@@ -1,0 +1,32 @@
+id: get_call_graph.typescript_basic
+description: 'P9 cross-lang: get_call_graph for the typescript fixture at line 9.'
+setup:
+  fixture: languages/typescript/generics_decorators_modules.ts
+invoke:
+  tool: codegraph_get_call_graph
+  args:
+    uri: file://${fixture}
+    line: 9
+    depth: 1
+expect:
+  match: contains
+  data:
+    diagnostic:
+      node_found: true
+      note: No call relationships found. Call graph analysis depends on language parser support for extracting call edges. Some parsers may have limited call extraction capabilities.
+      total_edges_in_graph: 6
+    edges: []
+    nodes: []
+    root: '5'
+    root_node:
+      col_end: 10000
+      col_start: 0
+      depth: 0
+      id: '5'
+      language: ''
+      line_end: 22
+      line_start: 8
+      name: InMemoryRepo
+      path: ${fixture}
+      signature: ''
+    symbol_name: InMemoryRepo

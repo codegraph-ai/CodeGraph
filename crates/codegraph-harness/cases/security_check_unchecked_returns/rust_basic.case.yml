@@ -1,0 +1,32 @@
+id: security_check_unchecked_returns.rust_basic
+description: 'P9 pro security: security_check_unchecked_returns scan against rust/basic.rs.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_check_unchecked_returns
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    actionable: 0
+    analyzer: unchecked_returns
+    compile_gate:
+      build_defines_count: 0
+      checked: true
+      gated_off: 0
+    cwe:
+    - CWE-252
+    - CWE-391
+    - CWE-754
+    findings: []
+    path_filter:
+      findings_examined: 0
+      findings_kept: 0
+      skipped:
+        build_or_docs: 0
+        sample: 0
+        test: 0
+        vendored: 0
+    reachability: {}
+    total: 0

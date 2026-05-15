@@ -1,0 +1,19 @@
+id: security_scan.python_basic
+description: 'P9 pro security: full scan on the python fixture.'
+setup:
+  fixture: languages/python/classes_decorators_comprehensions.py
+invoke:
+  tool: codegraph_security_scan
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    findings: []
+    summary:
+      categories: []
+      critical: 0
+      high: 0
+      low: 0
+      medium: 0
+    total_functions_scanned: 8

@@ -1,0 +1,18 @@
+id: get_dependency_graph.summary_true
+description: 'P9 options: get_dependency_graph with summary=true returns counts only.'
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+invoke:
+  tool: codegraph_get_dependency_graph
+  args:
+    uri: file://${workspace}/mod_a.py
+    summary: true
+expect:
+  match: contains
+  data:
+    summary:
+      depth: 3
+      direction: both
+      edge_count: 2
+      node_count: 3

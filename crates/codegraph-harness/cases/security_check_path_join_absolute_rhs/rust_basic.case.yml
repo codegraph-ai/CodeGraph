@@ -1,0 +1,30 @@
+id: security_check_path_join_absolute_rhs.rust_basic
+description: |
+  P9 pro security: path_join_absolute_rhs check on rust/basic.rs.
+  Counts (actionable, total, path_filter.*, compile_gate.*) drift
+  because the detector iterates over candidate sites in the shared
+  graph.db which may include non-ephemeral project entries on the
+  host. Strip the counts and assert only the deterministic envelope.
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_security_check_path_join_absolute_rhs
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+      - actionable
+      - total
+      - path_filter
+      - compile_gate
+  data:
+    analyzer: path_join_absolute_rhs
+    cwe:
+      - CWE-22
+    findings: []
+    reachability: {}

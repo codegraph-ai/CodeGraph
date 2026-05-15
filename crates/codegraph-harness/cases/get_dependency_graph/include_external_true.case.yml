@@ -1,0 +1,56 @@
+id: get_dependency_graph.include_external_true
+description: 'P9 options: get_dependency_graph with includeExternal=true (include node_modules-style deps).'
+setup:
+  fixture: languages/python/with_dead_imports.py
+invoke:
+  tool: codegraph_get_dependency_graph
+  args:
+    uri: file://${fixture}
+    includeExternal: true
+expect:
+  match: contains
+  data:
+    edges:
+    - from: '0'
+      to: '3'
+      type: import
+    - from: '0'
+      to: '4'
+      type: import
+    - from: '0'
+      to: '5'
+      type: import
+    - from: '0'
+      to: '6'
+      type: import
+    nodes:
+    - id: '0'
+      is_external: false
+      language: python
+      name: with_dead_imports
+      path: ${fixture}
+      type: codefile
+    - id: '3'
+      is_external: false
+      language: unknown
+      name: os
+      path: ''
+      type: module
+    - id: '4'
+      is_external: false
+      language: unknown
+      name: sys
+      path: ''
+      type: module
+    - id: '5'
+      is_external: false
+      language: unknown
+      name: json
+      path: ''
+      type: module
+    - id: '6'
+      is_external: false
+      language: unknown
+      name: math
+      path: ''
+      type: module

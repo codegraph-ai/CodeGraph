@@ -1,0 +1,124 @@
+id: get_ai_context.intent_debug
+description: 'P9 options: get_ai_context with intent=debug selects code relevant to debugging.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_get_ai_context
+  args:
+    uri: file://${fixture}
+    line: 8
+    intent: debug
+expect:
+  match: contains
+  data:
+    architecture:
+      layer: null
+      module: basic
+      neighbors: []
+    debugHints:
+      branches: 0
+      complexity: 1
+      earlyReturns: 0
+      errorPaths: []
+      exceptionHandlers: 0
+      nestingDepth: 0
+    dependencies: []
+    imports:
+    - compute_total as total
+    metadata:
+      fallbackMessage: No symbol at cursor position. Using nearest symbol 'compute_total' instead.
+      totalTokens: 137
+      usedFallback: true
+    primaryContext:
+      code: |-
+        pub fn compute_total(order: &Order) -> u32 {
+            order.item_count * order.unit_price_cents
+        }
+      language: rs
+      location:
+        range:
+          end:
+            character: 0
+            line: 11
+          start:
+            character: 0
+            line: 9
+        uri: file://${fixture}
+      name: compute_total
+      type: function
+    relatedSymbols:
+    - code: |2-
+            fn apply_discount(&self, percent: u32) -> u32 {
+                let total = compute_total(self);
+                total - (total * percent / 100)
+            }
+      location:
+        range:
+          end:
+            character: 0
+            line: 21
+          start:
+            character: 0
+            line: 18
+        uri: file://${fixture}
+      name: apply_discount
+      relationship: call_chain_depth_0
+      relevanceScore: 1.0
+    - code: |-
+        pub fn final_price(order: &Order, discount_percent: u32) -> u32 {
+            order.apply_discount(discount_percent)
+        }
+      location:
+        range:
+          end:
+            character: 0
+            line: 26
+          start:
+            character: 0
+            line: 24
+        uri: file://${fixture}
+      name: final_price
+      relationship: call_chain_depth_1
+      relevanceScore: 0.9
+    - code: |-
+        pub struct Order {
+            pub item_count: u32,
+            pub unit_price_cents: u32,
+        }
+      location:
+        range:
+          end:
+            character: 0
+            line: 7
+          start:
+            character: 0
+            line: 4
+        uri: file://${fixture}
+      name: Order
+      relationship: data_flow
+      relevanceScore: 0.8
+    siblingFunctions:
+    - lineStart: 18
+      name: apply_discount
+      signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+      visibility: private
+    - lineStart: 24
+      name: final_price
+      signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+      visibility: public
+    usageExamples:
+    - code: |2-
+            fn apply_discount(&self, percent: u32) -> u32 {
+                let total = compute_total(self);
+                total - (total * percent / 100)
+            }
+      description: '`apply_discount` calls `compute_total`'
+      location:
+        range:
+          end:
+            character: 0
+            line: 21
+          start:
+            character: 0
+            line: 18
+        uri: file://${fixture}

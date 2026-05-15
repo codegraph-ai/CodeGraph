@@ -1,0 +1,32 @@
+id: get_module_summary.top_n_two
+description: |
+  P9 options: get_module_summary with top_n=2 limits the
+  complex-functions list. The selection within `top_complex_functions`
+  is non-deterministic when multiple functions share the same
+  complexity score (HashMap-iteration order in the picker), so the
+  array contents are stripped and we assert only on the remaining
+  deterministic summary fields. Re-blessing would otherwise capture
+  one specific run's pick and fail on the next.
+
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+
+invoke:
+  tool: codegraph_get_module_summary
+  args:
+    path: "${workspace}"
+    top_n: 2
+
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+      - top_complex_functions
+  data:
+    directory: ${workspace}
+    files: 2
+    total_classes: 2
+    total_functions: 4
+    total_imports: 0
+    total_lines: 22

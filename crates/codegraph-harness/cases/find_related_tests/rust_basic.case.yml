@@ -1,0 +1,18 @@
+id: find_related_tests.rust_basic
+description: 'P9 OSS coverage: find_related_tests for compute_total — no tests in fixture, expect empty.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_related_tests
+  args:
+    uri: file://${fixture}
+    line: 8
+expect:
+  match: contains
+  data:
+    fallback_message: No symbol at line 8. Using nearest symbol 'compute_total' instead.
+    symbol_name: compute_total
+    target_id: '1'
+    tests: []
+    total: 0
+    used_fallback: true

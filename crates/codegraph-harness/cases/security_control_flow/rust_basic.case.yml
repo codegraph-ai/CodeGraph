@@ -1,0 +1,36 @@
+id: security_control_flow.rust_basic
+description: 'P9 pro security: control_flow extraction for compute_total.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_control_flow
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    uri: file://${fixture}
+    line: 8
+expect:
+  match: contains
+  data:
+    blocks:
+    - block_type: Entry
+      id: 0
+      label: entry
+      statements:
+      - order.item_count * order.unit_price_cents
+      - '{'
+    - block_type: Exit
+      id: 1
+      label: exit
+      statements: []
+    complexity: 1
+    edges:
+    - edge_type: Unconditional
+      from: 0
+      label: exit
+      to: 1
+    entry_block: 0
+    exit_blocks:
+    - 1
+    function_name: compute_total
+    has_early_returns: false
+    has_exceptions: false

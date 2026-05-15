@@ -1,0 +1,22 @@
+id: analyze_complexity.line_targeted
+description: 'P9 options: analyze_complexity with a specific line targets a single function.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_analyze_complexity
+  args:
+    uri: file://${fixture}
+    line: 8
+expect:
+  match: contains
+  data:
+    functions: []
+    note: 'No functions found in this file. This may indicate: (1) the language parser doesn''t extract function-level details for this file type, (2) the file doesn''t contain any functions, or (3) the workspace needs to be re-indexed.'
+    recommendations: []
+    summary:
+      above_threshold: 0
+      average_complexity: 0.0
+      max_complexity: 0
+      overall_grade: A
+      threshold: 10
+      total_functions: 0

@@ -1,0 +1,33 @@
+id: find_hot_paths.rust_basic
+description: 'P9 OSS coverage: find_hot_paths against the rust fixture — limited execution paths.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_hot_paths
+  args: {}
+expect:
+  match: contains
+  data:
+    functions:
+    - direct_callers: 0
+      line_end: 26
+      line_start: 24
+      name: final_price
+      path: ${fixture}
+      signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+      transitive_callers: 0
+    - direct_callers: 1
+      line_end: 11
+      line_start: 9
+      name: compute_total
+      path: ${fixture}
+      signature: 'pub fn compute_total(order: &Order) -> u32 {'
+      transitive_callers: 1
+    - direct_callers: 1
+      line_end: 21
+      line_start: 18
+      name: apply_discount
+      path: ${fixture}
+      signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+      transitive_callers: 0
+    total_analyzed: 3

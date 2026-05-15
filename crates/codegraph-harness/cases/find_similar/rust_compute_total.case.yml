@@ -1,0 +1,71 @@
+id: find_similar.rust_compute_total
+description: 'P9 pro similarity: find_similar for compute_total.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_find_similar
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    uri: file://${fixture}
+    line: 8
+  retry_on_warmup: true
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - similarity
+  data:
+    pairs:
+    - symbol_a:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 9
+        name: compute_total
+        signature: 'pub fn compute_total(order: &Order) -> u32 {'
+        visibility: public
+      symbol_b:
+        docstring: null
+        is_public: false
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 21
+          file: ${fixture}
+          line: 18
+        name: apply_discount
+        signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+        visibility: private
+    - symbol_a:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 9
+        name: compute_total
+        signature: 'pub fn compute_total(order: &Order) -> u32 {'
+        visibility: public
+      symbol_b:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 26
+          file: ${fixture}
+          line: 24
+        name: final_price
+        signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+        visibility: public
+    threshold: 0.0

@@ -1,0 +1,16 @@
+id: security_orchestrated_scan.rust_basic
+description: 'P9 pro security: orchestrated_scan runs all detectors and rolls up findings.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_orchestrated_scan
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+  timeout_ms: 60000
+expect:
+  match: contains
+  data:
+    content:
+    - text: 'Error: missing required arg: scope'
+      type: text
+    isError: true

@@ -1,0 +1,28 @@
+id: symbol_search.limit_one
+description: 'P9 options: symbol_search with limit=1 returns at most one result.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: compute_total
+    limit: 1
+    compact: true
+expect:
+  match: count_only
+  data:
+    results:
+    - match_reason: SymbolName
+      symbol:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 9
+        name: compute_total
+        signature: null
+        visibility: public

@@ -1,0 +1,55 @@
+id: get_call_graph.direction_callees
+description: 'P9 options: get_call_graph with direction=callees (forward call chain from final_price).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_get_call_graph
+  args:
+    uri: file://${fixture}
+    line: 24
+    direction: callees
+    depth: 2
+expect:
+  match: contains
+  data:
+    edges:
+    - from: '3'
+      to: '1'
+      type: calls
+    - from: '3'
+      to: '2'
+      type: calls
+    nodes:
+    - col_end: 10000
+      col_start: 0
+      depth: 1
+      id: '2'
+      language: ''
+      line_end: 21
+      line_start: 18
+      name: apply_discount
+      path: ${fixture}
+      signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+    - col_end: 10000
+      col_start: 0
+      depth: 2
+      id: '1'
+      language: ''
+      line_end: 11
+      line_start: 9
+      name: compute_total
+      path: ${fixture}
+      signature: 'pub fn compute_total(order: &Order) -> u32 {'
+    root: '3'
+    root_node:
+      col_end: 10000
+      col_start: 0
+      depth: 0
+      id: '3'
+      language: ''
+      line_end: 26
+      line_start: 24
+      name: final_price
+      path: ${fixture}
+      signature: 'pub fn final_price(order: &Order, discount_percent: u32) -> u32 {'
+    symbol_name: final_price

@@ -1,0 +1,15 @@
+id: find_circular_deps.max_cycle_length_three
+description: 'P9 options: find_circular_deps with max_cycle_length=3 caps reported cycles.'
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+invoke:
+  tool: codegraph_find_circular_deps
+  args:
+    max_cycle_length: 3
+expect:
+  match: contains
+  data:
+    cycles: []
+    has_circular_deps: false
+    total_cycles: 0

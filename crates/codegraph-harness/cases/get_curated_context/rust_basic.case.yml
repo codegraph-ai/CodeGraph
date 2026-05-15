@@ -1,0 +1,35 @@
+id: get_curated_context.rust_basic
+description: |
+  P9 context-family: get_curated_context with a natural-language query.
+  The `symbols` array mixes SymbolName + Semantic matches in non-
+  deterministic proportions based on embedding warmup state (warm
+  has Semantic entries; cold doesn't). `symbolsFound`,
+  `*Included`, and `totalTokens` derive from the symbol set so
+  they drift too. We strip everything embedding-dependent and assert
+  only the deterministic query echo + maxTokens.
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_get_curated_context
+  args:
+    query: compute order total
+    maxSymbols: 3
+
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+      - symbols
+      - dependencies
+      - memories
+      - symbolsFound
+      - symbolsIncluded
+      - dependenciesIncluded
+      - memoriesIncluded
+      - totalTokens
+  data:
+    query: compute order total
+    metadata:
+      maxTokens: 8000

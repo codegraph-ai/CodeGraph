@@ -1,0 +1,30 @@
+id: get_module_summary.cpp_basic
+description: 'P9 cross-lang: module summary on the C++ single-file fixture (top_complex_functions stripped — equal-complexity picks vary).'
+setup:
+  fixture: languages/cpp/basic.cpp
+invoke:
+  tool: codegraph_get_module_summary
+  args:
+    path: ${workspace}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - top_complex_functions
+  data:
+    directory: ${workspace}
+    external_deps:
+    - string
+    - vector
+    files: 1
+    languages:
+    - files: 0
+      functions: 7
+      language: unknown
+    - files: 1
+      functions: 0
+      language: cpp
+    total_classes: 4
+    total_functions: 7
+    total_imports: 0
+    total_lines: 45

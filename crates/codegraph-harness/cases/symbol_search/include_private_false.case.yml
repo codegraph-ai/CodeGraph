@@ -1,0 +1,14 @@
+id: symbol_search.include_private_false
+description: 'P9 options: symbol_search with includePrivate=false skips the private apply_discount fn.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_symbol_search
+  args:
+    query: apply_discount
+    includePrivate: false
+    compact: true
+expect:
+  match: contains
+  data:
+    results: []

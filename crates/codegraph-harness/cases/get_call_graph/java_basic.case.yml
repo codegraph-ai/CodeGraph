@@ -1,0 +1,32 @@
+id: get_call_graph.java_basic
+description: 'P9 cross-lang: get_call_graph for the java fixture at line 48.'
+setup:
+  fixture: languages/java/Inheritance.java
+invoke:
+  tool: codegraph_get_call_graph
+  args:
+    uri: file://${fixture}
+    line: 48
+    depth: 1
+expect:
+  match: contains
+  data:
+    diagnostic:
+      node_found: true
+      note: No call relationships found. Call graph analysis depends on language parser support for extracting call edges. Some parsers may have limited call extraction capabilities.
+      total_edges_in_graph: 8
+    edges: []
+    nodes: []
+    root: '13'
+    root_node:
+      col_end: 10000
+      col_start: 0
+      depth: 0
+      id: '13'
+      language: ''
+      line_end: 63
+      line_start: 47
+      name: fixtures.basic.Box
+      path: ${fixture}
+      signature: ''
+    symbol_name: fixtures.basic.Box

@@ -1,0 +1,19 @@
+id: index_directory.embed_true
+description: 'P9 options: index_directory with embed=true also builds embeddings.'
+setup:
+  fixture: multifile/python_circular
+  workspace_layout: multi_file
+invoke:
+  tool: codegraph_index_directory
+  args:
+    path: ${workspace}
+    embed: true
+  retry_on_warmup: true
+expect:
+  match: contains
+  data:
+    directory: ${workspace}
+    embedded: true
+    files_indexed: 2
+    message: Added 2 files from ${workspace} (with embeddings)
+    status: success

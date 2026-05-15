@@ -1,0 +1,21 @@
+id: cross_project_search.rust_compute
+description: |
+  P9 pro: cross_project_search smoke test. The `results` array is
+  inherently non-deterministic (depends on what other projects have
+  been registered in ~/.codegraph/projects/ on this machine).
+  `current_project` is the per-tempdir slug for THIS run. Both
+  stripped via match: count_only on data: {} — verifies the tool
+  responds with an object shape, nothing more.
+
+setup:
+  fixture: languages/rust/basic.rs
+
+invoke:
+  tool: codegraph_cross_project_search
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    query: compute_total
+
+expect:
+  match: count_only
+  data: {}

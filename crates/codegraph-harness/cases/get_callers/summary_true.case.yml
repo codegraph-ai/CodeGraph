@@ -1,0 +1,37 @@
+id: get_callers.summary_true
+description: 'P9 options: get_callers with summary=true returns caller counts only.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_get_callers
+  args:
+    uri: file://${fixture}
+    line: 8
+    summary: true
+expect:
+  match: contains
+  data:
+    callers:
+    - call_site:
+        column: 0
+        end_column: 10000
+        end_line: 21
+        file: ${fixture}
+        line: 18
+      depth: 1
+      symbol:
+        docstring: null
+        is_public: false
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 21
+          file: ${fixture}
+          line: 18
+        name: apply_discount
+        signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+        visibility: private
+    fallback_message: No symbol at line 8. Using nearest symbol 'compute_total' instead.
+    symbol_name: compute_total
+    used_fallback: true

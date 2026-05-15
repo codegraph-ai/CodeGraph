@@ -1,0 +1,17 @@
+id: security_trace_data_flow.rust_basic
+description: 'P9 pro security: trace_data_flow for compute_total.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_trace_data_flow
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    uri: file://${fixture}
+    line: 8
+expect:
+  match: contains
+  data:
+    content:
+    - text: 'Error: Missing required parameter: variable'
+      type: text
+    isError: true

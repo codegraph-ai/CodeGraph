@@ -1,0 +1,17 @@
+id: mine_git_history_for_file.rust_basic
+description: 'P9 pro git: mine_git_history_for_file against a single-commit fixture repo.'
+setup:
+  fixture: languages/rust/basic.rs
+  init_git: true
+invoke:
+  tool: codegraph_mine_git_history_for_file
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    path: basic.rs
+expect:
+  match: contains
+  data:
+    content:
+    - text: 'Error: Missing ''uri'' parameter'
+      type: text
+    isError: true

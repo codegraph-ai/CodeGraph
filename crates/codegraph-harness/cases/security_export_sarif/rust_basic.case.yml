@@ -1,0 +1,57 @@
+id: security_export_sarif.rust_basic
+description: 'P9 pro security: SARIF export against rust/basic.rs (empty workspace, expect SARIF skeleton).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_export_sarif
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    $schema: https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Documents/CommitteeSpecifications/2.1.0/sarif-schema-2.1.0.json
+    runs:
+    - columnKind: utf16CodeUnits
+      results:
+      - fingerprints:
+          codegraph/v1: CWE-20:${fixture}:25:final_price
+        level: warning
+        locations:
+        - physicalLocation:
+            artifactLocation:
+              uri: basic.rs
+            region:
+              startLine: 25
+        message:
+          text: 'Parameter ''discount_percent'' used in dangerous operation without prior validation (function: final_price)'
+        properties:
+          analyzer: input_validation
+          category: input_validation
+          functionName: final_price
+          language: rust
+          remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+          severity: medium
+        ruleId: CWE-20
+      tool:
+        driver:
+          informationUri: https://codegraph.astudioplus.com
+          name: CodeGraph Pro Security
+          rules:
+          - defaultConfiguration:
+              level: warning
+            fullDescription:
+              text: Parameter 'discount_percent' used in dangerous operation without prior validation
+            helpUri: https://cwe.mitre.org/data/definitions/20.html
+            id: CWE-20
+            name: ImproperInputValidation
+            properties:
+              category: input_validation
+              cwe: CWE-20
+              owasp: A03:2021
+              tags:
+              - input_validation
+              - security
+            shortDescription:
+              text: Security weakness detected by CodeGraph
+          version: 0.17.0
+    version: 2.1.0

@@ -1,0 +1,19 @@
+id: analyze_complexity.summary_true
+description: 'P9 options: analyze_complexity with summary=true returns the summary block only.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_analyze_complexity
+  args:
+    uri: file://${fixture}
+    summary: true
+expect:
+  match: contains
+  data:
+    summary:
+      above_threshold: 0
+      average_complexity: 1.0
+      max_complexity: 1
+      overall_grade: A
+      threshold: 10
+      total_functions: 3

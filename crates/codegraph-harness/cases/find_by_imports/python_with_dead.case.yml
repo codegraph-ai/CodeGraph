@@ -1,0 +1,25 @@
+id: find_by_imports.python_with_dead
+description: 'P9 search-family: find_by_imports matches files importing ''math''.'
+setup:
+  fixture: languages/python/with_dead_imports.py
+invoke:
+  tool: codegraph_find_by_imports
+  args:
+    moduleName: math
+expect:
+  match: contains
+  data:
+  - match_reason: imports math
+    symbol:
+      docstring: null
+      is_public: true
+      kind: CodeFile
+      location:
+        column: 0
+        end_column: 10000
+        end_line: 1
+        file: ${fixture}
+        line: 1
+      name: with_dead_imports
+      signature: null
+      visibility: public

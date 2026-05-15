@@ -1,0 +1,31 @@
+id: security_check_ssrf.rust_basic
+description: 'P9 pro security: security_check_ssrf scan against rust/basic.rs.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_check_ssrf
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    actionable: 0
+    analyzer: ssrf
+    compile_gate:
+      build_defines_count: 0
+      checked: true
+      gated_off: 0
+    cwe:
+    - CWE-918
+    findings: []
+    path_filter:
+      findings_examined: 0
+      findings_kept: 0
+      skipped:
+        build_or_docs: 0
+        sample: 0
+        test: 0
+        vendored: 0
+    reachability: {}
+    scanned_handlers: 3
+    total: 0

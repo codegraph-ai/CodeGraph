@@ -1,0 +1,31 @@
+id: security_check_search_path.rust_basic
+description: 'P9 pro security: security_check_search_path scan against rust/basic.rs.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_check_search_path
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    actionable: 0
+    analyzer: search_path
+    compile_gate:
+      build_defines_count: 0
+      checked: true
+      gated_off: 0
+    cwe:
+    - CWE-426
+    - CWE-427
+    findings: []
+    path_filter:
+      findings_examined: 0
+      findings_kept: 0
+      skipped:
+        build_or_docs: 0
+        sample: 0
+        test: 0
+        vendored: 0
+    reachability: {}
+    total: 0

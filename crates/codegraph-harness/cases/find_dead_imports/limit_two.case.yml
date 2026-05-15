@@ -1,0 +1,26 @@
+id: find_dead_imports.limit_two
+description: 'P9 options: find_dead_imports with limit=2 caps the returned list.'
+setup:
+  fixture: languages/python/with_dead_imports.py
+invoke:
+  tool: codegraph_find_dead_imports
+  args:
+    uri: file://${fixture}
+    limit: 2
+expect:
+  match: contains
+  data:
+    dead_count: 0
+    dead_imports: []
+    scanned_file: ${fixture}
+    total_imports: 4
+    unresolved_count: 4
+    unresolved_imports:
+    - file: ${fixture}
+      imported_module: json
+    - file: ${fixture}
+      imported_module: math
+    - file: ${fixture}
+      imported_module: os
+    - file: ${fixture}
+      imported_module: sys

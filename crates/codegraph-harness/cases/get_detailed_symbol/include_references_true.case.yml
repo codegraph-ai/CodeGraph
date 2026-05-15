@@ -1,0 +1,85 @@
+id: get_detailed_symbol.include_references_true
+description: 'P9 options: get_detailed_symbol with includeReferences=true also returns all references.'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_get_detailed_symbol
+  args:
+    uri: file://${fixture}
+    line: 8
+    includeReferences: true
+expect:
+  match: contains
+  data:
+    callees: []
+    callers:
+    - call_site:
+        column: 0
+        end_column: 10000
+        end_line: 21
+        file: ${fixture}
+        line: 18
+      depth: 1
+      symbol:
+        docstring: null
+        is_public: false
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 21
+          file: ${fixture}
+          line: 18
+        name: apply_discount
+        signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+        visibility: private
+    fallback_message: No symbol at line 8. Using nearest symbol 'compute_total' instead.
+    source: |-
+      pub fn compute_total(order: &Order) -> u32 {
+          order.item_count * order.unit_price_cents
+      }
+    symbol:
+      callees: []
+      callers:
+      - call_site:
+          column: 0
+          end_column: 10000
+          end_line: 21
+          file: ${fixture}
+          line: 18
+        depth: 1
+        symbol:
+          docstring: null
+          is_public: false
+          kind: Function
+          location:
+            column: 0
+            end_column: 10000
+            end_line: 21
+            file: ${fixture}
+            line: 18
+          name: apply_discount
+          signature: 'fn apply_discount(&self, percent: u32) -> u32 {'
+          visibility: private
+      complexity: 1
+      dependencies: []
+      dependents: []
+      has_tests: false
+      is_deprecated: false
+      is_public: true
+      lines_of_code: 3
+      reference_count: 2
+      symbol:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 11
+          file: ${fixture}
+          line: 9
+        name: compute_total
+        signature: 'pub fn compute_total(order: &Order) -> u32 {'
+        visibility: public
+    used_fallback: true

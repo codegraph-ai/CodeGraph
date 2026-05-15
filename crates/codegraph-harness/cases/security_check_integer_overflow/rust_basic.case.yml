@@ -1,0 +1,32 @@
+id: security_check_integer_overflow.rust_basic
+description: 'P9 pro security: integer-overflow check on rust/basic.rs (compute_total does u32 mul which could overflow).'
+setup:
+  fixture: languages/rust/basic.rs
+invoke:
+  tool: codegraph_security_check_integer_overflow
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  data:
+    actionable: 0
+    analyzer: integer_overflow
+    compile_gate:
+      build_defines_count: 0
+      checked: true
+      gated_off: 0
+    cwe:
+    - CWE-120
+    - CWE-190
+    - CWE-680
+    findings: []
+    path_filter:
+      findings_examined: 0
+      findings_kept: 0
+      skipped:
+        build_or_docs: 0
+        sample: 0
+        test: 0
+        vendored: 0
+    reachability: {}
+    total: 0
