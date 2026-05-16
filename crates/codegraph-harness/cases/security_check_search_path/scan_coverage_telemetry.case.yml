@@ -1,0 +1,30 @@
+id: security_check_search_path.scan_coverage_telemetry
+description: |
+  Detector improvement T5-5 #2: scan_coverage telemetry. The
+  detector now reports `files_examined` (distinct files scanned)
+  and `files_matched` (distinct files with at least one raw
+  finding). For our 4-call-site fixture, both should be 1
+  (single fixture file, at least one match → matched). Lets
+  analysts tell "silent omission" apart from "scanned but clean".
+
+setup:
+  fixture: languages/cpp/dlopen_multi.cpp
+
+invoke:
+  tool: codegraph_security_check_search_path
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+      - actionable
+      - total
+      - path_filter
+      - compile_gate
+      - findings
+  data:
+    scan_coverage:
+      files_examined: 1
+      files_matched: 1
