@@ -1,0 +1,106 @@
+id: security_check_misconfig.c_basic
+description: |
+  Detector improvement T5-4 Tier 0: C-specific misconfig patterns.
+  Fixture exercises six C/C++ misconfigurations the detector
+  previously missed:
+  - umask(0)            CWE-732
+  - chmod(..., 0777)    CWE-732 (via the ", 0777)" pattern)
+  - fopen("/tmp/...")   CWE-377
+  - open("/tmp/...")    CWE-377
+  - setuid(0)           CWE-250
+  - setgid(0)           CWE-250
+setup:
+  fixture: languages/cpp/c_misconfig.c
+invoke:
+  tool: codegraph_security_check_misconfig
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - actionable
+    - total
+    - path_filter
+    - compile_gate
+  data:
+    analyzer: misconfig
+    cwe:
+    - CWE-1004
+    - CWE-16
+    - CWE-295
+    - CWE-614
+    findings:
+    - category: misconfig
+      cwe: CWE-250
+      dangerous_call: setgid(0)
+      description: setgid(0) elevates to root group — verify the call is gated and the return value is checked
+      file: ${fixture}
+      function_name: elevate_to_root_group
+      language: c
+      line: 33
+      owasp: A05:2021
+      remediation: Review security configuration
+      severity: high
+      taint_reachability: {}
+    - category: misconfig
+      cwe: CWE-250
+      dangerous_call: setuid(0)
+      description: setuid(0) elevates to root — verify the call is gated and the return value is checked
+      file: ${fixture}
+      function_name: elevate_to_root
+      language: c
+      line: 29
+      owasp: A05:2021
+      remediation: Review security configuration
+      severity: high
+      taint_reachability: {}
+    - category: misconfig
+      cwe: CWE-377
+      dangerous_call: fopen("/tmp/
+      description: Hardcoded /tmp path in fopen — predictable filename enables symlink attack (use mkstemp)
+      file: ${fixture}
+      function_name: predictable_tmp_fopen
+      language: c
+      line: 19
+      owasp: A05:2021
+      remediation: Review security configuration
+      severity: high
+      taint_reachability: {}
+    - category: misconfig
+      cwe: CWE-377
+      dangerous_call: open("/tmp/
+      description: Hardcoded /tmp path in open — predictable filename enables symlink attack (use mkstemp)
+      file: ${fixture}
+      function_name: predictable_tmp_open
+      language: c
+      line: 24
+      owasp: A05:2021
+      remediation: Review security configuration
+      severity: high
+      taint_reachability: {}
+    - category: misconfig
+      cwe: CWE-732
+      dangerous_call: ', 0777)'
+      description: Literal 0777 mode in chmod/open/creat — file world-writable
+      file: ${fixture}
+      function_name: world_writable_chmod
+      language: c
+      line: 15
+      owasp: A05:2021
+      remediation: Review security configuration
+      severity: high
+      taint_reachability: {}
+    - category: misconfig
+      cwe: CWE-732
+      dangerous_call: umask(0)
+      description: umask(0) — newly-created files are world-writable
+      file: ${fixture}
+      function_name: permissive_umask
+      language: c
+      line: 11
+      owasp: A05:2021
+      remediation: Review security configuration
+      severity: high
+      taint_reachability: {}
+    reachability: {}
