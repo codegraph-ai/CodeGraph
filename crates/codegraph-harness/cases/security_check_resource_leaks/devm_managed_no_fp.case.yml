@@ -32,9 +32,9 @@ expect:
       dangerous_call: kmalloc
       description: kmalloc without kfree — kernel memory leak
       file: ${fixture}
-      function_name: probe_real_leak
+      function_name: use_and_drop
       language: c
-      line: 30
+      line: 42
       owasp: A03:2021
       remediation: Ensure resources are closed in a finally/defer block or use RAII/with-statement patterns
       severity: medium
