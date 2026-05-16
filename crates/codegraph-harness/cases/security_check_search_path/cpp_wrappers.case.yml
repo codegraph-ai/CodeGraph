@@ -1,0 +1,81 @@
+id: security_check_search_path.cpp_wrappers
+description: |
+  Detector improvement T5-5 #4: dlopen-equivalent wrapper libraries.
+  Fixture exercises four sink-wrappers the detector previously missed:
+  - g_module_open (GLib)
+  - lt_dlopen (libltdl)
+  - ENGINE_load_dynamic (OpenSSL)
+  - Tss2_TctiLdr_Initialize (tpm2-tss)
+  Each call site uses a relative-path literal and should produce a
+  high-severity finding tagged with the appropriate wrapper-specific
+  remediation. Without this registry expansion, all four were
+  invisible to search_path.
+setup:
+  fixture: languages/cpp/dlopen_wrappers.cpp
+invoke:
+  tool: codegraph_security_check_search_path
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - actionable
+    - total
+    - path_filter
+    - compile_gate
+  data:
+    analyzer: search_path
+    cwe:
+    - CWE-426
+    - CWE-427
+    findings:
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: ENGINE_load_dynamic
+      description: ENGINE_load_dynamic (OpenSSL) — caller-supplied SO_PATH is passed to dlopen via the dynamic engine; relative path enables loader hijack (string literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_via_openssl
+      language: cpp
+      line: 24
+      owasp: A06:2021
+      remediation: Set the SO_PATH control with an absolute path; verify ENGINE_ctrl_cmd_string(SO_PATH) before LOAD
+      severity: high
+      taint_reachability: {}
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: Tss2_TctiLdr_Initialize
+      description: Tss2_TctiLdr_Initialize (tpm2-tss) — TCTI module name is resolved via dlopen + platform search; relative names load attacker-planted .so (string literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_via_tpm2_tss
+      language: cpp
+      line: 30
+      owasp: A06:2021
+      remediation: Pass an absolute path to the TCTI module, or build with --with-fapiclient-path to pin the loader
+      severity: high
+      taint_reachability: {}
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: g_module_open
+      description: g_module_open (GLib) with relative path — calls dlopen() internally with platform loader search rules (string literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_via_glib
+      language: cpp
+      line: 14
+      owasp: A06:2021
+      remediation: Pass an absolute path, or use g_module_open_full with G_MODULE_BIND_LAZY and a fully-qualified file_name
+      severity: high
+      taint_reachability: {}
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: lt_dlopen
+      description: lt_dlopen (libltdl) with relative path — dlopen wrapper that respects LTDL_LIBRARY_PATH and dlopen search rules (string literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_via_libltdl
+      language: cpp
+      line: 19
+      owasp: A06:2021
+      remediation: Pass an absolute path, or restrict the search path via lt_dlsetsearchpath() before calling
+      severity: high
+      taint_reachability: {}
+    reachability: {}
