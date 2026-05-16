@@ -1,0 +1,114 @@
+id: security_check_input_validation.c_basic
+description: |
+  Detector improvement T5-4 Tier 0: C-specific input_validation
+  patterns. Fixture has 4 vulnerable C functions (strcpy, sprintf,
+  system, memcpy with attacker-controlled args) and 1 safe function
+  (strlen-gated strcpy). Pre-fix none of the C ops were in the
+  DANGEROUS_PARAM_OPS list so none fired. Post-fix the four
+  vulnerable functions report findings; the strlen-gated one is
+  recognized as validated and stays silent.
+setup:
+  fixture: languages/cpp/c_input_validation.c
+invoke:
+  tool: codegraph_security_check_input_validation
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - actionable
+    - total
+    - path_filter
+    - compile_gate
+  data:
+    analyzer: input_validation
+    cwe:
+    - CWE-129
+    - CWE-20
+    findings:
+    - category: input_validation
+      cwe: CWE-20
+      dangerous_call: param:user_buf
+      description: Parameter 'user_buf' used in dangerous operation without prior validation
+      file: ${fixture}
+      function_name: format_into_user
+      language: c
+      line: 44
+      owasp: A03:2021
+      remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+      severity: medium
+      taint_reachability: {}
+    - category: input_validation
+      cwe: CWE-20
+      dangerous_call: param:user_buf
+      description: Parameter 'user_buf' used in dangerous operation without prior validation
+      file: ${fixture}
+      function_name: read_user_buf
+      language: c
+      line: 48
+      owasp: A03:2021
+      remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+      severity: medium
+      taint_reachability: {}
+    - category: input_validation
+      cwe: CWE-20
+      dangerous_call: param:user_cmd
+      description: Parameter 'user_cmd' used in dangerous operation without prior validation
+      file: ${fixture}
+      function_name: exec_with_user_cmd
+      language: c
+      line: 27
+      owasp: A03:2021
+      remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+      severity: medium
+      taint_reachability: {}
+    - category: input_validation
+      cwe: CWE-20
+      dangerous_call: param:user_cmd
+      description: Parameter 'user_cmd' used in dangerous operation without prior validation
+      file: ${fixture}
+      function_name: run_via_popen
+      language: c
+      line: 31
+      owasp: A03:2021
+      remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+      severity: medium
+      taint_reachability: {}
+    - category: input_validation
+      cwe: CWE-20
+      dangerous_call: param:user_key
+      description: Parameter 'user_key' used in dangerous operation without prior validation
+      file: ${fixture}
+      function_name: export_env
+      language: c
+      line: 52
+      owasp: A03:2021
+      remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+      severity: medium
+      taint_reachability: {}
+    - category: input_validation
+      cwe: CWE-20
+      dangerous_call: param:user_path
+      description: Parameter 'user_path' used in dangerous operation without prior validation
+      file: ${fixture}
+      function_name: copy_user_path
+      language: c
+      line: 40
+      owasp: A03:2021
+      remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+      severity: medium
+      taint_reachability: {}
+    - category: input_validation
+      cwe: CWE-20
+      dangerous_call: param:user_prog
+      description: Parameter 'user_prog' used in dangerous operation without prior validation
+      file: ${fixture}
+      function_name: launch_exec
+      language: c
+      line: 36
+      owasp: A03:2021
+      remediation: Validate and sanitize input parameters before use in array access, SQL queries, file operations, or regex compilation
+      severity: medium
+      taint_reachability: {}
+    reachability: {}
