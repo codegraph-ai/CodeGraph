@@ -1,0 +1,42 @@
+id: security_check_resource_leaks.devm_managed_no_fp
+description: |
+  Detector improvement T5-4 Tier 0: devm_*/managed-allocator
+  awareness. The fixture has two safe managed allocations
+  (`devm_kzalloc(dev, ...)` and `devm_kmalloc(dev, ...)` — auto-freed
+  on device detach) plus one genuine `kmalloc(16, 0)` leak. Pre-fix
+  the detector substring-matched `kmalloc(` inside `devm_kmalloc(`
+  and flagged all three. Post-fix only the real leak fires
+  (identifier-boundary check rejects the inner substring).
+setup:
+  fixture: languages/cpp/devm_alloc.c
+invoke:
+  tool: codegraph_security_check_resource_leaks
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - actionable
+    - total
+    - path_filter
+    - compile_gate
+  data:
+    analyzer: resource_leaks
+    cwe:
+    - CWE-401
+    - CWE-772
+    findings:
+    - category: resource_leak
+      cwe: CWE-772
+      dangerous_call: kmalloc
+      description: kmalloc without kfree — kernel memory leak
+      file: ${fixture}
+      function_name: probe_real_leak
+      language: c
+      line: 30
+      owasp: A03:2021
+      remediation: Ensure resources are closed in a finally/defer block or use RAII/with-statement patterns
+      severity: medium
+      taint_reachability: {}
+    reachability: {}
