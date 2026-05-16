@@ -1,0 +1,54 @@
+id: security_check_search_path.cpp_macro_resolution
+description: |
+  Detector improvement: macro resolution. Fixture has
+  `#define QPL_LIBRARY_NAME "libqpl.so.1"` and
+  `constexpr const char* TPM2_LIBRARY = "libtpm2.so"`, both used
+  inside a dlopen() call site. Without resolution the detector
+  classifies the arg as NonLiteral (medium severity). With
+  resolution, both expand to relative paths (high severity).
+  This case fires the regression alarm if the resolver is removed.
+setup:
+  fixture: languages/cpp/dlopen_macro.cpp
+invoke:
+  tool: codegraph_security_check_search_path
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - actionable
+    - total
+    - path_filter
+    - compile_gate
+  data:
+    analyzer: search_path
+    cwe:
+    - CWE-426
+    - CWE-427
+    findings:
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: dlopen
+      description: dlopen with relative path — attacker can plant a malicious .so in LD_LIBRARY_PATH or current directory (macro-resolved literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_qpl
+      language: cpp
+      line: 16
+      owasp: A06:2021
+      remediation: Use an absolute path (e.g. /usr/lib/libfoo.so), or set RPATH/RUNPATH at link time
+      severity: high
+      taint_reachability: {}
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: dlopen
+      description: dlopen with relative path — attacker can plant a malicious .so in LD_LIBRARY_PATH or current directory (macro-resolved literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_tpm2
+      language: cpp
+      line: 21
+      owasp: A06:2021
+      remediation: Use an absolute path (e.g. /usr/lib/libfoo.so), or set RPATH/RUNPATH at link time
+      severity: high
+      taint_reachability: {}
+    reachability: {}
