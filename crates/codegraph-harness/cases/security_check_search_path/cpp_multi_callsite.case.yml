@@ -1,0 +1,77 @@
+id: security_check_search_path.cpp_multi_callsite
+description: |
+  Detector improvement T5-5 #1: per-callsite findings. The fixture
+  function `load_all_plugins` calls dlopen() four times on
+  consecutive lines, each with a different relative-path literal.
+  Before this fix, dedup was keyed on (file, function, pattern.fn_name)
+  so only the first call site fired and 3 were silently dropped.
+  After the fix, dedup is (line, arg) and all four call sites fire.
+setup:
+  fixture: languages/cpp/dlopen_multi.cpp
+invoke:
+  tool: codegraph_security_check_search_path
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - actionable
+    - total
+    - path_filter
+    - compile_gate
+  data:
+    analyzer: search_path
+    cwe:
+    - CWE-426
+    - CWE-427
+    findings:
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: dlopen
+      description: dlopen with relative path — attacker can plant a malicious .so in LD_LIBRARY_PATH or current directory (string literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_all_plugins
+      language: cpp
+      line: 10
+      owasp: A06:2021
+      remediation: Use an absolute path (e.g. /usr/lib/libfoo.so), or set RPATH/RUNPATH at link time
+      severity: high
+      taint_reachability: {}
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: dlopen
+      description: dlopen with relative path — attacker can plant a malicious .so in LD_LIBRARY_PATH or current directory (string literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_all_plugins
+      language: cpp
+      line: 11
+      owasp: A06:2021
+      remediation: Use an absolute path (e.g. /usr/lib/libfoo.so), or set RPATH/RUNPATH at link time
+      severity: high
+      taint_reachability: {}
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: dlopen
+      description: dlopen with relative path — attacker can plant a malicious .so in LD_LIBRARY_PATH or current directory (string literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_all_plugins
+      language: cpp
+      line: 12
+      owasp: A06:2021
+      remediation: Use an absolute path (e.g. /usr/lib/libfoo.so), or set RPATH/RUNPATH at link time
+      severity: high
+      taint_reachability: {}
+    - category: search_path
+      cwe: CWE-427
+      dangerous_call: dlopen
+      description: dlopen with relative path — attacker can plant a malicious .so in LD_LIBRARY_PATH or current directory (string literal — attacker can plant file in search dir)
+      file: ${fixture}
+      function_name: load_all_plugins
+      language: cpp
+      line: 13
+      owasp: A06:2021
+      remediation: Use an absolute path (e.g. /usr/lib/libfoo.so), or set RPATH/RUNPATH at link time
+      severity: high
+      taint_reachability: {}
+    reachability: {}
