@@ -1,0 +1,80 @@
+id: security_check_error_exposure.c_basic
+description: |
+  Detector improvement T5-4 Tier 0: C-specific error_exposure
+  patterns. Fixture has four handler functions that combine an
+  error-handler context (errno / goto err / if (ret < 0)) with a
+  C output sink (dprintf / send / fprintf / backtrace_symbols_fd)
+  and a C exposure pattern (strerror(errno), __FILE__,
+  backtrace_symbols_fd, perror). Pre-fix none of the C exposure
+  sinks were recognized so no findings fired. Post-fix each
+  vulnerable handler emits one finding; the clean_response
+  function (no exposure pattern) stays silent.
+setup:
+  fixture: languages/cpp/c_error_exposure.c
+invoke:
+  tool: codegraph_security_check_error_exposure
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - actionable
+    - total
+    - path_filter
+    - compile_gate
+  data:
+    analyzer: error_exposure
+    cwe:
+    - CWE-209
+    - CWE-497
+    findings:
+    - category: error_exposure
+      cwe: CWE-209
+      dangerous_call: __FILE__
+      description: __FILE__ macro exposes the source file path of the build host
+      file: ${fixture}
+      function_name: handle_file_macro_leak
+      language: c
+      line: 29
+      owasp: A03:2021
+      remediation: Return generic error messages to users. Log detailed errors server-side only.
+      severity: medium
+      taint_reachability: {}
+    - category: error_exposure
+      cwe: CWE-209
+      dangerous_call: backtrace_symbols_fd(
+      description: backtrace_symbols_fd writes the stack trace directly to an fd
+      file: ${fixture}
+      function_name: handle_backtrace_dump
+      language: c
+      line: 46
+      owasp: A03:2021
+      remediation: Return generic error messages to users. Log detailed errors server-side only.
+      severity: medium
+      taint_reachability: {}
+    - category: error_exposure
+      cwe: CWE-209
+      dangerous_call: perror(
+      description: perror writes errno-derived message to stderr — capture/redirect before user-facing send
+      file: ${fixture}
+      function_name: handle_perror_then_send
+      language: c
+      line: 36
+      owasp: A03:2021
+      remediation: Return generic error messages to users. Log detailed errors server-side only.
+      severity: medium
+      taint_reachability: {}
+    - category: error_exposure
+      cwe: CWE-209
+      dangerous_call: strerror(errno)
+      description: strerror(errno) — translates errno to a system-message that may reveal filesystem layout
+      file: ${fixture}
+      function_name: handle_strerror_leak
+      language: c
+      line: 21
+      owasp: A03:2021
+      remediation: Return generic error messages to users. Log detailed errors server-side only.
+      severity: medium
+      taint_reachability: {}
+    reachability: {}
