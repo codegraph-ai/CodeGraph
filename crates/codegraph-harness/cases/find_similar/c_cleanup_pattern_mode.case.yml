@@ -1,0 +1,81 @@
+id: find_similar.c_cleanup_pattern_mode
+description: |
+  Shape B fallback (CVE-2026-46333 bounty memo): find_similar with
+  `mode=cleanup_pattern` narrows the candidate pool to teardown-shaped
+  functions clearing ≥2 attributes. Fixture has a do_exit-shaped anchor
+  plus 2 teardown siblings that should match, 1 teardown-named function
+  with only 1 clear-site that should be EXCLUDED, and 2 non-teardown
+  functions that should also be excluded. Validates both the name-regex
+  filter and the ≥2 clear-sites body heuristic.
+setup:
+  fixture: languages/cpp/cleanup_pattern_anchor.c
+invoke:
+  tool: codegraph_find_similar
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    uri: file://${fixture}
+    line: 35
+    mode: cleanup_pattern
+  retry_on_warmup: true
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - similarity
+    - pairs[*].symbol_a.docstring
+    - pairs[*].symbol_b.docstring
+  data:
+    pairs:
+    - symbol_a:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 42
+          file: ${fixture}
+          line: 35
+        name: do_exit_like
+        signature: void do_exit_like(struct task *t) {
+        visibility: public
+      symbol_b:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 49
+          file: ${fixture}
+          line: 45
+        name: cleanup_resources
+        signature: void cleanup_resources(struct task *t) {
+        visibility: public
+    - symbol_a:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 42
+          file: ${fixture}
+          line: 35
+        name: do_exit_like
+        signature: void do_exit_like(struct task *t) {
+        visibility: public
+      symbol_b:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 56
+          file: ${fixture}
+          line: 52
+        name: destroy_session
+        signature: void destroy_session(struct task *t) {
+        visibility: public
+    threshold: 0.0
