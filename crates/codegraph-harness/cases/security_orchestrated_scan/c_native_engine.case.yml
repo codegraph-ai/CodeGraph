@@ -1,0 +1,38 @@
+id: security_orchestrated_scan.c_native_engine
+description: |
+  Phase 2.7e extension: confirms the six C/C++-enriched heuristic
+  detectors (search_path, unchecked_returns, resource_leaks,
+  misconfig, input_validation, error_exposure) are dispatched by
+  native.rs::scan when orchestrated_scan is invoked with
+  engines=["native"]. Pre-fix the native engine's findings_pre_merge
+  was 0 for these C fixtures because the detectors weren't wired.
+  Post-fix the c_error_exposure.c fixture produces 8 raw findings
+  (4 error_exposure + 4 from at least one other newly-wired
+  detector). The findings_pre_merge=8 figure regresses if any of
+  the six dispatches is removed from native.rs::scan.
+setup:
+  fixture: languages/cpp/c_error_exposure.c
+invoke:
+  tool: codegraph_security_orchestrated_scan
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    scope: ${workspace}
+    engines:
+    - native
+    severity: low
+  timeout_ms: 60000
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - total
+    - actionable
+    - findings
+    - reachability
+    - path_filter
+    - agreement_distribution
+  data:
+    analyzer: orchestrated
+    engines:
+    - findings_pre_merge: 8
+      name: codegraph
