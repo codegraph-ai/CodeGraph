@@ -3,11 +3,23 @@ description: |
   Shape A (CVE-2026-46333) regression. Generalized fail_open_verify
   fires on C/C++ decision-class functions that return success when
   a precondition is null/missing, skipping a downstream security
-  check. Fixture has three positives (__ptrace_may_access shape +
-  multi-line block + is_authorized) and two negatives (fail-closed
-  returning -1; benign empty-input guard with no downstream check).
-  Heuristic 3 (downstream check token) is what distinguishes the
-  benign empty-input guard from the bug class.
+  check. Fixture has three positives + four negatives:
+    POSITIVES:
+      - __ptrace_may_access (single-line return 0, errno convention)
+      - check_admin_access  (multi-line block, errno convention)
+      - is_authorized       (return 1, predicate convention via name)
+    NEGATIVES:
+      - may_access_safe     (fail-closed: returns -1 on null)
+      - can_use_buf         (no downstream check — heuristic 3)
+      - is_predicate_safe   (predicate convention, return 0 = deny;
+                             bounty FP class #1 regression)
+      - verify_inverted     (inverted condition `if (!(X == 0))` =
+                             "if X is present"; bounty FP class #2)
+  Heuristic 3 distinguishes a benign empty-input guard from the bug
+  class; the return-convention disambiguates errno-vs-predicate
+  (0 = success in errno, 0 = deny in predicate); the inverted-
+  condition guard rejects `!X.empty()`-shaped predicates that fire
+  the then-branch on PRESENT, not missing.
 setup:
   fixture: languages/cpp/c_fail_open_precondition.c
 invoke:

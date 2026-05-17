@@ -75,3 +75,30 @@ int can_use_buf(struct task_struct *task) {
     if (!task->mm) return 0;
     return 0;
 }
+
+// NEGATIVE — bounty FP class #1 (errno-vs-predicate ambiguity).
+// Predicate-style decision: returns 0 = false = DENY on null, NOT
+// fail-open. Body has `return false` (predicate evidence), so
+// convention = Predicate, and `return 0` is treated as deny.
+int is_predicate_safe(struct task_struct *task) {
+    if (!task) return 0;
+    if (cap_admin(task->creds)) return 1;
+    return 0;
+}
+
+// NEGATIVE — bounty FP class #2 (inverted condition). The if
+// controls on `!buf->len == 0` which inverts to "if buf is non-empty"
+// — the then-branch runs when buf IS PRESENT. Same shape as CCF's
+// verify_peer_certificate. With strict-mode (≤2 stmts before return)
+// AND inverted-condition detection, this stays silent.
+struct buf { int len; };
+static int do_verify(struct buf *b) { return b->len > 0; }
+int verify_inverted(struct buf *pc, struct task_struct *task) {
+    if (!(pc->len == 0)) {
+        int ok = do_verify(pc);
+        if (!ok) return 0;
+        if (!cap_admin(task->creds)) return 0;
+        return 1;
+    }
+    return 0;
+}
