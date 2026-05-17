@@ -1,0 +1,83 @@
+id: find_similar.rust_cleanup_pattern_mode
+description: |
+  Shape B calibration regression (bounty 2026-05-17). Validates that
+  the cleanup_pattern mode catches Rust user-space teardown patterns
+  — method-call clears (.shutdown() / .close() / .destroy() /
+  .take()) — not just kernel-style kfree/mmput/fput. Pre-fix the
+  mode returned 0 matches across runc/openvmm/kata because their
+  Rust teardowns use these idioms.
+  Fixture: close_session anchor with method-call + take clears; 2
+  siblings (cleanup_resources, drop) that should match; close_one_fd
+  with 1 clear-site EXCLUDED; compute_hash non-teardown EXCLUDED.
+setup:
+  fixture: languages/rust/cleanup_pattern_rust.rs
+invoke:
+  tool: codegraph_find_similar
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args:
+    uri: file://${fixture}
+    line: 40
+    mode: cleanup_pattern
+  retry_on_warmup: true
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - similarity
+    - pairs[*].symbol_a.docstring
+    - pairs[*].symbol_b.docstring
+  data:
+    pairs:
+    - symbol_a:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 45
+          file: ${fixture}
+          line: 37
+        name: close_session
+        signature: 'pub fn close_session(s: &mut Session) {'
+        visibility: public
+      symbol_b:
+        docstring: null
+        is_public: false
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 60
+          file: ${fixture}
+          line: 57
+        name: drop
+        signature: fn drop(&mut self) {
+        visibility: private
+    - symbol_a:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 45
+          file: ${fixture}
+          line: 37
+        name: close_session
+        signature: 'pub fn close_session(s: &mut Session) {'
+        visibility: public
+      symbol_b:
+        docstring: null
+        is_public: true
+        kind: Function
+        location:
+          column: 0
+          end_column: 10000
+          end_line: 53
+          file: ${fixture}
+          line: 48
+        name: cleanup_resources
+        signature: 'pub fn cleanup_resources(s: &mut Session) {'
+        visibility: public
+    threshold: 0.0
