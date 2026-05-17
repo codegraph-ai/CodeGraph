@@ -1,0 +1,68 @@
+id: security_check_fail_open_verify.c_null_precondition
+description: |
+  Shape A (CVE-2026-46333) regression. Generalized fail_open_verify
+  fires on C/C++ decision-class functions that return success when
+  a precondition is null/missing, skipping a downstream security
+  check. Fixture has three positives (__ptrace_may_access shape +
+  multi-line block + is_authorized) and two negatives (fail-closed
+  returning -1; benign empty-input guard with no downstream check).
+  Heuristic 3 (downstream check token) is what distinguishes the
+  benign empty-input guard from the bug class.
+setup:
+  fixture: languages/cpp/c_fail_open_precondition.c
+invoke:
+  tool: codegraph_security_check_fail_open_verify
+  binary: /Users/anvanster/projects/codegraph-pro/target/release/codegraph-pro
+  args: {}
+expect:
+  match: contains
+  normalize:
+    extra_volatile:
+    - actionable
+    - total
+    - path_filter
+    - compile_gate
+  data:
+    analyzer: fail_open_verify
+    cwe:
+    - CWE-295
+    - CWE-347
+    - CWE-755
+    findings:
+    - category: fail_open_verify
+      cwe: CWE-755
+      dangerous_call: fail_open_on_null_precondition
+      description: 'Decision function `__ptrace_may_access` returns a success/allow value when a precondition is null/missing (`task->mm`), skipping a downstream security check in the same function. CVE-2026-46333 ground truth: `__ptrace_may_access` returns 0 when `task->mm == NULL`, bypassing `get_dumpable()` and granting access on a weaker uid-only check (CWE-755 → CWE-665).'
+      file: ${fixture}
+      function_name: __ptrace_may_access
+      language: c
+      line: 42
+      owasp: A07:2021
+      remediation: 'Treat the missing precondition as a deny: return the failure value (e.g., `-EPERM`, `false`, `Err(...)`) instead of the success value. If the missing precondition is legitimately a non-applicable case, relocate the downstream check so it ALWAYS runs, or explicitly document why granting access on a missing `task->mm` is safe.'
+      severity: high
+      taint_reachability: {}
+    - category: fail_open_verify
+      cwe: CWE-755
+      dangerous_call: fail_open_on_null_precondition
+      description: 'Decision function `check_admin_access` returns a success/allow value when a precondition is null/missing (`task->creds == NULL`), skipping a downstream security check in the same function. CVE-2026-46333 ground truth: `__ptrace_may_access` returns 0 when `task->mm == NULL`, bypassing `get_dumpable()` and granting access on a weaker uid-only check (CWE-755 → CWE-665).'
+      file: ${fixture}
+      function_name: check_admin_access
+      language: c
+      line: 50
+      owasp: A07:2021
+      remediation: 'Treat the missing precondition as a deny: return the failure value (e.g., `-EPERM`, `false`, `Err(...)`) instead of the success value. If the missing precondition is legitimately a non-applicable case, relocate the downstream check so it ALWAYS runs, or explicitly document why granting access on a missing `task->creds == NULL` is safe.'
+      severity: high
+      taint_reachability: {}
+    - category: fail_open_verify
+      cwe: CWE-755
+      dangerous_call: fail_open_on_null_precondition
+      description: 'Decision function `is_authorized` returns a success/allow value when a precondition is null/missing (`task->mm`), skipping a downstream security check in the same function. CVE-2026-46333 ground truth: `__ptrace_may_access` returns 0 when `task->mm == NULL`, bypassing `get_dumpable()` and granting access on a weaker uid-only check (CWE-755 → CWE-665).'
+      file: ${fixture}
+      function_name: is_authorized
+      language: c
+      line: 59
+      owasp: A07:2021
+      remediation: 'Treat the missing precondition as a deny: return the failure value (e.g., `-EPERM`, `false`, `Err(...)`) instead of the success value. If the missing precondition is legitimately a non-applicable case, relocate the downstream check so it ALWAYS runs, or explicitly document why granting access on a missing `task->mm` is safe.'
+      severity: high
+      taint_reachability: {}
+    reachability: {}
