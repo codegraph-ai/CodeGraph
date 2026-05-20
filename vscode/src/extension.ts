@@ -49,7 +49,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // before any other side effect so we can see if activation itself
     // is consistently failing. All hard opt-out gates are enforced
     // inside the reporter; this construction is always safe.
+    //
+    // Speculatively label the edition as 'community' BEFORE firing
+    // activation.start — getServerPath() resolves the actual binary
+    // later, and if a pro binary is on PATH we'll upgrade the label to
+    // 'pro' there. Without this, activation.start ships with
+    // `serverEdition: "unknown"` and dashboards undercount community
+    // activations.
     reporter = createReporter(context);
+    setServerEdition('community');
     context.subscriptions.push({ dispose: () => { void reporter.dispose(); } });
     reporter.activationStart({
         enabledSetting: config.get<boolean>('enabled', true),
@@ -61,7 +69,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
     }
 
-    // Determine server binary path
+    // Determine server binary path — may upgrade the edition label from
+    // 'community' to 'pro' if the user has the pro binary on PATH.
     const serverInfo = getServerPath(context);
     setServerEdition(serverInfo.edition === 'pro' ? 'pro' : 'community');
 
