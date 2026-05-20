@@ -242,7 +242,8 @@ export class MemoryTreeProvider implements vscode.TreeDataProvider<MemoryTreeEle
  */
 export function registerMemoryTreeView(
     context: vscode.ExtensionContext,
-    client: LanguageClient
+    client: LanguageClient,
+    reporter?: import('../telemetry/reporter').Reporter,
 ): void {
     const memoryProvider = new MemoryTreeProvider(client);
 
@@ -251,6 +252,14 @@ export function registerMemoryTreeView(
         treeDataProvider: memoryProvider,
         showCollapseAll: true,
     });
+
+    // Engagement signal — fires the first time the panel becomes visible
+    // (manual expand OR auto-restore at startup).
+    context.subscriptions.push(
+        treeView.onDidChangeVisibility((e) => {
+            if (e.visible) reporter?.engagementTreeViewOpened('memories');
+        }),
+    );
 
     context.subscriptions.push(treeView);
 

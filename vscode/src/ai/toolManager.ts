@@ -28,6 +28,25 @@ import {
     MemoryListResponse,
     MemoryStatsResponse,
 } from '../types';
+import { describeArgShape, type Reporter } from '../telemetry/reporter';
+
+/**
+ * Map an LSP command name to the corresponding language-model tool name.
+ * Most are mechanical camelCase→snake_case with the `codegraph.` prefix
+ * swapped for `codegraph_`. A small map handles the irregulars.
+ */
+const LSP_TO_TOOL_OVERRIDES: Readonly<Record<string, string>> = {
+    'codegraph.symbolSearch': 'codegraph_symbol_search',
+    'codegraph.reindexWorkspace': 'codegraph_reindex_workspace',
+};
+function deriveToolName(lspCommand: string): string {
+    if (LSP_TO_TOOL_OVERRIDES[lspCommand]) return LSP_TO_TOOL_OVERRIDES[lspCommand];
+    const stripped = lspCommand.startsWith('codegraph.')
+        ? lspCommand.slice('codegraph.'.length)
+        : lspCommand;
+    const snake = stripped.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+    return `codegraph_${snake}`;
+}
 
 /**
  * Manages Language Model Tool registrations for CodeGraph.
@@ -39,8 +58,17 @@ export class CodeGraphToolManager {
     private disposables: vscode.Disposable[] = [];
     private indexChecked = false;
     private isIndexed = false;
+    /**
+     * Last tool name an RPC was issued for. Read by the crash handler in
+     * extension.ts so `server.crash` carries the most likely suspect.
+     * Cleared on success so stale names don't contaminate later crashes.
+     */
+    private _lastToolName: string | undefined;
+    public get lastToolName(): string | undefined {
+        return this._lastToolName;
+    }
 
-    constructor(private client: LanguageClient) {}
+    constructor(private client: LanguageClient, private reporter?: Reporter) {}
 
     /**
      * Check if workspace is indexed. Prompt to index on first tool use.
@@ -69,22 +97,57 @@ export class CodeGraphToolManager {
             'Later',
         );
         if (choice === 'Index Workspace') {
+            this.reporter?.indexRequested('tool_invocation');
+            const startedAt = Date.now();
             await vscode.window.withProgress(
                 { location: vscode.ProgressLocation.Notification, title: 'CodeGraph: Indexing workspace...' },
                 async () => {
-                    const result = await this.client.sendRequest<any>(
-                        'workspace/executeCommand',
-                        { command: 'codegraph.reindexWorkspace', arguments: [{}] },
-                    );
-                    this.isIndexed = true;
-                    vscode.window.showInformationMessage(`Indexed ${result?.files_indexed ?? 0} files`);
+                    try {
+                        const result = await this.client.sendRequest<any>(
+                            'workspace/executeCommand',
+                            { command: 'codegraph.reindexWorkspace', arguments: [{}] },
+                        );
+                        this.isIndexed = true;
+                        this.reportIndexCompleted(startedAt, result);
+                        vscode.window.showInformationMessage(`Indexed ${result?.files_indexed ?? 0} files`);
+                    } catch (err) {
+                        this.reporter?.indexCompleted({
+                            outcome: 'error',
+                            durationMs: Date.now() - startedAt,
+                            fileCount: 0,
+                            errorCategory: 'other',
+                        });
+                        throw err;
+                    }
                 },
             );
         }
     }
 
+    /** Map a reindex RPC response → `index.completed` + `index.languageBreakdown`. */
+    private reportIndexCompleted(localStartedAt: number, result: any): void {
+        const fileCount = typeof result?.files_indexed === 'number' ? result.files_indexed : 0;
+        const durationMs =
+            typeof result?.duration_ms === 'number'
+                ? Number(result.duration_ms)
+                : Date.now() - localStartedAt;
+        this.reporter?.indexCompleted({ outcome: 'ok', durationMs, fileCount });
+        const byLanguage = result?.by_language;
+        if (byLanguage && typeof byLanguage === 'object') {
+            const map = new Map<any, number>();
+            for (const [lang, count] of Object.entries(byLanguage)) {
+                if (typeof count === 'number') map.set(lang as any, count);
+            }
+            if (map.size > 0) this.reporter?.indexLanguageBreakdown(map as any);
+        }
+    }
+
     /**
      * Execute an LSP command with a small retry/backoff to smooth over transient timeouts.
+     *
+     * Single choke point for `tool.*` telemetry — every LM-tool invocation
+     * routes through here, so the reporter sees latency, success/failure,
+     * retry count, and result size in one place.
      */
     private async sendRequestWithRetry<T>(
         command: string,
@@ -97,8 +160,19 @@ export class CodeGraphToolManager {
         let delay = options.delayMs ?? 250;
         const backoffFactor = options.backoffFactor ?? 2;
 
+        const toolName = deriveToolName(command);
+        this._lastToolName = toolName;
+        const startedAt = Date.now();
+        this.reporter?.toolInvoke(toolName, describeArgShape(args));
+
         for (let attempt = 0; attempt <= retries; attempt++) {
             if (token.isCancellationRequested) {
+                this.reporter?.toolError({
+                    toolName,
+                    error: new Error('cancelled'),
+                    attemptCount: attempt + 1,
+                    durationMs: Date.now() - startedAt,
+                });
                 throw new Error('cancelled');
             }
 
@@ -111,10 +185,47 @@ export class CodeGraphToolManager {
                 if (result == null) {
                     throw new Error(`${command} returned null — server may be busy or restarting`);
                 }
+                // Approximate result size for the bucket. JSON.stringify is
+                // bounded (the reporter buckets the length); we don't store
+                // or hash the content.
+                let resultSizeChars = 0;
+                try {
+                    resultSizeChars = JSON.stringify(result).length;
+                } catch {
+                    /* ignore */
+                }
+                this.reporter?.toolResult({
+                    toolName,
+                    durationMs: Date.now() - startedAt,
+                    resultSizeChars,
+                    retried: attempt > 0,
+                });
+                this._lastToolName = undefined; // clear on success
                 return result as T;
             } catch (error) {
                 const isLastAttempt = attempt === retries;
+                const errMsg = String(error).toLowerCase();
+                const isTimeout =
+                    errMsg.includes('timeout') || errMsg.includes('timed out');
+
+                // RPC-timeout is a distinct signal from tool failure: it
+                // catches "server slow / locked up" patterns specifically.
+                // Fire on every intermediate timeout (i.e. all timeouts
+                // except the one that becomes the final tool.error).
+                if (isTimeout && !isLastAttempt && this.isRetryableError(error)) {
+                    this.reporter?.serverRpcTimeout({
+                        command,
+                        attemptCount: attempt + 1,
+                    });
+                }
+
                 if (isLastAttempt || !this.isRetryableError(error)) {
+                    this.reporter?.toolError({
+                        toolName,
+                        error,
+                        attemptCount: attempt + 1,
+                        durationMs: Date.now() - startedAt,
+                    });
                     throw error;
                 }
 
@@ -123,6 +234,12 @@ export class CodeGraphToolManager {
             }
         }
 
+        this.reporter?.toolError({
+            toolName,
+            error: new Error('request failed after retries'),
+            attemptCount: retries + 1,
+            durationMs: Date.now() - startedAt,
+        });
         throw new Error('Request failed after retries');
     }
 

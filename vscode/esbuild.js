@@ -34,6 +34,16 @@ async function main() {
         outfile: 'out/extension.js',
         external: ['vscode'],
         logLevel: 'silent',
+        define: {
+            // Telemetry destination — replaced at build time. Dev builds
+            // (no env var) get empty strings → reporter no-ops to PostHog
+            // but still writes to the verbose channel if enabled, so
+            // local audit works without ever shipping events.
+            __POSTHOG_KEY__: JSON.stringify(process.env.CODEGRAPH_POSTHOG_KEY ?? ''),
+            __POSTHOG_HOST__: JSON.stringify(
+                process.env.CODEGRAPH_POSTHOG_HOST ?? 'https://us.posthog.com',
+            ),
+        },
         plugins: [
             /* add to the end of plugins array */
             esbuildProblemMatcherPlugin,

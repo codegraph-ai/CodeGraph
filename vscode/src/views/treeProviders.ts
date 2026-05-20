@@ -4,6 +4,7 @@
 import * as vscode from 'vscode';
 import { LanguageClient, RequestType } from 'vscode-languageclient/node';
 import { registerMemoryTreeView } from './memoryProvider';
+import type { Reporter } from '../telemetry/reporter';
 
 interface SymbolInfo {
     id: string;
@@ -147,7 +148,8 @@ export class SymbolTreeProvider implements vscode.TreeDataProvider<SymbolTreeIte
  */
 export function registerTreeDataProviders(
     context: vscode.ExtensionContext,
-    client: LanguageClient
+    client: LanguageClient,
+    reporter?: Reporter,
 ): void {
     const symbolProvider = new SymbolTreeProvider(client);
 
@@ -156,6 +158,15 @@ export function registerTreeDataProviders(
         treeDataProvider: symbolProvider,
         showCollapseAll: true,
     });
+
+    // Fire engagement.treeViewOpened the first time the user actually
+    // opens the panel. `onDidChangeVisibility(true)` is the right hook —
+    // it covers both manual expansion and auto-restore at startup.
+    context.subscriptions.push(
+        treeView.onDidChangeVisibility((e) => {
+            if (e.visible) reporter?.engagementTreeViewOpened('symbols');
+        }),
+    );
 
     context.subscriptions.push(treeView);
 
@@ -209,5 +220,5 @@ export function registerTreeDataProviders(
     );
 
     // Register memory tree view
-    registerMemoryTreeView(context, client);
+    registerMemoryTreeView(context, client, reporter);
 }

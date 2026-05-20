@@ -2,7 +2,7 @@
     "name": "codegraph",
     "displayName": "CodeGraph",
     "description": "Cross-language code intelligence powered by graph analysis",
-    "version": "0.14.0",
+    "version": "0.16.0",
     "publisher": "aStudioPlus",
     "author": "Andrey Vasilevsky <anvanster@gmail.com>",
     "license": "Apache-2.0",
@@ -279,8 +279,8 @@
                     "default": "bge-small",
                     "scope": "resource",
                     "enumDescriptions": [
-                        "BGE-Small-EN-v1.5 (384d) \u2014 fast, good quality with full-body embeddings. ~127MB download.",
-                        "Jina Code V2 (768d) \u2014 6x slower indexing, no quality advantage with full-body embeddings. ~642MB download."
+                        "BGE-Small-EN-v1.5 (384d) — fast, good quality with full-body embeddings. ~127MB download.",
+                        "Jina Code V2 (768d) — 6x slower indexing, no quality advantage with full-body embeddings. ~642MB download."
                     ],
                     "description": "Embedding model for semantic search and code similarity"
                 },
@@ -352,6 +352,21 @@
                     "minimum": 0,
                     "maximum": 1,
                     "description": "Minimum confidence score (0-1) for creating memories from commits"
+                },
+                "codegraph.telemetry.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Send anonymous usage telemetry (event names, bucketed counts, durations only) to help improve CodeGraph. No file contents, file paths, identifiers, queries, or memory text is ever sent. Respects VS Code's global telemetry.telemetryLevel — if you've disabled telemetry globally, CodeGraph stays silent regardless of this setting."
+                },
+                "codegraph.telemetry.errorReportsOnly": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Send only crash and error events; skip routine usage events. Use this to help with stability without contributing feature analytics."
+                },
+                "codegraph.telemetry.verbose": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Log every emitted telemetry event to the 'CodeGraph Telemetry' output channel for transparency / debugging. No effect on what is sent — this lets you audit the payload locally."
                 }
             }
         },
@@ -524,7 +539,7 @@
                 "name": "codegraph_get_ai_context",
                 "displayName": "Get AI Context",
                 "description": "Get comprehensive code context optimized for AI analysis",
-                "modelDescription": "Gathers comprehensive code context optimized for AI understanding. USE WHEN: explaining code, planning modifications, debugging issues, or writing tests. THIS IS YOUR PRIMARY TOOL for understanding unfamiliar code. RETURNS: primaryContext (source code), relatedSymbols (full source or signature-only), imports (file-level modules), siblingFunctions (other functions in same file), debugHints (complexity, branches, exceptions \u2014 debug intent only), architecture (module, layer). Intent controls priority: 'explain' = dependencies + siblings, 'modify' = tests + callers, 'debug' = call chain + control flow hints, 'test' = example tests + mockable deps. Token budget fills high-priority sections first, then adds signature-only symbols for maximum coverage.",
+                "modelDescription": "Gathers comprehensive code context optimized for AI understanding. USE WHEN: explaining code, planning modifications, debugging issues, or writing tests. THIS IS YOUR PRIMARY TOOL for understanding unfamiliar code. RETURNS: primaryContext (source code), relatedSymbols (full source or signature-only), imports (file-level modules), siblingFunctions (other functions in same file), debugHints (complexity, branches, exceptions — debug intent only), architecture (module, layer). Intent controls priority: 'explain' = dependencies + siblings, 'modify' = tests + callers, 'debug' = call chain + control flow hints, 'test' = example tests + mockable deps. Token budget fills high-priority sections first, then adds signature-only symbols for maximum coverage.",
                 "canBeReferencedInPrompt": true,
                 "toolReferenceName": "ai_context",
                 "userDescription": "Provides rich code context for AI analysis and understanding",
@@ -578,7 +593,7 @@
                 "name": "codegraph_get_edit_context",
                 "displayName": "Get Edit Context",
                 "description": "Assembles everything needed to edit code at a specific location in one call",
-                "modelDescription": "Assembles everything needed to edit code at a specific location in a single call. USE WHEN: you are about to modify, refactor, or fix code and need full context before making changes. PREFER THIS over codegraph_get_ai_context when you are about to write or modify code \u2014 it includes callers (impact), tests (what to update), and git history (recent context) that get_ai_context does not. Use get_ai_context instead when you only need to understand or explain code. RETURNS 5 sections: (1) symbol \u2014 full source code of the function/method, (2) callers \u2014 functions that call this symbol (to assess impact), (3) tests \u2014 related test functions (to know what to update/run), (4) memories \u2014 relevant debug notes and architectural decisions, (5) recentChanges \u2014 recent git commits touching this file. EXAMPLE: Before modifying a function's signature, call this to see all callers that would break, tests that need updating, and whether someone recently changed this code.",
+                "modelDescription": "Assembles everything needed to edit code at a specific location in a single call. USE WHEN: you are about to modify, refactor, or fix code and need full context before making changes. PREFER THIS over codegraph_get_ai_context when you are about to write or modify code — it includes callers (impact), tests (what to update), and git history (recent context) that get_ai_context does not. Use get_ai_context instead when you only need to understand or explain code. RETURNS 5 sections: (1) symbol — full source code of the function/method, (2) callers — functions that call this symbol (to assess impact), (3) tests — related test functions (to know what to update/run), (4) memories — relevant debug notes and architectural decisions, (5) recentChanges — recent git commits touching this file. EXAMPLE: Before modifying a function's signature, call this to see all callers that would break, tests that need updating, and whether someone recently changed this code.",
                 "canBeReferencedInPrompt": true,
                 "toolReferenceName": "edit_context",
                 "userDescription": "Gets comprehensive context for editing code: source, callers, tests, memories, and git history",
@@ -615,7 +630,7 @@
                 "name": "codegraph_get_curated_context",
                 "displayName": "Get Curated Context",
                 "description": "Discovers and assembles cross-codebase context for a natural language query",
-                "modelDescription": "Discovers and assembles context across the entire codebase for a natural language query. USE WHEN: you need to understand a concept, pattern, or subsystem that spans multiple files \u2014 e.g., 'how does authentication work?', 'what handles database connections?', 'error handling patterns'. Unlike codegraph_get_ai_context (single symbol) or codegraph_get_edit_context (single location), this searches the whole codebase and curates cross-cutting context. Pipeline: searches for relevant symbols, resolves source code, walks dependencies to find related modules, fetches relevant memories, and curates within token budget. EXAMPLE: query='authentication middleware' returns the auth function source, its callers (routes), its dependencies (token verification), and architectural notes about auth.",
+                "modelDescription": "Discovers and assembles context across the entire codebase for a natural language query. USE WHEN: you need to understand a concept, pattern, or subsystem that spans multiple files — e.g., 'how does authentication work?', 'what handles database connections?', 'error handling patterns'. Unlike codegraph_get_ai_context (single symbol) or codegraph_get_edit_context (single location), this searches the whole codebase and curates cross-cutting context. Pipeline: searches for relevant symbols, resolves source code, walks dependencies to find related modules, fetches relevant memories, and curates within token budget. EXAMPLE: query='authentication middleware' returns the auth function source, its callers (routes), its dependencies (token verification), and architectural notes about auth.",
                 "canBeReferencedInPrompt": true,
                 "toolReferenceName": "curated_context",
                 "userDescription": "Searches the codebase and assembles context for a concept or question",
@@ -635,7 +650,7 @@
                         },
                         "uri": {
                             "type": "string",
-                            "description": "Optional file URI to anchor the search \u2014 results from this file are prioritized"
+                            "description": "Optional file URI to anchor the search — results from this file are prioritized"
                         },
                         "maxTokens": {
                             "type": "number",
@@ -1668,7 +1683,7 @@
         "vscode:prepublish": "npm run esbuild-base -- --production",
         "compile": "tsc -p ./",
         "watch": "tsc -watch -p ./",
-        "esbuild-base": "node esbuild.js",
+        "esbuild-base": "node --env-file-if-exists=.env esbuild.js",
         "esbuild": "npm run esbuild-base -- --sourcemap",
         "esbuild-watch": "npm run esbuild-base -- --sourcemap --watch",
         "build-server": "cargo build --release -p codegraph-server",
@@ -1695,6 +1710,7 @@
         "vitest": "^4.1.0"
     },
     "dependencies": {
+        "posthog-node": "^4.18.0",
         "vscode-languageclient": "^9.0.1"
     }
 }

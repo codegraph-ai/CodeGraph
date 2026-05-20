@@ -15,6 +15,7 @@ import {
     ParserMetricsResponse,
 } from '../types';
 import { GraphVisualizationPanel } from '../views/graphPanel';
+import type { Reporter } from '../telemetry/reporter';
 
 // Define custom request types (used for LSP type inference)
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -58,12 +59,40 @@ namespace ReindexWorkspaceRequest {
 export function registerCommands(
     context: vscode.ExtensionContext,
     client: LanguageClient,
-    _aiProvider: CodeGraphAIProvider
+    _aiProvider: CodeGraphAIProvider,
+    reporter?: Reporter,
 ): void {
-    // Helper to safely register commands
+    // Helper to safely register commands. Wraps every callback in a
+    // telemetry envelope so we capture command.invoke / command.result
+    // for every palette/keybind invocation. Errors thrown by the
+    // callback still propagate to VS Code; we just observe them.
     const safeRegisterCommand = (commandId: string, callback: (...args: any[]) => any) => {
         try {
-            context.subscriptions.push(vscode.commands.registerCommand(commandId, callback));
+            const wrapped = async (...args: any[]) => {
+                const editor = vscode.window.activeTextEditor;
+                reporter?.commandInvoke(commandId, {
+                    hasActiveEditor: !!editor,
+                    activeEditorLanguage: editor?.document.languageId,
+                });
+                const startedAt = Date.now();
+                try {
+                    const result = await callback(...args);
+                    reporter?.commandResult({
+                        commandId,
+                        outcome: 'ok',
+                        durationMs: Date.now() - startedAt,
+                    });
+                    return result;
+                } catch (err) {
+                    reporter?.commandResult({
+                        commandId,
+                        outcome: 'error',
+                        durationMs: Date.now() - startedAt,
+                    });
+                    throw err;
+                }
+            };
+            context.subscriptions.push(vscode.commands.registerCommand(commandId, wrapped));
         } catch (error) {
             console.warn(`Command ${commandId} already registered, skipping`);
         }
@@ -89,6 +118,7 @@ export function registerCommands(
                     }]
                 }) as DependencyGraphResponse;
 
+                reporter?.engagementGraphPanelOpened('dependency');
                 GraphVisualizationPanel.createOrShow(
                     context.extensionUri,
                     client,
@@ -124,6 +154,7 @@ export function registerCommands(
                     }]
                 }) as CallGraphResponse;
 
+                reporter?.engagementGraphPanelOpened('call');
                 GraphVisualizationPanel.createOrShow(
                     context.extensionUri,
                     client,
@@ -171,6 +202,7 @@ export function registerCommands(
                 }) as ImpactAnalysisResponse;
 
                 // Show impact analysis results
+                reporter?.engagementGraphPanelOpened('impact');
                 showImpactAnalysisResults(response);
             } catch (error) {
                 vscode.window.showErrorMessage(`CodeGraph: Failed to analyze impact: ${error}`);
