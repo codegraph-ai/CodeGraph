@@ -172,6 +172,15 @@ pub struct IndexResult {
     pub files_parsed: usize,
     /// Files skipped because their content hash was unchanged.
     pub files_skipped: usize,
+    /// Per-language file counts (key: parser's `language()` string).
+    /// Used for `index.languageBreakdown` telemetry so we know which
+    /// parsers are actually exercised on real workspaces. Counts include
+    /// both parsed and hash-skipped files (all files the parser claimed).
+    pub by_language: std::collections::HashMap<String, usize>,
+    /// Per-language parser error counts. A parser error here means the
+    /// tree-sitter parse step itself failed — distinct from "no files
+    /// of this language found." Drives parser-quality prioritization.
+    pub parser_errors_by_language: std::collections::HashMap<String, usize>,
 }
 
 /// Shared indexer for walking directories, hashing files, and parsing them
@@ -220,12 +229,18 @@ impl Indexer {
             // folders' configs.
             let mut folder_config = config.clone();
             folder_config.extend_from_codegraphignore(folder);
-            let (total, parsed, skipped) = self
+            let (total, parsed, skipped, by_lang, parser_errors) = self
                 .index_directory(graph, folder, &folder_config, 0, counter.clone())
                 .await;
             result.total_files += total;
             result.files_parsed += parsed;
             result.files_skipped += skipped;
+            for (lang, count) in by_lang {
+                *result.by_language.entry(lang).or_insert(0) += count;
+            }
+            for (lang, count) in parser_errors {
+                *result.parser_errors_by_language.entry(lang).or_insert(0) += count;
+            }
         }
 
         // Resolve cross-file imports
@@ -269,10 +284,25 @@ impl Indexer {
         config: &'a IndexConfig,
         depth: u32,
         counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (usize, usize, usize)> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = (
+                        usize,
+                        usize,
+                        usize,
+                        std::collections::HashMap<String, usize>,
+                        std::collections::HashMap<String, usize>,
+                    ),
+                > + Send
+                + 'a,
+        >,
+    > {
         Box::pin(async move {
             use std::sync::atomic::Ordering;
+
+            let empty_by_lang: std::collections::HashMap<String, usize> = Default::default();
+            let empty_errors: std::collections::HashMap<String, usize> = Default::default();
 
             if depth > config.max_depth {
                 tracing::warn!(
@@ -280,11 +310,11 @@ impl Indexer {
                     dir,
                     config.max_depth
                 );
-                return (0, 0, 0);
+                return (0, 0, 0, empty_by_lang, empty_errors);
             }
 
             if counter.load(Ordering::Relaxed) >= config.max_files {
-                return (0, 0, 0);
+                return (0, 0, 0, empty_by_lang, empty_errors);
             }
 
             let exclude_set = config.build_exclude_set();
@@ -295,12 +325,14 @@ impl Indexer {
             let mut total = 0usize;
             let mut parsed = 0usize;
             let mut skipped = 0usize;
+            let mut by_language: std::collections::HashMap<String, usize> = Default::default();
+            let mut parser_errors: std::collections::HashMap<String, usize> = Default::default();
 
             let entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
                 Err(e) => {
                     tracing::warn!("Cannot read directory {:?}: {}", dir, e);
-                    return (0, 0, 0);
+                    return (0, 0, 0, empty_by_lang, empty_errors);
                 }
             };
 
@@ -342,12 +374,18 @@ impl Indexer {
                         continue;
                     }
 
-                    let (t, p, s) = self
+                    let (t, p, s, child_by_lang, child_errors) = self
                         .index_directory(graph, &path, config, depth + 1, counter.clone())
                         .await;
                     total += t;
                     parsed += p;
                     skipped += s;
+                    for (lang, count) in child_by_lang {
+                        *by_language.entry(lang).or_insert(0) += count;
+                    }
+                    for (lang, count) in child_errors {
+                        *parser_errors.entry(lang).or_insert(0) += count;
+                    }
                 } else if path.is_file() {
                     // Skip files matching exclude globs
                     let path_str = path.to_string_lossy();
@@ -377,10 +415,19 @@ impl Indexer {
                             .any(|e| *e == ext_str.as_ref() || *e == ext_with_dot);
 
                         if is_supported {
+                            // Resolve the parser before parsing so we can
+                            // attribute the file (and any error) to a
+                            // specific language for telemetry.
+                            let language = self
+                                .parsers
+                                .parser_for_path(&path)
+                                .map(|p| p.language().to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
                             match self.index_file(graph, &path).await {
                                 Ok(was_parsed) => {
                                     total += 1;
                                     counter.fetch_add(1, Ordering::Relaxed);
+                                    *by_language.entry(language).or_insert(0) += 1;
                                     if was_parsed {
                                         parsed += 1;
                                     } else {
@@ -390,6 +437,7 @@ impl Indexer {
                                 }
                                 Err(e) => {
                                     tracing::warn!("Failed to index {:?}: {}", path, e);
+                                    *parser_errors.entry(language).or_insert(0) += 1;
                                 }
                             }
                         }
@@ -397,7 +445,7 @@ impl Indexer {
                 }
             }
 
-            (total, parsed, skipped)
+            (total, parsed, skipped, by_language, parser_errors)
         })
     }
 

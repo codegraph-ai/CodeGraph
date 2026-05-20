@@ -401,7 +401,7 @@ impl CodeGraphBackend {
             let config = self.config.read().await.clone();
             let idx_config = Self::index_config_from_lsp(&config);
             let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let (total, _parsed, _skipped) = self
+            let (total, _parsed, _skipped, _by_lang, _errors) = self
                 .indexer
                 .index_directory(&self.graph, dir, &idx_config, 0, counter)
                 .await;
@@ -1773,10 +1773,12 @@ impl LanguageServer for CodeGraphBackend {
                 };
 
                 let idx_config = Self::index_config_from_lsp(&config);
+                let started_at = std::time::Instant::now();
                 let result = self
                     .indexer
                     .index_workspace(&self.graph, &paths_to_index, &idx_config)
                     .await;
+                let duration_ms = started_at.elapsed().as_millis() as u64;
 
                 let total_indexed = result.total_files;
 
@@ -1815,7 +1817,12 @@ impl LanguageServer for CodeGraphBackend {
                 Ok(Some(serde_json::json!({
                     "status": "success",
                     "message": format!("Workspace reindexed: {total_indexed} files"),
-                    "files_indexed": total_indexed
+                    "files_indexed": total_indexed,
+                    "files_parsed": result.files_parsed,
+                    "files_skipped": result.files_skipped,
+                    "duration_ms": duration_ms,
+                    "by_language": result.by_language,
+                    "parser_errors_by_language": result.parser_errors_by_language,
                 })))
             }
 
@@ -2216,7 +2223,7 @@ impl LanguageServer for CodeGraphBackend {
                 let lsp_config = self.config.read().await.clone();
                 let config = Self::index_config_from_lsp(&lsp_config);
                 let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let (total, _parsed, _skipped) = self
+                let (total, _parsed, _skipped, _by_lang, _errors) = self
                     .indexer
                     .index_directory(&self.graph, &dir, &config, 0, counter)
                     .await;

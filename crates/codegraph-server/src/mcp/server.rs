@@ -740,7 +740,7 @@ impl McpBackend {
 
         let config = self.index_config();
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (total, _parsed, _skipped) = self
+        let (total, _parsed, _skipped, _by_lang, _errors) = self
             .indexer
             .index_directory(&self.graph, dir, &config, 0, counter)
             .await;
