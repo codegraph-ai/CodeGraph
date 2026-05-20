@@ -56,3 +56,20 @@ try {
   console.warn(`⚠ codegraph-mcp: binary exists but --info check failed`);
   console.warn(`  ${err.message}`);
 }
+
+// Hint about the optional Claude Code hook. Installation is opt-in to avoid
+// silently modifying the user's ~/.claude/settings.json. Both Unix
+// (bash) and Windows (PowerShell) variants are shipped — the installer
+// picks the right one for the current OS.
+{
+  const scriptName =
+    platform === "win32" ? "codegraph-pre-edit.ps1" : "codegraph-pre-edit.sh";
+  const hookScriptPath = path.join(__dirname, "..", "hooks", scriptName);
+  if (fs.existsSync(hookScriptPath)) {
+    console.log("");
+    console.log("ℹ Optional: enable automatic context injection in Claude Code:");
+    console.log("    npx codegraph-mcp-install-hooks");
+    console.log("  Adds a PreToolUse hook that nudges agents to fetch graph context");
+    console.log("  before Edit/Write on source files. Idempotent, opt-out via --uninstall.");
+  }
+}

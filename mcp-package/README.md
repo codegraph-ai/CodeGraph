@@ -48,8 +48,21 @@ Pass flags after `--`:
 |------|---------|-------------|
 | `--workspace <path>` | current dir | Directories to index (repeatable) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
-| `--embedding-model <model>` | `bge-small` | `bge-small` or `jina-code-v2` |
+| `--embedding-model <model>` | `bge-small` | `bge-small`, `jina-code-v2`, or `granite-97m` (32K context, multilingual) |
 | `--max-files <n>` | 5000 | Maximum files to index |
+
+### Optional: automatic context injection in Claude Code
+
+Install a PreToolUse hook that nudges Claude to fetch graph context (`get_edit_context`, `analyze_impact`) before editing source files in indexed workspaces. Skips non-source files and ad-hoc edits silently. Never blocks tool calls.
+
+```bash
+npx codegraph-mcp-install-hooks         # interactive prompt
+npx codegraph-mcp-install-hooks --dry   # preview the change
+npx codegraph-mcp-install-hooks --force # skip prompt
+npx codegraph-mcp-install-hooks --uninstall
+```
+
+The installer modifies `~/.claude/settings.json` idempotently. Re-running it after a package upgrade refreshes the hook path. Inspired by [GitNexus's](https://github.com/abhigyanpatwari/GitNexus) precomputed-context model — addresses the "agents ship blind edits" failure mode by surfacing call-graph awareness automatically instead of relying on the agent to remember to ask.
 
 ## Tools (28)
 

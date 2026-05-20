@@ -1,6 +1,6 @@
 {
   "name": "@astudioplus/codegraph-mcp",
-  "version": "0.13.1",
+  "version": "0.15.0",
   "mcpName": "io.github.codegraph-ai/codegraph",
   "description": "CodeGraph MCP server — cross-language code intelligence with 28 tools, 17 languages",
   "author": "Andrey Vasilevsky <anvanster@gmail.com>",
@@ -20,10 +20,12 @@
     "copilot"
   ],
   "bin": {
-    "codegraph-mcp": "./bin/codegraph-mcp.js"
+    "codegraph-mcp": "./bin/codegraph-mcp.js",
+    "codegraph-mcp-install-hooks": "./bin/install-hooks.js"
   },
   "files": [
     "bin/",
+    "hooks/",
     "README.md",
     "server.json"
   ],
