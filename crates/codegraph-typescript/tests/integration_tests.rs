@@ -355,7 +355,11 @@ fn test_parse_comments_only() {
 }
 
 #[test]
-fn test_syntax_error() {
+fn test_syntax_error_is_tolerated() {
+    // GitHub issue #1: prior behavior was to reject the entire file
+    // on any error node with a hardcoded `(0, 0)` position. The new
+    // behavior is best-effort extraction — tree-sitter's error
+    // tolerance keeps the rest of the file's symbols intact.
     let source = r#"
 function broken( {
 "#;
@@ -364,7 +368,10 @@ function broken( {
     let parser = TypeScriptParser::new();
 
     let result = parser.parse_source(source, Path::new("test.ts"), &mut graph);
-    assert!(result.is_err());
+    assert!(
+        result.is_ok(),
+        "post-fix: parse should succeed best-effort on a broken file"
+    );
 }
 
 #[test]

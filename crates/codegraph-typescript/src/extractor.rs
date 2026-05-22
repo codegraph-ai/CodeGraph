@@ -5,9 +5,37 @@
 
 use codegraph_parser_api::{CodeIR, ModuleEntity, ParserConfig, ParserError};
 use std::path::Path;
-use tree_sitter::Parser;
+use tree_sitter::{Node, Parser};
 
 use crate::visitor::TypeScriptVisitor;
+
+/// Walk the tree to find the first ERROR or MISSING node and return its
+/// row, column, and a short source snippet (≤40 chars). Used by the
+/// extractor to log an accurate warning instead of the old hardcoded
+/// `(0, 0)` rejection.
+fn first_error_position(root: Node<'_>, source: &str) -> Option<(usize, usize, String)> {
+    let mut cursor = root.walk();
+    let mut stack: Vec<Node<'_>> = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.is_error() || node.is_missing() {
+            let start = node.start_position();
+            let byte_range = node.start_byte()..node.end_byte().min(node.start_byte() + 40);
+            let snippet = source
+                .get(byte_range)
+                .unwrap_or("")
+                .replace('\n', "\\n");
+            return Some((start.row, start.column, snippet));
+        }
+        for child in node.children(&mut cursor) {
+            // Only descend into subtrees that contain an error — cheaper
+            // than walking the entire tree for clean files.
+            if child.has_error() || child.is_error() || child.is_missing() {
+                stack.push(child);
+            }
+        }
+    }
+    None
+}
 
 /// Extract code entities and relationships from TypeScript/JavaScript source code
 pub fn extract(
@@ -40,15 +68,31 @@ pub fn extract(
         ParserError::ParseError(file_path.to_path_buf(), "Failed to parse".to_string())
     })?;
 
-    // Check for syntax errors
+    // tree-sitter is error-tolerant by design — ERROR/MISSING nodes are
+    // inserted at points of confusion but the rest of the tree stays
+    // intact. Previously we rejected the entire file on any error node,
+    // reporting `(0, 0)` regardless of where the actual problem was —
+    // GitHub issue #1: TypeScript files with newer-syntax constructs
+    // (or grammar gaps in tree-sitter-typescript) lost ALL symbol
+    // extraction. Now: log the first error position as a warning and
+    // continue extracting. The visitor's catch-all branch already
+    // descends into ERROR subtrees and skips unknown nodes safely.
     let root_node = tree.root_node();
     if root_node.has_error() {
-        return Err(ParserError::SyntaxError(
-            file_path.to_path_buf(),
-            0,
-            0,
-            "Syntax error in source code".to_string(),
-        ));
+        // Eprintln rather than tracing — the parser crates are
+        // dependency-light leaves; the LSP/MCP layer captures stderr
+        // and routes it through tracing already.
+        if let Some((row, col, snippet)) = first_error_position(root_node, source) {
+            eprintln!(
+                "WARN codegraph_typescript: parse {:?}: tree-sitter error at {}:{} (near `{}`) — extracting symbols from the rest of the file",
+                file_path, row, col, snippet,
+            );
+        } else {
+            eprintln!(
+                "WARN codegraph_typescript: parse {:?}: tree-sitter reported an error somewhere but couldn't locate it — extracting symbols best-effort",
+                file_path,
+            );
+        }
     }
 
     // Create IR for this file
@@ -252,6 +296,10 @@ function calculateTotal(shapes: Shape[]): number {
 
     #[test]
     fn test_extract_with_syntax_error() {
+        // GitHub issue #1 fix: a file with a parse error no longer
+        // rejects the entire extraction. Tree-sitter is error-tolerant
+        // — the visitor walks past ERROR nodes and harvests whatever
+        // structure parsed cleanly. The warning goes to stderr.
         let source = r#"
 function broken( {
     // Missing closing brace
@@ -259,11 +307,15 @@ function broken( {
         let config = ParserConfig::default();
         let result = extract(source, Path::new("test.ts"), &config);
 
-        assert!(result.is_err());
-        match result {
-            Err(ParserError::SyntaxError(..)) => (),
-            _ => panic!("Expected SyntaxError"),
-        }
+        // Was: assert!(result.is_err());
+        // Now: extraction succeeds with whatever the visitor could
+        // recover. We don't assert on entity counts here because
+        // tree-sitter's error recovery for this fragment is grammar-
+        // dependent and may change across versions.
+        assert!(
+            result.is_ok(),
+            "post-fix: parse should succeed (best-effort) on a syntactically broken file"
+        );
     }
 
     #[test]
