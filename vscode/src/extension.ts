@@ -88,10 +88,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     const serverModule = serverInfo.path;
 
-    // Server options - add Windows-specific spawn options
+    // Server options - add Windows-specific spawn options.
+    //
+    // Windows + shell:true means LanguageClient spawns cmd.exe with the
+    // command string raw. If the binary path contains spaces (e.g.
+    // `C:\Users\Muhammad Daniyal\.vscode\extensions\...\codegraph-server-win32-x64.exe`),
+    // cmd.exe splits at the space and tries to execute the prefix as
+    // the command. Symptom: `'C:\Users\Muhammad' is not recognized as
+    // an internal or external command` + EPIPE crash. Affects every
+    // Windows user whose username contains a space (very common).
+    // GitHub issue #2.
+    //
+    // Fix: wrap the path in double quotes on Windows. shell:true is
+    // retained because cmd.exe is the documented path for spawning
+    // .exe files via vscode-languageclient.
     const isWindows = os.platform() === 'win32';
+    const command = isWindows ? `"${serverModule}"` : serverModule;
     const serverOptions: ServerOptions = {
-        command: serverModule,
+        command,
         args: [],
         transport: TransportKind.stdio,
         options: {
