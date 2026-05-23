@@ -7,6 +7,9 @@ pub mod module;
 pub mod trait_;
 
 pub use class::{ClassEntity, Field};
-pub use function::{truncate_body_prefix, FunctionEntity, Parameter, BODY_PREFIX_MAX_CHARS};
+pub use function::{
+    truncate_at_char_boundary, truncate_body_prefix, FunctionEntity, Parameter,
+    BODY_PREFIX_MAX_CHARS,
+};
 pub use module::ModuleEntity;
 pub use trait_::TraitEntity;

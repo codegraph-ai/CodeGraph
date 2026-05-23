@@ -12,15 +12,91 @@ pub const BODY_PREFIX_MAX_CHARS: usize = 1024;
 /// Prevents panics on multi-byte characters (e.g., Chinese, emoji).
 #[inline]
 pub fn truncate_body_prefix(text: &str) -> &str {
-    if text.len() <= BODY_PREFIX_MAX_CHARS {
+    truncate_at_char_boundary(text, BODY_PREFIX_MAX_CHARS)
+}
+
+/// UTF-8-safe variable-length truncation. Returns the longest prefix of
+/// `text` whose byte length is ≤ `max_bytes` AND which ends at a valid
+/// UTF-8 char boundary. Walks backward from `max_bytes` looking for the
+/// boundary — worst case 3 byte-steps (UTF-8 chars are ≤ 4 bytes wide).
+///
+/// Prevents the panic class reported in GitHub issue #3: raw
+/// `&text[..N]` slicing crashes when the Nth byte falls inside a
+/// multi-byte char (CJK, emoji, etc.). Use this helper anywhere a
+/// parser or visitor needs to take a bounded prefix of arbitrary
+/// user source.
+#[inline]
+pub fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
         return text;
     }
-    // Find the largest char boundary <= BODY_PREFIX_MAX_CHARS
-    let mut end = BODY_PREFIX_MAX_CHARS;
+    let mut end = max_bytes;
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
     &text[..end]
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_short_passes_through() {
+        assert_eq!(truncate_at_char_boundary("hello", 100), "hello");
+    }
+
+    #[test]
+    fn ascii_truncates_at_exact_byte() {
+        assert_eq!(truncate_at_char_boundary("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn multibyte_at_exact_boundary_keeps_char() {
+        // 'é' is 2 bytes in UTF-8 (0xC3 0xA9). "héllo" = 6 bytes.
+        // Slicing at 3 lands AFTER 'é', so we keep "hé".
+        assert_eq!(truncate_at_char_boundary("héllo", 3), "hé");
+    }
+
+    #[test]
+    fn multibyte_inside_boundary_walks_back() {
+        // Slicing "héllo" at byte 2 lands INSIDE 'é' (which spans
+        // bytes 1..3). Walks back to byte 1 — the boundary before 'é'.
+        assert_eq!(truncate_at_char_boundary("héllo", 2), "h");
+    }
+
+    #[test]
+    fn cjk_straddle_4096() {
+        // Reproduces GitHub issue #3: file with CJK char crossing
+        // the 4096-byte boundary used to panic on `&text[..4096]`.
+        // '中' is 3 bytes (0xE4 0xB8 0xAD).
+        // Build: 4095 ASCII bytes + '中' + ASCII tail.
+        let mut s = "x".repeat(4095);
+        s.push('中'); // bytes 4095..4098
+        s.push_str("tail");
+        // Raw `&s[..4096]` would panic; helper walks back to 4095.
+        assert_eq!(truncate_at_char_boundary(&s, 4096).len(), 4095);
+    }
+
+    #[test]
+    fn emoji_at_boundary() {
+        // '🎉' is 4 bytes. Truncating mid-emoji must not panic.
+        let s = format!("{}🎉tail", "x".repeat(4094));
+        // bytes 4094..4098 are the emoji; slice at 4096 lands inside.
+        let out = truncate_at_char_boundary(&s, 4096);
+        assert_eq!(out.len(), 4094);
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn empty_input() {
+        assert_eq!(truncate_at_char_boundary("", 100), "");
+    }
+
+    #[test]
+    fn zero_max_bytes() {
+        assert_eq!(truncate_at_char_boundary("héllo", 0), "");
+    }
 }
 
 /// Represents a function parameter

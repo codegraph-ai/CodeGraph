@@ -150,7 +150,11 @@ impl<'a> TomlVisitor<'a> {
                     .map(|v| {
                         let t = self.node_text(v);
                         if t.len() > 120 {
-                            format!("{}...", &t[..120])
+                            // UTF-8-safe truncation — see GitHub issue #3.
+                            format!(
+                                "{}...",
+                                codegraph_parser_api::truncate_at_char_boundary(&t, 120)
+                            )
                         } else {
                             t
                         }

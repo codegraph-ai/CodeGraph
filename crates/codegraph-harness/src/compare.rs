@@ -208,7 +208,15 @@ fn short_kind(v: &Value) -> &'static str {
 fn truncate_for_diff(v: &Value) -> String {
     let s = v.to_string();
     if s.len() > 80 {
-        format!("{}...", &s[..77])
+        // UTF-8-safe truncation — raw `&s[..77]` panics when a
+        // multi-byte char straddles the boundary (GitHub issue #3
+        // class). Inlined here to keep harness dependency-light;
+        // codegraph-parser-api ships the canonical helper.
+        let mut end = 77;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     } else {
         s
     }

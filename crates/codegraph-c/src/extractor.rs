@@ -101,12 +101,16 @@ pub fn extract(
 /// Quick scan for type names that tree-sitter won't recognise as type
 /// specifiers without preprocessing (stdint, kernel, VMware types).
 pub fn source_needs_type_preamble(source: &str) -> bool {
-    // Check the first ~4KB for common patterns (fast path for normal C files)
-    let sample = if source.len() > 4096 {
-        &source[..4096]
-    } else {
-        source
-    };
+    // Check the first ~4KB for common patterns (fast path for normal C files).
+    //
+    // Bug fix (GitHub issue #3): the old `&source[..4096]` raw byte slice
+    // panics when a multi-byte UTF-8 char (CJK 3 bytes, emoji 4 bytes)
+    // straddles the 4096-byte boundary — common in C source files with
+    // Chinese / Japanese / Korean comments. `truncate_at_char_boundary`
+    // walks back at most 3 bytes to land on a valid UTF-8 boundary.
+    // The function only does `.contains()` checks afterwards, so losing
+    // up to 3 trailing bytes is semantically harmless.
+    let sample = codegraph_parser_api::truncate_at_char_boundary(source, 4096);
 
     // C99 stdint.h types — extremely common, tree-sitter doesn't know them
     sample.contains("uint8_t")
