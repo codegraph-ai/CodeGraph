@@ -356,8 +356,8 @@ impl CodeGraphBackend {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
-        let mut rocks =
-            RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        let mut rocks = RocksDBBackend::open_with_stale_lock_recovery(&db_path)
+            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
 
         let registry_value = serde_json::json!({
             "slug": slug,
@@ -959,6 +959,11 @@ impl LanguageServer for CodeGraphBackend {
 
         // Try to load persisted graph from previous session (RocksDB).
         // This gives instant code intelligence without re-parsing.
+        //
+        // Storage-open failure is surfaced to the LSP client as an ERROR —
+        // it means the session is volatile (memory-only). The prior code
+        // collapsed this into the empty-persistence path and lost the
+        // signal entirely (issue #3 follow-up).
         let mut loaded_from_persistence = false;
         if let Some(first) = folders.first() {
             let slug = crate::memory::project_slug(first);
@@ -985,8 +990,24 @@ impl LanguageServer for CodeGraphBackend {
                         node_count
                     );
                 }
-                _ => {
+                Ok(_) => {
                     tracing::info!("No persisted graph found for LSP");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "LSP: RocksDB graph.db open failed: {e} — running in-memory only \
+                         this session. Changes will NOT persist across restarts."
+                    );
+                    self.client
+                        .log_message(
+                            MessageType::ERROR,
+                            format!(
+                                "CodeGraph: graph database open failed ({e}). \
+                                 Index is volatile this session — restart to retry; \
+                                 if the error persists, check ~/.codegraph/graph.db for a stale LOCK file."
+                            ),
+                        )
+                        .await;
                 }
             }
         }

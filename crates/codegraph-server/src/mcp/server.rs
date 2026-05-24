@@ -68,7 +68,11 @@ impl McpBackend {
         );
 
         // Try to load persisted graph from previous session.
-        // Falls back to empty in-memory graph if no prior data exists.
+        //
+        // Three outcomes are kept distinct on purpose — collapsing them into
+        // a single fallback (the prior `_ =>` arm) hid stale-LOCK failures
+        // as "no prior data" and silently downgraded the session to
+        // memory-only mode (see issue #3 follow-up).
         let graph = match Self::open_persistent_graph(&slug) {
             Ok(g) if g.node_count() > 0 => {
                 tracing::info!(
@@ -77,8 +81,18 @@ impl McpBackend {
                 );
                 Arc::new(RwLock::new(g))
             }
-            _ => {
+            Ok(_) => {
                 tracing::info!("No persisted graph found — starting fresh");
+                Arc::new(RwLock::new(
+                    CodeGraph::in_memory().expect("Failed to create in-memory graph"),
+                ))
+            }
+            Err(e) => {
+                tracing::error!(
+                    "RocksDB graph.db open failed: {e} — running in-memory only this session. \
+                     Changes will NOT persist across restarts. Inspect ~/.codegraph/graph.db and \
+                     ensure no other codegraph-server process is running."
+                );
                 Arc::new(RwLock::new(
                     CodeGraph::in_memory().expect("Failed to create in-memory graph"),
                 ))
@@ -137,8 +151,11 @@ impl McpBackend {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
-        let rocks =
-            RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        // Stale-LOCK recovery: a prior crash can leave LOCK in place. The
+        // recovery variant only clobbers it after probing for a live holder —
+        // a healthy concurrent process is still respected.
+        let rocks = RocksDBBackend::open_with_stale_lock_recovery(&db_path)
+            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
         let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
         let mut graph = CodeGraph::with_backend(Box::new(namespaced))
             .map_err(|e| format!("Failed to load graph: {e}"))?;
@@ -172,7 +189,7 @@ impl McpBackend {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
-        let mut rocks = RocksDBBackend::open(&db_path)
+        let mut rocks = RocksDBBackend::open_with_stale_lock_recovery(&db_path)
             .map_err(|e| format!("Failed to open graph.db for persist: {e}"))?;
 
         // Write project registry entry (un-namespaced, global key)
@@ -225,8 +242,8 @@ impl McpBackend {
             return Ok(vec![]);
         }
 
-        let rocks =
-            RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        let rocks = RocksDBBackend::open_with_stale_lock_recovery(&db_path)
+            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
 
         let entries = rocks
             .scan_prefix(b"_registry:")

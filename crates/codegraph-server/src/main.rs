@@ -10,6 +10,7 @@
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // glibc 2.31 compat: __libc_single_threaded was added in glibc 2.32 but ONNX
@@ -59,8 +60,73 @@ struct Args {
     full_body_embedding: bool,
 }
 
+/// Re-entrancy guard for the panic hook. A second panic during hook
+/// execution skips the hook body and aborts directly to avoid deadlock.
+static PANIC_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+/// Install a panic hook + signal listeners so the process exits cleanly
+/// instead of leaving the RocksDB `LOCK` held by a wedged or panicking
+/// instance.
+///
+/// Strategy: panic / SIGINT / SIGTERM all funnel into `process::exit`.
+/// At process exit the kernel releases all fcntl / LockFileEx grants,
+/// so the next launch sees only the `LOCK` *file* (no live holder),
+/// which `RocksDBBackend::open_with_stale_lock_recovery` clears. WAL
+/// durability is per-write, so any in-flight batch is either fully
+/// applied or fully discarded on next open — `exit` skipping `Drop` is
+/// a safe tradeoff here.
+fn install_crash_handlers() {
+    std::panic::set_hook(Box::new(|info| {
+        if PANIC_DEPTH.fetch_add(1, Ordering::SeqCst) > 0 {
+            eprintln!("codegraph-server: re-entrant panic — aborting");
+            std::process::abort();
+        }
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        // Use eprintln in addition to tracing — the panic may fire before
+        // the subscriber is installed (e.g. during arg parsing).
+        eprintln!(
+            "codegraph-server: panic at {location} — {payload}\n\
+             Exiting so RocksDB releases its LOCK. Restart will auto-recover \
+             via stale-LOCK detection in ~/.codegraph/graph.db."
+        );
+        tracing::error!("panic at {location} — {payload}; exiting");
+        std::process::exit(1);
+    }));
+}
+
+fn spawn_signal_listeners() {
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Ctrl-C received — shutting down");
+            std::process::exit(0);
+        }
+    });
+
+    #[cfg(unix)]
+    tokio::spawn(async {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            if term.recv().await.is_some() {
+                tracing::info!("SIGTERM received — shutting down");
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() {
+    install_crash_handlers();
+
     let args = Args::parse();
 
     if args.info {
@@ -83,6 +149,10 @@ async fn main() {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
+
+    // Install AFTER the runtime starts (tokio::spawn requires it). Runs
+    // before any RocksDB open so the LOCK release path is wired up first.
+    spawn_signal_listeners();
 
     if args.mcp {
         // MCP mode

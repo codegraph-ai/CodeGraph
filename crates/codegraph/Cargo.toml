@@ -15,11 +15,13 @@ categories = ["database-implementations", "data-structures", "development-tools"
 
 [features]
 default = ["rocksdb-backend"]
-rocksdb-backend = ["dep:rocksdb"]
+rocksdb-backend = ["dep:rocksdb", "dep:fs2"]
 
 [dependencies]
 # Storage backend
 rocksdb = { workspace = true, optional = true }
+# Stale-LOCK detection for crash recovery
+fs2 = { workspace = true, optional = true }
 
 # Serialization
 serde.workspace = true

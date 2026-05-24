@@ -74,6 +74,8 @@ thiserror = "1.0"
 rocksdb = "0.22"
 # Pin libz-sys to 1.1.25 — v1.1.26 has broken vendored zlib build on macOS/Windows
 libz-sys = "=1.1.25"
+# Cross-platform advisory file locks (Linux fcntl / Windows LockFileEx)
+fs2 = "0.4"
 log = "0.4"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
