@@ -6,12 +6,12 @@
     "url": "https://github.com/codegraph-ai/CodeGraph",
     "source": "github"
   },
-  "version": "0.16.4",
+  "version": "0.16.5",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@astudioplus/codegraph-mcp",
-      "version": "0.16.4",
+      "version": "0.16.5",
       "transport": {
         "type": "stdio"
       },
