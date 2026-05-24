@@ -52,3 +52,10 @@ vsforge.config.json
 *.vsix
 *.tgz
 examples/
+
+# Build-time env (PostHog key + similar) — esbuild bakes values into
+# extension.js via --define, so the runtime never reads the .env file.
+# Shipping it would look like a secret leak even though the PostHog
+# ingestion key is public-safe by design.
+.env
+.env.*

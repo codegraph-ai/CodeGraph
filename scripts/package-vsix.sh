@@ -51,6 +51,13 @@ if [ "$TARGET" = "all" ]; then
       echo "  ⚠ Skipping $PLAT (binary not found: bin/$BIN)"
     fi
   done
+
+  # Combined VSIX: no --target, includes all 4 platform binaries + the
+  # Windows onnxruntime.dll. Useful for manual sideload + as a fallback
+  # for marketplace listings that don't yet have platform-targeted
+  # distribution wired up.
+  echo "Packaging combined (no --target)..."
+  npx @vscode/vsce package 2>&1 | grep -E "DONE|ERROR"
 else
   # Single platform
   echo "Packaging for $TARGET..."
