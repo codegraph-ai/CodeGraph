@@ -425,6 +425,76 @@ impl MemoryManager {
     pub fn builder() -> codegraph_memory::MemoryNodeBuilder {
         MemoryNode::builder()
     }
+
+    // ── Doc store operations ─────────────────────────────────────────
+
+    /// Open a fresh DocStore for an operation (parallel to open_store).
+    async fn open_doc_store(&self) -> Result<codegraph_memory::DocStore, MemoryError> {
+        let data_dir = self
+            .data_dir
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| MemoryError::Other("Memory manager not initialized".to_string()))?;
+
+        let engine = self
+            .engine
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| MemoryError::Other("Vector engine not initialized".to_string()))?;
+
+        // Docs DB lives alongside memory DB: ~/.codegraph/projects/<slug>/docs/
+        let docs_dir = data_dir
+            .parent()
+            .unwrap_or(&data_dir)
+            .join("docs");
+
+        codegraph_memory::DocStore::new(&docs_dir, engine)
+    }
+
+    /// Index a local markdown file into the docs store.
+    pub async fn index_markdown(
+        &self,
+        file_path: &Path,
+        max_chunk_words: usize,
+    ) -> Result<Vec<codegraph_memory::DocChunk>, MemoryError> {
+        let store = self.open_doc_store().await?;
+        store.index_file(file_path, max_chunk_words)
+    }
+
+    /// Index raw markdown content (for URL-fetched docs in Phase 2).
+    pub async fn index_markdown_content(
+        &self,
+        content: &str,
+        source_label: &str,
+        max_chunk_words: usize,
+    ) -> Result<Vec<codegraph_memory::DocChunk>, MemoryError> {
+        let store = self.open_doc_store().await?;
+        store.index_content(content, source_label, max_chunk_words)
+    }
+
+    /// Semantic search over indexed doc chunks.
+    pub async fn search_docs(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<codegraph_memory::DocSearchResult>, MemoryError> {
+        let store = self.open_doc_store().await?;
+        store.search(query, limit)
+    }
+
+    /// List all source files that have been indexed as docs.
+    pub async fn list_doc_sources(&self) -> Result<Vec<String>, MemoryError> {
+        let store = self.open_doc_store().await?;
+        Ok(store.list_sources())
+    }
+
+    /// Remove all indexed chunks from a given source file.
+    pub async fn remove_doc_source(&self, source: &str) -> Result<(), MemoryError> {
+        let store = self.open_doc_store().await?;
+        store.remove_source(source)
+    }
 }
 
 // Re-export additional commonly used types for convenience

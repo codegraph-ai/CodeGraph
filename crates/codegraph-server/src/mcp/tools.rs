@@ -86,7 +86,9 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
                 | "codegraph_get_module_summary"
                 | "codegraph_find_related_tests"
         ),
-        Memory => name.starts_with("codegraph_memory_"),
+        Memory => name.starts_with("codegraph_memory_")
+            || name == "codegraph_index_markdown"
+            || name == "codegraph_search_docs",
     }
 }
 
@@ -134,6 +136,9 @@ pub fn get_all_tools() -> Vec<Tool> {
         reindex_workspace_tool(),
         index_files_tool(),
         index_directory_tool(),
+        // Docs Tools (2)
+        index_markdown_tool(),
+        search_docs_tool(),
     ]
 }
 
@@ -1244,6 +1249,84 @@ fn find_circular_deps_tool() -> Tool {
     }
 }
 
+// === Docs Tools ===
+
+fn index_markdown_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "path".to_string(),
+        string_prop(
+            "Absolute path to a local markdown file to index \
+             (e.g. /projects/myapp/docs/ARCHITECTURE.md). \
+             The file is parsed into heading-tree chunks, embedded, \
+             and persisted so future sessions can search it without \
+             re-reading. Re-indexing the same path replaces previous chunks.",
+        ),
+    );
+    properties.insert(
+        "maxChunkWords".to_string(),
+        number_prop(
+            "Maximum words per chunk before paragraph-splitting (default: 300). \
+             Lower values produce more precise embeddings but more chunks.",
+            Some(300.0),
+        ),
+    );
+
+    Tool {
+        name: "codegraph_index_markdown".to_string(),
+        description: Some(
+            "Index a local markdown file (ARCHITECTURE.md, API_DESIGN.md, etc.) \
+             into the persistent docs store. Parses the heading hierarchy, \
+             embeds leaf sections, and stores them so codegraph_search_docs can \
+             retrieve relevant sections in future sessions without re-reading \
+             the file. Returns the list of indexed chunks with their heading paths. \
+             USE WHEN: you want the agent to have design context across sessions \
+             without burning tokens re-reading the doc every time."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: Some(vec!["path".to_string()]),
+        },
+    }
+}
+
+fn search_docs_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "query".to_string(),
+        string_prop(
+            "Natural-language search query over indexed docs \
+             (e.g. \"how does the auth module handle JWT refresh?\")",
+        ),
+    );
+    properties.insert(
+        "limit".to_string(),
+        number_prop("Maximum results to return (default: 5)", Some(5.0)),
+    );
+
+    Tool {
+        name: "codegraph_search_docs".to_string(),
+        description: Some(
+            "Semantic search over project docs previously indexed via \
+             codegraph_index_markdown. Returns matching doc sections with \
+             heading-path breadcrumbs (e.g. \"Authentication > JWT > Refresh \
+             Token Rotation\"), relevance scores, and source file provenance. \
+             USE WHEN: you need design context, architecture decisions, or \
+             API specs that were captured in project markdown files. \
+             Complements codegraph_memory_search (which stores ad-hoc notes) \
+             — this searches structured project documentation."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: Some(vec!["query".to_string()]),
+        },
+    }
+}
+
 fn find_dead_imports_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
@@ -1396,14 +1479,14 @@ mod tests {
     #[test]
     fn test_get_all_tools_count() {
         let tools = get_all_tools();
-        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3 = 34 community tools
+        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 2 = 36 community tools
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
         assert_eq!(
             tools.len(),
-            34,
-            "Expected 34 community tools, got {}",
+            36,
+            "Expected 36 community tools, got {}",
             tools.len()
         );
     }
@@ -1463,16 +1546,19 @@ mod tests {
             .iter()
             .filter(|t| tool_in_profile(&t.name, ToolProfile::Memory))
             .collect();
-        // Currently 7 memory tools (store / search / get / context / invalidate / list / stats).
+        // 7 memory_* tools + 2 docs tools (index_markdown + search_docs)
         assert_eq!(
             kept.len(),
-            7,
-            "Memory profile should expose exactly the 7 memory_* tools"
+            9,
+            "Memory profile should expose 9 tools (7 memory + 2 docs), got {}",
+            kept.len()
         );
         for t in &kept {
             assert!(
-                t.name.starts_with("codegraph_memory_"),
-                "Memory profile leaked non-memory tool: {}",
+                t.name.starts_with("codegraph_memory_")
+                    || t.name == "codegraph_index_markdown"
+                    || t.name == "codegraph_search_docs",
+                "Memory profile leaked unrelated tool: {}",
                 t.name
             );
         }

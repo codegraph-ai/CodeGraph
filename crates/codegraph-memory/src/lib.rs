@@ -33,6 +33,7 @@
 //! store.put(memory).await?;
 //! ```
 
+pub mod docs;
 pub mod embedding;
 pub mod error;
 pub mod migration;
@@ -49,5 +50,6 @@ pub use node::{
     MemorySource,
 };
 pub use search::{MemorySearch, SearchConfig, SearchResult};
+pub use docs::{DocChunk, DocSearchResult, DocStore};
 pub use storage::MemoryStore;
 pub use temporal::TemporalMetadata;
