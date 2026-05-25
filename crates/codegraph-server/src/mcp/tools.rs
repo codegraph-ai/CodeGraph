@@ -92,7 +92,8 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
             || name == "codegraph_list_doc_sources"
             || name == "codegraph_remove_doc_source"
             || name == "codegraph_verify_design"
-            || name == "codegraph_design_gaps",
+            || name == "codegraph_design_gaps"
+            || name == "codegraph_generate_architecture_doc",
     }
 }
 
@@ -140,13 +141,14 @@ pub fn get_all_tools() -> Vec<Tool> {
         reindex_workspace_tool(),
         index_files_tool(),
         index_directory_tool(),
-        // Docs Tools (6)
+        // Docs Tools (7)
         index_markdown_tool(),
         search_docs_tool(),
         list_doc_sources_tool(),
         remove_doc_source_tool(),
         verify_design_tool(),
         design_gaps_tool(),
+        generate_architecture_doc_tool(),
     ]
 }
 
@@ -1454,6 +1456,45 @@ fn design_gaps_tool() -> Tool {
     }
 }
 
+fn generate_architecture_doc_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "topN".to_string(),
+        number_prop(
+            "Number of top items per section — hot paths, complex functions per module \
+             (default: 10)",
+            Some(10.0),
+        ),
+    );
+    properties.insert(
+        "scope".to_string(),
+        string_prop(
+            "Optional directory path to scope the doc to (e.g. \"src/\" or \"crates/codegraph-server/\"). \
+             If omitted, covers the entire indexed workspace.",
+        ),
+    );
+
+    Tool {
+        name: "codegraph_generate_architecture_doc".to_string(),
+        description: Some(
+            "Generate a structured ARCHITECTURE.md from the code graph. Produces \
+             a markdown document covering: project overview (file/function/language \
+             counts), module breakdown (per-directory summaries with key exports, \
+             dependencies, complexity hotspots), hot paths (most-called functions), \
+             and architectural concerns (circular deps). The output can be saved \
+             to a file and then indexed via codegraph_index_markdown for future \
+             verify_design checks. USE WHEN: onboarding to a new codebase, \
+             generating initial documentation, or refreshing stale docs."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: None,
+        },
+    }
+}
+
 fn find_dead_imports_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
@@ -1606,14 +1647,14 @@ mod tests {
     #[test]
     fn test_get_all_tools_count() {
         let tools = get_all_tools();
-        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 6 = 40 community tools
+        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 7 = 41 community tools
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
         assert_eq!(
             tools.len(),
-            40,
-            "Expected 40 community tools, got {}",
+            41,
+            "Expected 41 community tools, got {}",
             tools.len()
         );
     }
@@ -1673,11 +1714,11 @@ mod tests {
             .iter()
             .filter(|t| tool_in_profile(&t.name, ToolProfile::Memory))
             .collect();
-        // 7 memory_* tools + 6 docs tools
+        // 7 memory_* tools + 7 docs tools
         assert_eq!(
             kept.len(),
-            13,
-            "Memory profile should expose 13 tools (7 memory + 6 docs), got {}",
+            14,
+            "Memory profile should expose 14 tools (7 memory + 7 docs), got {}",
             kept.len()
         );
         for t in &kept {
@@ -1688,7 +1729,8 @@ mod tests {
                     || t.name == "codegraph_list_doc_sources"
                     || t.name == "codegraph_remove_doc_source"
                     || t.name == "codegraph_verify_design"
-                    || t.name == "codegraph_design_gaps",
+                    || t.name == "codegraph_design_gaps"
+                    || t.name == "codegraph_generate_architecture_doc",
                 "Memory profile leaked unrelated tool: {}",
                 t.name
             );

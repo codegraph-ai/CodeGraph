@@ -3044,6 +3044,169 @@ impl McpServer {
                 Ok(result_json)
             }
 
+            "codegraph_generate_architecture_doc" => {
+                let top_n = args
+                    .get("topN")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10) as usize;
+                let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+
+                let graph = self.backend.graph.read().await;
+
+                // Collect unique directories (modules) from the graph
+                let mut dir_set = std::collections::HashSet::new();
+                let mut total_files = 0usize;
+                let mut total_functions = 0usize;
+                let mut lang_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+                for (_id, node) in graph.iter_nodes() {
+                    let path = node.properties.get_string("path").unwrap_or("");
+                    if !scope.is_empty() && !path.contains(scope) {
+                        continue;
+                    }
+                    match node.node_type {
+                        codegraph::NodeType::CodeFile => {
+                            total_files += 1;
+                            if let Some(lang) = node.properties.get_string("language") {
+                                *lang_counts.entry(lang.to_string()).or_default() += 1;
+                            }
+                            if let Some(parent) = std::path::Path::new(path).parent() {
+                                dir_set.insert(parent.to_string_lossy().to_string());
+                            }
+                        }
+                        codegraph::NodeType::Function => {
+                            total_functions += 1;
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut dirs: Vec<String> = dir_set.into_iter().collect();
+                dirs.sort();
+
+                // Build module summaries for top-level dirs (limit depth)
+                let mut module_sections = Vec::new();
+                for dir in dirs.iter().take(30) {
+                    let summary = crate::domain::module_summary::get_module_summary(
+                        &graph, dir, top_n,
+                    );
+                    if summary.files == 0 && summary.total_functions == 0 {
+                        continue;
+                    }
+                    let langs: String = summary.languages.iter()
+                        .map(|l| format!("{} ({})", l.language, l.files))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let complex: String = summary.top_complex_functions.iter()
+                        .take(3)
+                        .map(|f| format!("`{}` ({})", f.name, f.complexity))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let short_dir = dir.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+
+                    let mut section = format!(
+                        "### {}\n- {} files, {} functions, {} classes\n",
+                        short_dir, summary.files, summary.total_functions, summary.total_classes
+                    );
+                    if !langs.is_empty() {
+                        section.push_str(&format!("- Languages: {}\n", langs));
+                    }
+                    if !complex.is_empty() {
+                        section.push_str(&format!("- Complexity hotspots: {}\n", complex));
+                    }
+                    module_sections.push(section);
+                }
+
+                // Hot paths — filter out trivially-named methods (len/new/iter/get/set/...)
+                // and scope to the requested directory if set
+                let trivial_names: std::collections::HashSet<&str> = [
+                    "len", "new", "get", "set", "fmt", "eq", "ne", "cmp",
+                    "hash", "clone", "drop", "from", "into", "iter", "next",
+                    "map", "run", "init", "default", "display", "index",
+                ].iter().copied().collect();
+
+                let hot = crate::domain::hot_paths::find_hot_paths(&graph, top_n * 5);
+                let filtered_hot: Vec<_> = hot.functions.iter()
+                    .filter(|f| {
+                        !trivial_names.contains(f.name.as_str())
+                            && f.name.len() > 3
+                            && !f.name.starts_with("test_")
+                            && !f.path.contains("/tests/")
+                            && !f.path.contains("/fixtures/")
+                            && (scope.is_empty() || f.path.contains(scope))
+                    })
+                    .take(top_n)
+                    .collect();
+
+                let mut hot_section = String::from("## Hot Paths (most-called functions)\n\n| Function | File | Direct callers | Transitive callers |\n|---|---|---|---|\n");
+                for f in &filtered_hot {
+                    let short_path = f.path.rsplit('/').next().unwrap_or(&f.path);
+                    hot_section.push_str(&format!(
+                        "| `{}` | {} | {} | {} |\n",
+                        f.name, short_path, f.direct_callers, f.transitive_callers
+                    ));
+                }
+
+                // Circular deps
+                let circ = crate::domain::circular_deps::find_circular_deps(&graph, 10);
+                let circ_section = if circ.has_circular_deps {
+                    format!(
+                        "## Circular Dependencies\n\n**{} cycles detected.** This may indicate architectural coupling that should be addressed.\n",
+                        circ.total_cycles
+                    )
+                } else {
+                    "## Circular Dependencies\n\nNone detected.\n".to_string()
+                };
+
+                // Language summary
+                let mut lang_summary: Vec<_> = lang_counts.into_iter().collect();
+                lang_summary.sort_by(|a, b| b.1.cmp(&a.1));
+                let lang_line = lang_summary.iter()
+                    .take(10)
+                    .map(|(l, c)| format!("{} ({})", l, c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                // Assemble
+                let mut doc = format!(
+                    "# Architecture\n\n## Overview\n\n- **{} files**, **{} functions** across {} languages\n- Languages: {}\n\n",
+                    total_files, total_functions, lang_summary.len(), lang_line
+                );
+
+                if !scope.is_empty() {
+                    doc.push_str(&format!("*Scoped to: {}*\n\n", scope));
+                }
+
+                doc.push_str("## Modules\n\n");
+                for section in &module_sections {
+                    doc.push_str(section);
+                    doc.push('\n');
+                }
+
+                doc.push_str(&hot_section);
+                doc.push('\n');
+                doc.push_str(&circ_section);
+
+                doc.push_str("\n---\n\n*Generated by `codegraph_generate_architecture_doc`. ");
+                doc.push_str("Index this file with `codegraph_index_markdown` to enable ");
+                doc.push_str("`verify_design` drift detection.*\n");
+
+                Ok(serde_json::json!({
+                    "markdown": doc,
+                    "stats": {
+                        "files": total_files,
+                        "functions": total_functions,
+                        "modules": module_sections.len(),
+                        "hot_paths": filtered_hot.len(),
+                        "circular_deps": circ.total_cycles,
+                    },
+                    "message": format!(
+                        "Generated architecture doc: {} files, {} functions, {} modules, {} hot paths",
+                        total_files, total_functions, module_sections.len(), filtered_hot.len()
+                    ),
+                }))
+            }
+
             "codegraph_list_doc_sources" => {
                 let sources = self
                     .backend
