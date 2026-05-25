@@ -2032,7 +2032,45 @@ impl McpServer {
                     format!("No symbols found in '{uri}'. Try indexing the workspace first.")
                 })?;
 
-                Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
+                let mut json = serde_json::to_value(result).map_err(|e| e.to_string())?;
+
+                // Phase 2: auto-augment with indexed doc chunks if any
+                // exist. Search by filename + directory name to catch
+                // both "auth.rs" and "auth module" mentions in docs.
+                let file_stem = path.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let parent_name = path.parent()
+                    .and_then(|p| p.file_name())
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let doc_query = if parent_name.is_empty() {
+                    file_stem.clone()
+                } else {
+                    format!("{} {}", parent_name, file_stem)
+                };
+                if !doc_query.is_empty() {
+                    if let Ok(doc_results) = self.backend.memory_manager.search_docs(&doc_query, 2).await {
+                        if !doc_results.is_empty() {
+                            let doc_chunks: Vec<serde_json::Value> = doc_results.iter().map(|r| {
+                                serde_json::json!({
+                                    "section": r.chunk.heading_path.join(" > "),
+                                    "source": r.chunk.source_file,
+                                    "content": r.chunk.content,
+                                    "score": (r.score * 1000.0).round() / 1000.0,
+                                })
+                            }).collect();
+                            if let Some(obj) = json.as_object_mut() {
+                                obj.insert("design_context".to_string(), serde_json::json!({
+                                    "note": "Relevant sections from indexed project docs (via codegraph_index_markdown)",
+                                    "chunks": doc_chunks,
+                                }));
+                            }
+                        }
+                    }
+                }
+
+                Ok(json)
             }
 
             "codegraph_get_edit_context" => {
@@ -2848,6 +2886,128 @@ impl McpServer {
                     "results": result_json,
                     "total": results.len(),
                     "query": query,
+                }))
+            }
+
+            "codegraph_verify_design" | "codegraph_design_gaps" => {
+                let is_gaps_only = name == "codegraph_design_gaps";
+                let source = args
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .ok_or("source parameter is required")?;
+
+                let chunks = self
+                    .backend
+                    .memory_manager
+                    .get_doc_chunks_by_source(source)
+                    .await
+                    .map_err(|e| format!("Failed to get doc chunks: {}", e))?;
+
+                if chunks.is_empty() {
+                    return Err(format!(
+                        "No indexed chunks found for source '{}'. Index it first with codegraph_index_markdown.",
+                        source
+                    ));
+                }
+
+                let claims = codegraph_memory::extract_identifiers(&chunks);
+
+                let mut verified = Vec::new();
+                let mut gaps = Vec::new();
+
+                for claim in &claims {
+                    let options = crate::ai_query::SearchOptions::new()
+                        .with_limit(3)
+                        .with_compact(true)
+                        .with_include_private(true);
+                    let result = self
+                        .backend
+                        .query_engine
+                        .symbol_search(&claim.identifier, &options)
+                        .await;
+
+                    let found = !result.results.is_empty();
+                    let entry = serde_json::json!({
+                        "identifier": claim.identifier,
+                        "section": claim.heading_path.join(" > "),
+                        "found": found,
+                        "matches": if found {
+                            result.results.iter().take(2).map(|m| {
+                                serde_json::json!({
+                                    "name": m.symbol.name,
+                                    "kind": m.symbol.kind,
+                                    "path": m.symbol.location.file,
+                                })
+                            }).collect::<Vec<_>>()
+                        } else {
+                            vec![]
+                        },
+                    });
+
+                    if found {
+                        verified.push(entry);
+                    } else {
+                        gaps.push(entry);
+                    }
+                }
+
+                if is_gaps_only {
+                    Ok(serde_json::json!({
+                        "source": source,
+                        "total_claims": claims.len(),
+                        "gaps": gaps.len(),
+                        "items": gaps,
+                        "message": format!(
+                            "{} of {} identifiers from '{}' not found in code",
+                            gaps.len(), claims.len(), source
+                        ),
+                    }))
+                } else {
+                    Ok(serde_json::json!({
+                        "source": source,
+                        "total_claims": claims.len(),
+                        "verified": verified.len(),
+                        "gaps": gaps.len(),
+                        "verified_items": verified,
+                        "gap_items": gaps,
+                        "message": format!(
+                            "{}/{} identifiers verified, {} gaps",
+                            verified.len(), claims.len(), gaps.len()
+                        ),
+                    }))
+                }
+            }
+
+            "codegraph_list_doc_sources" => {
+                let sources = self
+                    .backend
+                    .memory_manager
+                    .list_doc_sources()
+                    .await
+                    .map_err(|e| format!("Failed to list doc sources: {}", e))?;
+
+                Ok(serde_json::json!({
+                    "sources": sources,
+                    "total": sources.len(),
+                }))
+            }
+
+            "codegraph_remove_doc_source" => {
+                let source = args
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .ok_or("source parameter is required")?;
+
+                self.backend
+                    .memory_manager
+                    .remove_doc_source(source)
+                    .await
+                    .map_err(|e| format!("Failed to remove doc source: {}", e))?;
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "removed": source,
+                    "message": format!("Removed all indexed chunks from {}", source),
                 }))
             }
 

@@ -495,6 +495,15 @@ impl MemoryManager {
         let store = self.open_doc_store().await?;
         store.remove_source(source)
     }
+
+    /// Get all chunks from a specific source file (for verify_design / design_gaps).
+    pub async fn get_doc_chunks_by_source(
+        &self,
+        source: &str,
+    ) -> Result<Vec<codegraph_memory::DocChunk>, MemoryError> {
+        let store = self.open_doc_store().await?;
+        Ok(store.get_chunks_by_source(source))
+    }
 }
 
 // Re-export additional commonly used types for convenience

@@ -295,6 +295,80 @@ fn split_paragraphs(text: &str, target_words: usize, overlap_words: usize) -> Ve
     chunks
 }
 
+/// Extract backtick-wrapped identifiers from a chunk's content.
+///
+/// These are the most reliable signal for "things the doc claims should
+/// exist in code." Returns deduplicated, sorted identifiers with their
+/// source heading path for context.
+pub fn extract_identifiers(chunks: &[DocChunk]) -> Vec<DocClaim> {
+    let mut claims = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for chunk in chunks {
+        for ident in backtick_identifiers(&chunk.content) {
+            if seen.insert(ident.clone()) {
+                claims.push(DocClaim {
+                    identifier: ident,
+                    heading_path: chunk.heading_path.clone(),
+                    source_file: chunk.source_file.clone(),
+                });
+            }
+        }
+    }
+    claims
+}
+
+/// A structural claim extracted from a doc chunk — an identifier that
+/// the doc implies should exist in the codebase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClaim {
+    pub identifier: String,
+    pub heading_path: Vec<String>,
+    pub source_file: String,
+}
+
+/// Extract backtick-delimited tokens from text. Filters out:
+/// - Single-char tokens (too noisy)
+/// - Tokens that are pure numbers
+/// - Tokens that look like shell commands (start with $, -, --)
+/// - Tokens that look like file paths (contain /)
+fn backtick_identifiers(text: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '`' {
+            // Skip ``` code fences
+            if chars.peek() == Some(&'`') {
+                while chars.next() == Some('`') {}
+                continue;
+            }
+            let mut token = String::new();
+            for inner in chars.by_ref() {
+                if inner == '`' {
+                    break;
+                }
+                token.push(inner);
+            }
+            let trimmed = token.trim();
+            if trimmed.len() > 1
+                && !trimmed.chars().all(|c| c.is_ascii_digit())
+                && !trimmed.starts_with('$')
+                && !trimmed.starts_with('-')
+                && !trimmed.contains('/')
+                && !trimmed.contains(' ') || trimmed.contains("::")
+            {
+                // Strip trailing () for function references
+                let clean = trimmed.trim_end_matches("()").trim_end_matches("()");
+                if !clean.is_empty() {
+                    results.push(clean.to_string());
+                }
+            }
+        }
+    }
+    results
+}
+
 // ─── DocStore — RocksDB persistence + HNSW search ───────────────────
 
 #[derive(Clone)]
@@ -519,6 +593,15 @@ impl DocStore {
         Ok(results)
     }
 
+    /// Get all chunks from a specific source file.
+    pub fn get_chunks_by_source(&self, source: &str) -> Vec<DocChunk> {
+        self.chunk_cache
+            .iter()
+            .filter(|entry| entry.value().source_file == source)
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// List all unique source files that have been indexed.
     pub fn list_sources(&self) -> Vec<String> {
         let mut sources: Vec<String> = self
@@ -709,6 +792,29 @@ Leaf content.
         // No headings → text before any heading is discarded (by design;
         // the user should structure their doc with at least one heading).
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn extract_backtick_identifiers() {
+        let chunks = vec![DocChunk {
+            id: "t1".into(),
+            source_file: "test.md".into(),
+            heading_path: vec!["API".into()],
+            title: "API".into(),
+            content: "The `UserService` handles `authenticate()` and \
+                      `POST /payments`. Use `cfg` flags. Ignore `1` and `$HOME`."
+                .into(),
+            indexed_at: 0,
+            suspicious: false,
+        }];
+        let claims = extract_identifiers(&chunks);
+        let ids: Vec<&str> = claims.iter().map(|c| c.identifier.as_str()).collect();
+        assert!(ids.contains(&"UserService"));
+        assert!(ids.contains(&"authenticate"));
+        assert!(ids.contains(&"cfg"));
+        // Filtered out: single-char `1`, shell var `$HOME`, path-like `POST /payments`
+        assert!(!ids.iter().any(|i| *i == "1"));
+        assert!(!ids.iter().any(|i| *i == "$HOME"));
     }
 
     #[test]

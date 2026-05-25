@@ -50,6 +50,6 @@ pub use node::{
     MemorySource,
 };
 pub use search::{MemorySearch, SearchConfig, SearchResult};
-pub use docs::{DocChunk, DocSearchResult, DocStore};
+pub use docs::{extract_identifiers, DocChunk, DocClaim, DocSearchResult, DocStore};
 pub use storage::MemoryStore;
 pub use temporal::TemporalMetadata;

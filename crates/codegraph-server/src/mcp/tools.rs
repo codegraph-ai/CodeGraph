@@ -88,7 +88,11 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
         ),
         Memory => name.starts_with("codegraph_memory_")
             || name == "codegraph_index_markdown"
-            || name == "codegraph_search_docs",
+            || name == "codegraph_search_docs"
+            || name == "codegraph_list_doc_sources"
+            || name == "codegraph_remove_doc_source"
+            || name == "codegraph_verify_design"
+            || name == "codegraph_design_gaps",
     }
 }
 
@@ -136,9 +140,13 @@ pub fn get_all_tools() -> Vec<Tool> {
         reindex_workspace_tool(),
         index_files_tool(),
         index_directory_tool(),
-        // Docs Tools (2)
+        // Docs Tools (6)
         index_markdown_tool(),
         search_docs_tool(),
+        list_doc_sources_tool(),
+        remove_doc_source_tool(),
+        verify_design_tool(),
+        design_gaps_tool(),
     ]
 }
 
@@ -1327,6 +1335,113 @@ fn search_docs_tool() -> Tool {
     }
 }
 
+fn list_doc_sources_tool() -> Tool {
+    Tool {
+        name: "codegraph_list_doc_sources".to_string(),
+        description: Some(
+            "List all markdown files that have been indexed into the docs store \
+             via codegraph_index_markdown. Returns source file paths. \
+             USE WHEN: checking what docs are already indexed before indexing \
+             or searching."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(HashMap::new()),
+            required: None,
+        },
+    }
+}
+
+fn remove_doc_source_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "source".to_string(),
+        string_prop(
+            "The source file path to remove (exactly as shown by \
+             codegraph_list_doc_sources). All chunks from this source \
+             are deleted from the docs store.",
+        ),
+    );
+
+    Tool {
+        name: "codegraph_remove_doc_source".to_string(),
+        description: Some(
+            "Remove all indexed chunks from a specific source file. \
+             Use codegraph_list_doc_sources first to see available sources. \
+             USE WHEN: a doc is outdated and you want to clear it before \
+             re-indexing, or to clean up the docs store."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: Some(vec!["source".to_string()]),
+        },
+    }
+}
+
+fn verify_design_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "source".to_string(),
+        string_prop(
+            "Source file path of the indexed doc to verify against the code graph \
+             (as shown by codegraph_list_doc_sources).",
+        ),
+    );
+
+    Tool {
+        name: "codegraph_verify_design".to_string(),
+        description: Some(
+            "Cross-reference an indexed design doc against the code graph. \
+             Extracts backtick-wrapped identifiers from the doc (e.g. \
+             `UserService`, `authenticate()`, `POST /payments`) and checks \
+             each against the code graph via symbol search. Returns verified \
+             (found in code) and unverified (not found) with heading-path \
+             context showing WHERE in the doc each claim originated. \
+             USE WHEN: checking whether the codebase matches the design doc, \
+             or after a refactor to see if the doc is still accurate."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: Some(vec!["source".to_string()]),
+        },
+    }
+}
+
+fn design_gaps_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "source".to_string(),
+        string_prop(
+            "Source file path of the indexed doc to check for gaps \
+             (as shown by codegraph_list_doc_sources).",
+        ),
+    );
+
+    Tool {
+        name: "codegraph_design_gaps".to_string(),
+        description: Some(
+            "Find things described in an indexed design doc that don't exist \
+             in the code yet. Extracts backtick-wrapped identifiers from the \
+             doc and returns ONLY those not found in the code graph. Each gap \
+             includes the heading-path context showing which section of the \
+             doc describes the missing item. \
+             USE WHEN: checking what's left to implement from a design doc, \
+             or building a TODO list from an architecture spec."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: Some(vec!["source".to_string()]),
+        },
+    }
+}
+
 fn find_dead_imports_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
@@ -1479,14 +1594,14 @@ mod tests {
     #[test]
     fn test_get_all_tools_count() {
         let tools = get_all_tools();
-        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 2 = 36 community tools
+        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 6 = 40 community tools
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
         assert_eq!(
             tools.len(),
-            36,
-            "Expected 36 community tools, got {}",
+            40,
+            "Expected 40 community tools, got {}",
             tools.len()
         );
     }
@@ -1546,18 +1661,22 @@ mod tests {
             .iter()
             .filter(|t| tool_in_profile(&t.name, ToolProfile::Memory))
             .collect();
-        // 7 memory_* tools + 2 docs tools (index_markdown + search_docs)
+        // 7 memory_* tools + 6 docs tools
         assert_eq!(
             kept.len(),
-            9,
-            "Memory profile should expose 9 tools (7 memory + 2 docs), got {}",
+            13,
+            "Memory profile should expose 13 tools (7 memory + 6 docs), got {}",
             kept.len()
         );
         for t in &kept {
             assert!(
                 t.name.starts_with("codegraph_memory_")
                     || t.name == "codegraph_index_markdown"
-                    || t.name == "codegraph_search_docs",
+                    || t.name == "codegraph_search_docs"
+                    || t.name == "codegraph_list_doc_sources"
+                    || t.name == "codegraph_remove_doc_source"
+                    || t.name == "codegraph_verify_design"
+                    || t.name == "codegraph_design_gaps",
                 "Memory profile leaked unrelated tool: {}",
                 t.name
             );
