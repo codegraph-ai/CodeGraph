@@ -1390,6 +1390,16 @@ fn verify_design_tool() -> Tool {
              (as shown by codegraph_list_doc_sources).",
         ),
     );
+    properties.insert(
+        "direction".to_string(),
+        enum_prop(
+            "Verification direction. 'forward' = doc→code (do claimed identifiers exist?). \
+             'reverse' = code→doc (are public symbols documented?). \
+             'both' = run both directions.",
+            vec!["forward", "reverse", "both"],
+            Some("forward"),
+        ),
+    );
 
     Tool {
         name: "codegraph_verify_design".to_string(),
@@ -1397,9 +1407,11 @@ fn verify_design_tool() -> Tool {
             "Cross-reference an indexed design doc against the code graph. \
              Extracts backtick-wrapped identifiers from the doc (e.g. \
              `UserService`, `authenticate()`, `POST /payments`) and checks \
-             each against the code graph via symbol search. Returns verified \
-             (found in code) and unverified (not found) with heading-path \
-             context showing WHERE in the doc each claim originated. \
+             each against the code graph via symbol search. \
+             direction='forward' (default): doc claims → code existence. \
+             direction='reverse': public code symbols → doc mentions. \
+             direction='both': both directions in one call. \
+             Returns verified/unverified with heading-path context. \
              USE WHEN: checking whether the codebase matches the design doc, \
              or after a refactor to see if the doc is still accurate."
                 .to_string(),

@@ -2895,6 +2895,10 @@ impl McpServer {
                     .get("source")
                     .and_then(|v| v.as_str())
                     .ok_or("source parameter is required")?;
+                let direction = args
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(if is_gaps_only { "forward" } else { "forward" });
 
                 let chunks = self
                     .backend
@@ -2910,72 +2914,134 @@ impl McpServer {
                     ));
                 }
 
-                let claims = codegraph_memory::extract_identifiers(&chunks);
+                let run_forward = direction == "forward" || direction == "both";
+                let run_reverse = direction == "reverse" || direction == "both";
 
-                let mut verified = Vec::new();
-                let mut gaps = Vec::new();
+                let mut result_json = serde_json::json!({ "source": source });
 
-                for claim in &claims {
-                    let options = crate::ai_query::SearchOptions::new()
-                        .with_limit(3)
-                        .with_compact(true)
-                        .with_include_private(true);
-                    let result = self
-                        .backend
-                        .query_engine
-                        .symbol_search(&claim.identifier, &options)
-                        .await;
+                // Forward: doc → code (do claimed identifiers exist?)
+                if run_forward {
+                    let claims = codegraph_memory::extract_identifiers(&chunks);
+                    let mut verified = Vec::new();
+                    let mut gaps = Vec::new();
 
-                    let found = !result.results.is_empty();
-                    let entry = serde_json::json!({
-                        "identifier": claim.identifier,
-                        "section": claim.heading_path.join(" > "),
-                        "found": found,
-                        "matches": if found {
-                            result.results.iter().take(2).map(|m| {
-                                serde_json::json!({
-                                    "name": m.symbol.name,
-                                    "kind": m.symbol.kind,
-                                    "path": m.symbol.location.file,
-                                })
-                            }).collect::<Vec<_>>()
+                    for claim in &claims {
+                        let options = crate::ai_query::SearchOptions::new()
+                            .with_limit(3)
+                            .with_compact(true)
+                            .with_include_private(true);
+                        let search_result = self
+                            .backend
+                            .query_engine
+                            .symbol_search(&claim.identifier, &options)
+                            .await;
+
+                        let found = !search_result.results.is_empty();
+                        let entry = serde_json::json!({
+                            "identifier": claim.identifier,
+                            "section": claim.heading_path.join(" > "),
+                            "found": found,
+                            "matches": if found {
+                                search_result.results.iter().take(2).map(|m| {
+                                    serde_json::json!({
+                                        "name": m.symbol.name,
+                                        "kind": m.symbol.kind,
+                                        "path": m.symbol.location.file,
+                                    })
+                                }).collect::<Vec<_>>()
+                            } else {
+                                vec![]
+                            },
+                        });
+
+                        if found {
+                            verified.push(entry);
                         } else {
-                            vec![]
-                        },
+                            gaps.push(entry);
+                        }
+                    }
+
+                    if is_gaps_only {
+                        result_json["forward"] = serde_json::json!({
+                            "total_claims": claims.len(),
+                            "gaps": gaps.len(),
+                            "items": gaps,
+                        });
+                    } else {
+                        result_json["forward"] = serde_json::json!({
+                            "total_claims": claims.len(),
+                            "verified": verified.len(),
+                            "gaps": gaps.len(),
+                            "verified_items": verified,
+                            "gap_items": gaps,
+                        });
+                    }
+                    result_json["forward_message"] = serde_json::json!(format!(
+                        "Doc→Code: {}/{} identifiers verified",
+                        if is_gaps_only { claims.len() - gaps.len() } else { verified.len() },
+                        claims.len()
+                    ));
+                }
+
+                // Reverse: code → doc (are public symbols documented?)
+                if run_reverse {
+                    // Build a word-set from all indexed doc chunks for fast lookup
+                    let doc_text: String = chunks.iter()
+                        .map(|c| format!("{} {}", c.title, c.content))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_lowercase();
+
+                    let graph = self.backend.graph.read().await;
+                    let mut undocumented = Vec::new();
+                    let mut documented_count = 0usize;
+                    let mut checked = 0usize;
+
+                    for (_node_id, node) in graph.iter_nodes() {
+                        // Only check public functions, classes, traits, interfaces
+                        let vis = node.properties.get_string("visibility").unwrap_or("private");
+                        if vis != "public" && vis != "pub" && vis != "pub(crate)" && vis != "export" && vis != "exported" {
+                            continue;
+                        }
+                        let sym_name = match node.properties.get_string("name") {
+                            Some(n) if n.len() > 2 => n,
+                            _ => continue,
+                        };
+                        let kind = format!("{:?}", node.node_type).to_lowercase();
+                        if kind == "file" || kind == "import" {
+                            continue;
+                        }
+
+                        checked += 1;
+                        if doc_text.contains(&sym_name.to_lowercase()) {
+                            documented_count += 1;
+                        } else {
+                            undocumented.push(serde_json::json!({
+                                "name": sym_name,
+                                "kind": kind,
+                                "path": node.properties.get_string("path").unwrap_or(""),
+                            }));
+                        }
+                    }
+
+                    // Sort by name for stable output
+                    undocumented.sort_by(|a, b| {
+                        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
                     });
 
-                    if found {
-                        verified.push(entry);
-                    } else {
-                        gaps.push(entry);
-                    }
+                    result_json["reverse"] = serde_json::json!({
+                        "public_symbols_checked": checked,
+                        "documented": documented_count,
+                        "undocumented": undocumented.len(),
+                        "undocumented_items": undocumented,
+                    });
+                    result_json["reverse_message"] = serde_json::json!(format!(
+                        "Code→Doc: {}/{} public symbols mentioned in docs",
+                        documented_count, checked
+                    ));
                 }
 
-                if is_gaps_only {
-                    Ok(serde_json::json!({
-                        "source": source,
-                        "total_claims": claims.len(),
-                        "gaps": gaps.len(),
-                        "items": gaps,
-                        "message": format!(
-                            "{} of {} identifiers from '{}' not found in code",
-                            gaps.len(), claims.len(), source
-                        ),
-                    }))
-                } else {
-                    Ok(serde_json::json!({
-                        "source": source,
-                        "total_claims": claims.len(),
-                        "verified": verified.len(),
-                        "gaps": gaps.len(),
-                        "verified_items": verified,
-                        "gap_items": gaps,
-                        "message": format!(
-                            "{}/{} identifiers verified, {} gaps",
-                            verified.len(), claims.len(), gaps.len()
-                        ),
-                    }))
-                }
+                Ok(result_json)
             }
 
             "codegraph_list_doc_sources" => {
