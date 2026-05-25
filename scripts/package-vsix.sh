@@ -34,6 +34,13 @@ if [ ! -d "node_modules" ]; then
   npm install
 fi
 
+# Copy CHANGELOG from repo root so vsce includes it in the VSIX.
+# VS Code marketplace renders it as a "Changelog" tab alongside README.
+if [ -f "$REPO_ROOT/CHANGELOG.md" ]; then
+  cp "$REPO_ROOT/CHANGELOG.md" "$VSCODE_DIR/CHANGELOG.md"
+  echo "Copied CHANGELOG.md into vscode/"
+fi
+
 # Build TypeScript
 echo "Building extension..."
 npm run esbuild-base -- --production
