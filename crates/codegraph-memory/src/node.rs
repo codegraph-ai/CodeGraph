@@ -221,6 +221,12 @@ pub struct MemoryNode {
     pub source: MemorySource,
     /// Confidence score (0.0 to 1.0)
     pub confidence: f32,
+    /// Optional tag identifying which AI agent stored this memory
+    /// (e.g. "claude", "cursor", "windsurf", "codex", "cline"). Free-form;
+    /// not validated against an enum so future agent identifiers don't
+    /// require a schema migration. None means "unknown / not captured".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_source: Option<String>,
 }
 
 impl MemoryNode {
@@ -253,6 +259,7 @@ pub struct MemoryNodeBuilder {
     tags: Vec<String>,
     source: Option<MemorySource>,
     confidence: f32,
+    agent_source: Option<String>,
 }
 
 impl MemoryNodeBuilder {
@@ -433,6 +440,14 @@ impl MemoryNodeBuilder {
         self
     }
 
+    /// Tag this memory with the AI agent that stored it (e.g. "claude",
+    /// "cursor", "windsurf"). Free-form. Used by `codegraph_memory_list` to
+    /// show cross-agent attribution.
+    pub fn agent_source(mut self, agent: impl Into<String>) -> Self {
+        self.agent_source = Some(agent.into());
+        self
+    }
+
     /// Build the MemoryNode
     pub fn build(self) -> Result<MemoryNode, MemoryNodeBuilderError> {
         let kind = self.kind.ok_or(MemoryNodeBuilderError::MissingKind)?;
@@ -450,6 +465,7 @@ impl MemoryNodeBuilder {
             tags: self.tags,
             source: self.source.unwrap_or_default(),
             confidence: self.confidence,
+            agent_source: self.agent_source,
         })
     }
 }

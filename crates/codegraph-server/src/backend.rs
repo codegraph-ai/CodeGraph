@@ -2484,6 +2484,11 @@ impl CodeGraphBackend {
             builder = builder.confidence(conf);
         }
 
+        // Set agent source tag if provided (e.g. "claude", "cursor")
+        if let Some(agent) = params.agent_source {
+            builder = builder.agent_source(agent);
+        }
+
         let memory = builder.build().map_err(|e| {
             tower_lsp::jsonrpc::Error::invalid_params(format!("Failed to build memory: {e}"))
         })?;
@@ -2562,6 +2567,7 @@ impl CodeGraphBackend {
                     tags: r.memory.tags.clone(),
                     score: r.score,
                     is_current: r.memory.is_current(),
+                    agent_source: r.memory.agent_source.clone(),
                 }
             })
             .collect();
@@ -2677,6 +2683,7 @@ impl CodeGraphBackend {
                 is_current: m.is_current(),
                 created_at: m.temporal.created_at.to_rfc3339(),
                 valid_from: m.temporal.valid_at.to_rfc3339().into(),
+                agent_source: m.agent_source.clone(),
             }
         });
 
@@ -2769,6 +2776,7 @@ impl CodeGraphBackend {
                     tags: m.tags.clone(),
                     score: m.confidence,
                     is_current: m.is_current(),
+                    agent_source: m.agent_source.clone(),
                 }
             })
             .collect();
@@ -2949,6 +2957,7 @@ impl CodeGraphBackend {
                 is_current: m.is_current(),
                 created_at: m.temporal.created_at.to_rfc3339(),
                 valid_from: m.temporal.valid_at.to_rfc3339().into(),
+                agent_source: m.agent_source.clone(),
             }
         });
 

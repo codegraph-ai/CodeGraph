@@ -437,6 +437,7 @@ mod tests {
                 tags: vec![],
                 source: MemorySource::default(),
                 confidence: 1.0,
+                agent_source: None,
             };
 
             // Store as JSON (v1 format)

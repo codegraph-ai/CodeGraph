@@ -27,6 +27,10 @@ pub struct MemoryStoreParams {
     pub code_links: Vec<CodeLinkParam>,
     /// Optional confidence score (0.0-1.0)
     pub confidence: Option<f32>,
+    /// Optional agent tag (e.g. "claude", "cursor", "windsurf", "codex").
+    /// Used for cross-agent attribution in memory_list.
+    #[serde(default)]
+    pub agent_source: Option<String>,
     /// Kind-specific fields (e.g., problem/solution for debug_context)
     #[serde(flatten)]
     pub kind_data: serde_json::Value,
@@ -105,6 +109,10 @@ pub struct MemorySearchResult {
     pub score: f32,
     /// Whether the memory is still current (not invalidated)
     pub is_current: bool,
+    /// Agent that stored this memory ("claude", "cursor", etc.). Omitted
+    /// from JSON when unknown — pre-0.16.5 memories have no value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_source: Option<String>,
 }
 
 /// Response for memory search.
@@ -154,6 +162,10 @@ pub struct MemoryGetResponse {
     /// ISO 8601 timestamp when the memory became valid (if temporal)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_from: Option<String>,
+    /// Agent that stored this memory ("claude", "cursor", etc.). Omitted
+    /// from JSON when unknown — pre-0.16.5 memories have no value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_source: Option<String>,
 }
 
 /// Code link response for graph node associations.
@@ -486,6 +498,7 @@ mod tests {
                 tags: vec!["bug".to_string()],
                 score: 0.95,
                 is_current: true,
+                agent_source: None,
             }],
             total: 1,
         };
@@ -493,6 +506,36 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"isCurrent\":true"));
         assert!(json.contains("\"score\":0.95"));
+        // agent_source: None must be omitted from JSON (skip_serializing_if).
+        assert!(!json.contains("agentSource"));
+    }
+
+    #[test]
+    fn test_memory_search_result_serializes_agent_source_when_set() {
+        let result = MemorySearchResult {
+            id: "mem_2".to_string(),
+            kind: "convention".to_string(),
+            title: "Use snake_case".to_string(),
+            content: "...".to_string(),
+            tags: vec![],
+            score: 1.0,
+            is_current: true,
+            agent_source: Some("cursor".to_string()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"agentSource\":\"cursor\""));
+    }
+
+    #[test]
+    fn test_memory_store_params_accepts_agent_source() {
+        let json = r#"{
+            "kind": "convention",
+            "title": "Use snake_case",
+            "content": "...",
+            "agentSource": "claude"
+        }"#;
+        let params: MemoryStoreParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.agent_source.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -511,6 +554,7 @@ mod tests {
             is_current: true,
             created_at: "2025-01-21T10:00:00Z".to_string(),
             valid_from: None,
+            agent_source: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
