@@ -9,6 +9,87 @@
 use super::protocol::{PropertySchema, Tool, ToolInputSchema};
 use std::collections::HashMap;
 
+/// Scoped tool surface selector. The full 32-tool MCP surface is large
+/// enough that agents pay non-trivial prompt-context cost listing them;
+/// a profile lets the user expose only the subset relevant to their
+/// session (memory-heavy notetaking, structural refactoring, etc.).
+///
+/// All profiles include their named category. `All` is the default and
+/// matches pre-0.16.5 behaviour. `Security` filters pro-only tools — on
+/// community-edition builds this yields no community tools (only the
+/// pro provider's contribution, which is empty by default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProfile {
+    /// Every tool (default; no filtering).
+    All,
+    /// Minimal AI-context toolkit: search, symbol info, AI context.
+    Core,
+    /// Structural navigation: callers/callees, deps, impact, traverse.
+    Graph,
+    /// Memory store / search / list / context / stats.
+    Memory,
+    /// Pro security tools only — community surface is filtered to empty.
+    Security,
+}
+
+impl ToolProfile {
+    pub fn from_str_or_all(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "core" => Self::Core,
+            "graph" => Self::Graph,
+            "memory" => Self::Memory,
+            "security" => Self::Security,
+            _ => Self::All,
+        }
+    }
+}
+
+/// Decide whether a community tool (by `name`) belongs to the active
+/// profile. Pro tools are filtered separately at the call site.
+///
+/// Categorisation matches the comment groupings in `get_all_tools()`.
+/// Admin tools (reindex / index_*) are only in `All` — exposing them
+/// in narrower profiles would let an agent trigger expensive index
+/// passes from a session that's only asking memory questions.
+pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
+    use ToolProfile::*;
+    match profile {
+        All => true,
+        Security => false, // community has no security tools; pro adds them at call site
+        Core => matches!(
+            name,
+            "codegraph_symbol_search"
+                | "codegraph_get_symbol_info"
+                | "codegraph_get_detailed_symbol"
+                | "codegraph_get_ai_context"
+                | "codegraph_get_edit_context"
+                | "codegraph_get_curated_context"
+                | "codegraph_search_by_pattern"
+                | "codegraph_search_by_error"
+        ),
+        Graph => matches!(
+            name,
+            "codegraph_get_callers"
+                | "codegraph_get_callees"
+                | "codegraph_get_call_graph"
+                | "codegraph_get_dependency_graph"
+                | "codegraph_analyze_impact"
+                | "codegraph_analyze_complexity"
+                | "codegraph_traverse_graph"
+                | "codegraph_find_circular_deps"
+                | "codegraph_find_entry_points"
+                | "codegraph_find_hot_paths"
+                | "codegraph_find_by_imports"
+                | "codegraph_find_by_signature"
+                | "codegraph_find_implementors"
+                | "codegraph_find_dead_imports"
+                | "codegraph_get_module_summary"
+                | "codegraph_find_related_tests"
+        ),
+        Memory => name.starts_with("codegraph_memory_"),
+    }
+}
+
 /// Get all available CodeGraph tools
 pub fn get_all_tools() -> Vec<Tool> {
     vec![
@@ -835,6 +916,14 @@ fn memory_store_tool() -> Tool {
         number_prop("Confidence level 0.0-1.0 (default: 1.0)", Some(1.0)),
     );
     properties.insert(
+        "agentSource".to_string(),
+        string_prop(
+            "Optional tag for which AI agent stored this memory \
+             (e.g. \"claude\", \"cursor\", \"windsurf\", \"codex\", \"cline\"). \
+             Surfaces in codegraph_memory_list output for cross-agent attribution.",
+        ),
+    );
+    properties.insert(
         "problem".to_string(),
         string_prop("For debug_context: describe the problem encountered"),
     );
@@ -1340,6 +1429,108 @@ mod tests {
             names.len(),
             unique_names.len(),
             "Tool names should be unique"
+        );
+    }
+
+    #[test]
+    fn test_tool_profile_from_str() {
+        assert_eq!(ToolProfile::from_str_or_all("core"), ToolProfile::Core);
+        assert_eq!(ToolProfile::from_str_or_all("Graph"), ToolProfile::Graph);
+        assert_eq!(ToolProfile::from_str_or_all("MEMORY"), ToolProfile::Memory);
+        assert_eq!(
+            ToolProfile::from_str_or_all("security"),
+            ToolProfile::Security
+        );
+        // Unknown / empty falls through to All — never errors.
+        assert_eq!(ToolProfile::from_str_or_all(""), ToolProfile::All);
+        assert_eq!(ToolProfile::from_str_or_all("xyz"), ToolProfile::All);
+    }
+
+    #[test]
+    fn test_profile_all_includes_every_tool() {
+        let all = get_all_tools();
+        let kept: Vec<_> = all
+            .iter()
+            .filter(|t| tool_in_profile(&t.name, ToolProfile::All))
+            .collect();
+        assert_eq!(kept.len(), all.len(), "ToolProfile::All must not filter");
+    }
+
+    #[test]
+    fn test_profile_memory_includes_only_memory_tools() {
+        let all = get_all_tools();
+        let kept: Vec<_> = all
+            .iter()
+            .filter(|t| tool_in_profile(&t.name, ToolProfile::Memory))
+            .collect();
+        // Currently 7 memory tools (store / search / get / context / invalidate / list / stats).
+        assert_eq!(
+            kept.len(),
+            7,
+            "Memory profile should expose exactly the 7 memory_* tools"
+        );
+        for t in &kept {
+            assert!(
+                t.name.starts_with("codegraph_memory_"),
+                "Memory profile leaked non-memory tool: {}",
+                t.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_profile_core_includes_expected_tools_only() {
+        let all = get_all_tools();
+        let kept: Vec<_> = all
+            .iter()
+            .filter(|t| tool_in_profile(&t.name, ToolProfile::Core))
+            .collect();
+        assert_eq!(kept.len(), 8, "Core profile should expose 8 tools");
+        // Spot-check key inclusions.
+        assert!(kept.iter().any(|t| t.name == "codegraph_symbol_search"));
+        assert!(kept.iter().any(|t| t.name == "codegraph_get_ai_context"));
+        // And key exclusions.
+        assert!(!kept.iter().any(|t| t.name == "codegraph_get_callers"));
+        assert!(!kept.iter().any(|t| t.name == "codegraph_memory_store"));
+        assert!(!kept.iter().any(|t| t.name == "codegraph_reindex_workspace"));
+    }
+
+    #[test]
+    fn test_profile_graph_excludes_admin_and_memory() {
+        let all = get_all_tools();
+        let kept: Vec<_> = all
+            .iter()
+            .filter(|t| tool_in_profile(&t.name, ToolProfile::Graph))
+            .collect();
+        assert!(kept.len() >= 10, "Graph profile too small");
+        // Critical: admin (reindex) and memory tools must NOT be in graph.
+        for tool in &kept {
+            assert!(
+                !tool.name.contains("memory"),
+                "Graph profile leaked memory tool: {}",
+                tool.name
+            );
+            assert!(
+                !tool.name.contains("reindex") && !tool.name.contains("index_"),
+                "Graph profile leaked admin tool: {}",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_profile_security_filters_community_to_empty() {
+        let all = get_all_tools();
+        let kept: Vec<_> = all
+            .iter()
+            .filter(|t| tool_in_profile(&t.name, ToolProfile::Security))
+            .collect();
+        // Community edition has no security tools; pro provider adds them
+        // separately at the call site (in handle_tools_list).
+        assert!(
+            kept.is_empty(),
+            "Security profile must not match community tools (got {})",
+            kept.len()
         );
     }
 }

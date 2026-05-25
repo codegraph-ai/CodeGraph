@@ -58,6 +58,20 @@ struct Args {
     /// Embed full function body instead of just name+signature (captured at parse time, minimal overhead)
     #[arg(long, default_value = "true")]
     full_body_embedding: bool,
+
+    /// Scope the MCP tool surface to a named profile.
+    ///
+    /// `all` (default) exposes every tool (community + pro). Narrower profiles
+    /// reduce the agent's prompt-context cost on chatty sessions:
+    ///   - `core`     — search + symbol info + AI context (8 tools)
+    ///   - `graph`    — callers/callees/deps/impact/traverse (16 tools)
+    ///   - `memory`   — codegraph_memory_* only (7 tools)
+    ///   - `security` — pro security tools only (empty on community)
+    ///
+    /// Also reads `CODEGRAPH_TOOL_PROFILE` env var when the flag is unset.
+    /// MCP mode only — LSP mode ignores this.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 /// Re-entrancy guard for the panic hook. A second panic during hook
@@ -178,13 +192,26 @@ async fn main() {
             tracing::info!("Excluding: {:?}", args.exclude);
         }
 
+        // Resolve tool profile: --profile takes precedence over env var,
+        // both fall through to All when unset/unknown.
+        let profile_str = args
+            .profile
+            .clone()
+            .or_else(|| std::env::var("CODEGRAPH_TOOL_PROFILE").ok())
+            .unwrap_or_default();
+        let tool_profile = codegraph_server::mcp::tools::ToolProfile::from_str_or_all(&profile_str);
+        if !profile_str.is_empty() {
+            tracing::info!("Tool profile: {:?} (from '{}')", tool_profile, profile_str);
+        }
+
         let mut server = codegraph_server::mcp::McpServer::new(
             workspaces,
             args.exclude,
             args.max_files,
             embedding_model,
             args.full_body_embedding,
-        );
+        )
+        .with_tool_profile(tool_profile);
         if let Err(e) = server.run().await {
             tracing::error!("MCP server error: {}", e);
             std::process::exit(1);

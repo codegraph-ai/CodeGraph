@@ -7,7 +7,7 @@
 
 use super::protocol::*;
 use super::resources::get_all_resources;
-use super::tools::get_all_tools;
+use super::tools::{get_all_tools, tool_in_profile, ToolProfile};
 use super::transport::AsyncStdioTransport;
 use crate::ai_query::QueryEngine;
 use crate::domain::node_props;
@@ -797,6 +797,8 @@ pub struct McpServer {
     _file_watcher: Option<super::file_watcher::McpFileWatcher>,
     /// Extension point for pro tools (community edition uses NoopProProvider)
     pro_provider: Arc<dyn super::pro_hooks::ProToolProvider>,
+    /// Tool surface filter (defaults to `All` — pre-0.16.5 behavior)
+    tool_profile: ToolProfile,
 }
 
 impl McpServer {
@@ -838,7 +840,15 @@ impl McpServer {
             indexed: false,
             _file_watcher: None,
             pro_provider,
+            tool_profile: ToolProfile::All,
         }
+    }
+
+    /// Override the tool surface profile. Must be called before
+    /// `run()` to take effect. Returns self for builder-style chaining.
+    pub fn with_tool_profile(mut self, profile: ToolProfile) -> Self {
+        self.tool_profile = profile;
+        self
     }
 
     /// Ensure workspace is indexed (lazy — runs on first tool call)
@@ -1028,19 +1038,28 @@ impl McpServer {
     }
 
     async fn handle_tools_list(&self, id: Option<Value>) -> JsonRpcResponse {
+        // Filter community tools by the active profile. `All` matches every
+        // tool (pre-0.16.5 behavior); narrower profiles cut the surface
+        // exposed to the agent to reduce prompt-context cost.
         let tools = get_all_tools();
         let mut tools_json: Vec<Value> = tools
             .iter()
+            .filter(|t| tool_in_profile(&t.name, self.tool_profile))
             .map(|t| serde_json::to_value(t).unwrap())
             .collect();
 
-        // Add pro tools (if any are registered by the pro provider)
-        for pro_tool in self.pro_provider.tools() {
-            tools_json.push(serde_json::json!({
-                "name": pro_tool.name,
-                "description": pro_tool.description,
-                "inputSchema": pro_tool.schema,
-            }));
+        // Pro tools are appended only under `All` or `Security` — the
+        // pro provider doesn't currently expose a categorisation, so we
+        // treat the entire pro surface as security-relevant.
+        let include_pro = matches!(self.tool_profile, ToolProfile::All | ToolProfile::Security);
+        if include_pro {
+            for pro_tool in self.pro_provider.tools() {
+                tools_json.push(serde_json::json!({
+                    "name": pro_tool.name,
+                    "description": pro_tool.description,
+                    "inputSchema": pro_tool.schema,
+                }));
+            }
         }
 
         JsonRpcResponse::success(id, serde_json::json!({ "tools": tools_json }))
