@@ -99,7 +99,7 @@ Plus glob patterns for binary archives, native libraries, OS metadata, and **sec
 
 ---
 
-## Tools (34 community + 27 pro, 17 security)
+## Tools (41 community + 27 pro, 17 security)
 
 ### Code Analysis (11)
 
@@ -152,7 +152,71 @@ Persistent AI context across sessions — debugging insights, architectural deci
 | `memory_context` | Get memories relevant to a file/function |
 | `memory_list` / `memory_invalidate` / `memory_stats` | Browse, retire, monitor |
 
+### Documentation (7)
+
+Persistent project documentation — index design docs, search them semantically, verify code matches the design, generate architecture docs from the code graph.
+
+| Tool | What it does |
+|------|-------------|
+| `index_markdown` | Index a local `.md` file (ARCHITECTURE.md, API_DESIGN.md, etc.) into the persistent docs store. Heading-tree chunking with leaf-node embeddings. |
+| `search_docs` | Semantic search over indexed docs — returns matching sections with heading-path breadcrumbs |
+| `list_doc_sources` | List all indexed source files |
+| `remove_doc_source` | Remove all indexed chunks from a source file |
+| `verify_design` | Cross-reference doc claims vs code graph. `direction=forward` (doc→code), `reverse` (code→doc), or `both` |
+| `design_gaps` | Find identifiers described in docs that don't exist in code yet — build TODO lists from specs |
+| `generate_architecture_doc` | Auto-generate a structured ARCHITECTURE.md from the live code graph (modules, hot paths, complexity, circular deps) |
+
 All tool names are prefixed with `codegraph_` (e.g. `codegraph_get_ai_context`). Tools that target a specific symbol accept `uri` + `line` or `nodeId` from `symbol_search` results.
+
+---
+
+### Usage examples
+
+**Index a design doc and search it:**
+```
+codegraph_index_markdown(path: "/projects/myapp/docs/ARCHITECTURE.md")
+codegraph_search_docs(query: "how does the auth module handle JWT refresh?")
+```
+
+**Check if the code matches the design:**
+```
+codegraph_verify_design(source: "/projects/myapp/docs/ARCHITECTURE.md", direction: "forward")
+// → "132/132 identifiers verified, 0 gaps"
+```
+
+**Find what's described in docs but not yet implemented:**
+```
+codegraph_design_gaps(source: "/projects/myapp/docs/API_DESIGN.md")
+// → "4 of 12 identifiers not found in code: PaymentService, RefundHandler, ..."
+```
+
+**Generate architecture docs from the code graph:**
+```
+codegraph_generate_architecture_doc(scope: "src/", topN: 5)
+// → Markdown with modules, complexity hotspots, hot paths, circular deps
+```
+
+**Save a debugging insight for future sessions:**
+```
+codegraph_memory_store(kind: "debug_context", title: "Nginx body size limit",
+  content: "The /upload endpoint fails on payloads > 1MB...",
+  problem: "API returns 500 on large uploads",
+  solution: "Increase nginx client_max_body_size to 10M",
+  agentSource: "claude")
+```
+
+**Get AI context with automatic design doc augmentation:**
+```
+codegraph_get_ai_context(uri: "file:///projects/myapp/src/auth.rs", line: 42, intent: "modify")
+// → Code context + design_context section from indexed docs mentioning "auth"
+```
+
+**Narrow the tool surface for chatty sessions:**
+```bash
+codegraph-server --mcp --profile=core  # Only 8 tools: search + symbol info + AI context
+```
+
+---
 
 ### CodeGraph Pro
 
@@ -190,7 +254,7 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 
 ## Languages
 
-31 languages parsed via tree-sitter — functions, classes, imports, call graph, complexity metrics, dependency graphs, symbol search, and impact analysis:
+38 languages parsed via tree-sitter — functions, classes, imports, call graph, complexity metrics, dependency graphs, symbol search, and impact analysis:
 
 | Category | Languages |
 |---|---|
@@ -222,10 +286,11 @@ MCP Client (Claude, Cursor, ...)        VS Code Extension
             ┌─────────────────────────────┐
             │       codegraph-server      │
             ├─────────────────────────────┤
-            │  37 tree-sitter parsers     │
+            │  38 tree-sitter parsers     │
             │  Semantic graph engine      │
             │  AI query engine (BM25)     │
             │  Memory layer (RocksDB)     │
+            │  Docs store (RocksDB+HNSW)  │
             │  Full-body embeddings (BGE) │
             │  HNSW vector index          │
             └─────────────────────────────┘
