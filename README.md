@@ -57,9 +57,22 @@ the rules repo's README).
 |------|---------|-------------|
 | `--workspace <path>` | current dir | Directories to index (repeatable for multi-project) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
-| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast) or `jina-code-v2` (768d, 6x slower) |
+| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast), `jina-code-v2` (768d, 6× slower), or `granite-97m` (384d, 32K ctx, ~3× slower) |
 | `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
 | `--max-files <n>` | 5000 | Maximum files to index |
+| `--profile <name>` | `all` | Filter the exposed MCP tool surface to a named subset (see below) |
+
+#### `--profile` — narrow the MCP tool surface
+
+The full 32-tool surface is convenient but inflates the agent's prompt-context cost. A profile exposes only the slice you need (also settable via the `CODEGRAPH_TOOL_PROFILE` env var):
+
+| Profile | Tools | Use when |
+|---------|-------|----------|
+| `all` *(default)* | every tool (community + pro) | normal sessions |
+| `core` | 8 — search + symbol info + AI context | chatty agent sessions where you only need lookups |
+| `graph` | 16 — callers/callees/deps/impact/traverse | refactoring + structural analysis |
+| `memory` | 7 — `codegraph_memory_*` only | note-taking / knowledge-base workflows |
+| `security` | pro security tools only (empty on community) | pro security audits |
 
 ### VS Code settings
 
@@ -76,7 +89,13 @@ the rules repo's README).
 
 Full-body embeddings are enabled by default. Function body text is captured at parse time with zero I/O overhead.
 
-Built-in exclusions (always skipped): `node_modules`, `target`, `dist`, `build`, `out`, `.git`, `__pycache__`, `vendor`, `DerivedData`, `tmp`, `coverage`, `logs`.
+Built-in exclusions (always skipped) cover ~47 directories across three categories:
+
+- **Build / cache**: `node_modules`, `target`, `dist`, `build`, `out`, `.git`, `__pycache__`, `vendor`, `.venv`, `venv`, `.tox`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.next`, `.nuxt`, `.svelte-kit`, `.parcel-cache`, `.npm`, `.yarn`, `.pnpm-store`, `.cache`, `.cargo`, `.bundle`, `.gradle`, `DerivedData`, `Pods`, `xcuserdata`, `cmake-build-*`
+- **IDE / IaC state**: `.idea`, `.vscode-test`, `.fleet`, `.terraform`, `.terragrunt-cache`, `.serverless`
+- **Sensitive credential dirs**: `.aws`, `.ssh`, `.gnupg`, `.kube`, `.docker`
+
+Plus glob patterns for binary archives, native libraries, OS metadata, and **secret file extensions** (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.crt`, `*.gpg`, `*.kdbx`, SSH key conventions like `id_rsa`, etc.) — defense in depth against accidentally embedding credentials.
 
 ---
 
