@@ -35,6 +35,18 @@ code --install-extension codegraph-0.14.0.vsix
 
 The extension starts the server automatically and registers all tools as Language Model Tools for Copilot.
 
+### Rules for AI agents
+
+Pre-configured rule files that teach AI coding agents (Claude, Cursor,
+Windsurf, Codex, Cline) to use CodeGraph MCP tools before falling back
+to grep / multi-file reads. Maps natural-language intent to the right
+`codegraph_*` tool.
+
+→ **[codegraph-ai/codegraph-rules-for-agents](https://github.com/codegraph-ai/codegraph-rules-for-agents)**
+
+Setup is `cp <agent>/codegraph.md ~/<agent>/` (one line per agent — see
+the rules repo's README).
+
 ---
 
 ## Configuration
