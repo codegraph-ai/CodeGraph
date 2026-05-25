@@ -44,22 +44,44 @@ impl Default for IndexConfig {
 
 impl IndexConfig {
     /// The hardcoded list of directories that are always excluded.
+    ///
+    /// Three categories:
+    /// 1. **Build / dependency / cache dirs** — never source code, dragging them
+    ///    through tree-sitter wastes cycles. Indexer-runaway protection
+    ///    (see workspace_indexer_embedding_runaway memory note: codegraph-pro
+    ///    MCP startup spinning fastembed/ONNX for 30+ min on large workspaces).
+    /// 2. **IDE / tooling state** — ephemeral, churns frequently, no semantic
+    ///    value for code intelligence.
+    /// 3. **Sensitive credential dirs** — `~/.aws`, `~/.ssh` etc. A user who
+    ///    accidentally indexes their home dir (or a project rooted inside it)
+    ///    should not have those embedded into graph.db. Defense in depth on
+    ///    top of the per-extension secret skip in `default_exclude_patterns`.
     pub fn default_exclude_dirs() -> Vec<String> {
         [
-            "node_modules",
-            "target",
-            "dist",
-            "build",
-            "out",
+            // Generic build / artifact dirs
+            "node_modules", "target", "dist", "build", "out",
+            "coverage", "htmlcov", "results", "logs", "tmp",
+            // VCS / SCM metadata
             ".git",
-            "__pycache__",
-            "vendor",
-            "DerivedData",
-            "tmp",
-            "coverage",
-            "htmlcov",
-            "results",
-            "logs",
+            // Python tooling
+            "__pycache__", "vendor",
+            ".venv", "venv", ".tox", ".pytest_cache", ".mypy_cache",
+            ".ruff_cache", ".eggs",
+            // Node / JS tooling
+            ".next", ".nuxt", ".svelte-kit", ".parcel-cache",
+            ".npm", ".yarn", ".pnpm-store", ".cache",
+            // Rust / Ruby / Java / Gradle
+            ".cargo", ".bundle", ".gradle", ".kotlin",
+            // Apple / iOS
+            "DerivedData", "Pods", "xcuserdata",
+            // CMake out-of-source build dirs
+            "cmake-build-debug", "cmake-build-release",
+            // IDE state
+            ".idea", ".vscode-test", ".fleet",
+            // Infrastructure-as-code state
+            ".terraform", ".terragrunt-cache", ".serverless",
+            // Sensitive credential / config dirs — never code, often secret
+            ".aws", ".ssh", ".gnupg", ".kube", ".docker",
         ]
         .iter()
         .map(|s| (*s).to_string())
@@ -94,6 +116,26 @@ impl IndexConfig {
             "**/.DS_Store", "**/Thumbs.db",
             // Misc bulky non-source
             "**/*.sqlite", "**/*.db", "**/*.lock",
+            // Cryptographic material — never code; never want this content
+            // either parsed OR embedded into graph.db. Coverage:
+            //   - Private keys: PEM / DER / PKCS#12 / PKCS#8 / OpenSSH
+            //   - Certificates: PEM / DER / certificate bundles
+            //   - PGP / GPG keyrings + ASCII-armored signatures
+            //   - Password databases (KeePass)
+            //   - Web-auth artifacts (htpasswd, netrc)
+            //   - SSH key filenames per OpenSSH convention
+            //   - Terraform state (contains secrets after apply)
+            "**/*.pem", "**/*.key", "**/*.priv", "**/*.privkey",
+            "**/*.p12", "**/*.pfx",
+            "**/*.crt", "**/*.cer", "**/*.der",
+            "**/*.gpg", "**/*.asc",
+            "**/*.kdb", "**/*.kdbx",
+            "**/.htpasswd", "**/.netrc",
+            "**/id_rsa", "**/id_rsa.pub",
+            "**/id_ed25519", "**/id_ed25519.pub",
+            "**/id_dsa", "**/id_ecdsa",
+            "**/known_hosts", "**/authorized_keys",
+            "**/*.tfstate", "**/*.tfstate.backup",
         ]
         .iter()
         .map(|s| (*s).to_string())
@@ -568,5 +610,62 @@ mod tests {
         assert!(!set.is_match("/repo/src/main.rs"));
         assert!(!set.is_match("/repo/src/handler.go"));
         assert!(!set.is_match("/repo/lib/foo.cpp"));
+    }
+
+    #[test]
+    fn default_exclude_dirs_includes_python_node_and_credential_dirs() {
+        let dirs = IndexConfig::default_exclude_dirs();
+        // Python tooling caches
+        assert!(dirs.iter().any(|d| d == ".venv"));
+        assert!(dirs.iter().any(|d| d == ".pytest_cache"));
+        assert!(dirs.iter().any(|d| d == ".mypy_cache"));
+        // Node tooling
+        assert!(dirs.iter().any(|d| d == ".next"));
+        assert!(dirs.iter().any(|d| d == ".yarn"));
+        // iOS / Apple
+        assert!(dirs.iter().any(|d| d == "Pods"));
+        // IaC
+        assert!(dirs.iter().any(|d| d == ".terraform"));
+        // Sensitive credential dirs
+        assert!(dirs.iter().any(|d| d == ".aws"));
+        assert!(dirs.iter().any(|d| d == ".ssh"));
+        assert!(dirs.iter().any(|d| d == ".gnupg"));
+        assert!(dirs.iter().any(|d| d == ".kube"));
+    }
+
+    #[test]
+    fn build_exclude_set_filters_secret_file_extensions() {
+        let config = IndexConfig::default();
+        let set = config.build_exclude_set();
+        // Private keys + cert bundles — must never be indexed or embedded.
+        assert!(set.is_match("/repo/keys/server.pem"));
+        assert!(set.is_match("/repo/secret.key"));
+        assert!(set.is_match("/repo/identity.p12"));
+        assert!(set.is_match("/repo/codesign.pfx"));
+        // Certificates
+        assert!(set.is_match("/repo/cert.crt"));
+        assert!(set.is_match("/repo/cert.cer"));
+        assert!(set.is_match("/repo/cert.der"));
+        // PGP / GPG
+        assert!(set.is_match("/repo/release.gpg"));
+        assert!(set.is_match("/repo/release.asc"));
+        // Password DBs
+        assert!(set.is_match("/repo/passwords.kdbx"));
+        // SSH conventional filenames (no extension)
+        assert!(set.is_match("/home/user/.ssh/id_rsa"));
+        assert!(set.is_match("/home/user/.ssh/id_ed25519"));
+        assert!(set.is_match("/home/user/.ssh/authorized_keys"));
+        assert!(set.is_match("/home/user/.ssh/known_hosts"));
+        // Web auth
+        assert!(set.is_match("/repo/.htpasswd"));
+        assert!(set.is_match("/repo/.netrc"));
+        // Terraform state (secrets after apply)
+        assert!(set.is_match("/repo/terraform.tfstate"));
+        assert!(set.is_match("/repo/terraform.tfstate.backup"));
+        // Source files MUST still pass — bg: a file called `crypto.rs`
+        // looks key-adjacent but is normal source.
+        assert!(!set.is_match("/repo/src/crypto.rs"));
+        assert!(!set.is_match("/repo/src/keys.go"));
+        assert!(!set.is_match("/repo/src/auth.py"));
     }
 }
