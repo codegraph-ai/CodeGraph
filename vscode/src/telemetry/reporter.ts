@@ -83,6 +83,7 @@ export interface Reporter {
         outcome: ActivationOutcome;
         durationMs: number;
         serverBinaryFound: boolean;
+        errorHint?: string;
     }): void;
     activationToolRegistration(props: {
         lmApiAvailable: boolean;
@@ -256,6 +257,7 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
                     outcome: props.outcome,
                     durationBucket: durationBucket(props.durationMs),
                     serverBinaryFound: props.serverBinaryFound,
+                    ...(props.errorHint ? { errorHint: props.errorHint } : {}),
                 },
                 props.outcome !== 'ok',
             );

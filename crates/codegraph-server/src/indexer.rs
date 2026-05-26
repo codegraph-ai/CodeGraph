@@ -76,6 +76,8 @@ impl IndexConfig {
             "DerivedData", "Pods", "xcuserdata",
             // CMake out-of-source build dirs
             "cmake-build-debug", "cmake-build-release",
+            // Test / benchmark / example / binary-output dirs
+            "benches", "examples", "fixtures", "cases", "bin",
             // IDE state
             ".idea", ".vscode-test", ".fleet",
             // Infrastructure-as-code state
@@ -116,6 +118,12 @@ impl IndexConfig {
             "**/.DS_Store", "**/Thumbs.db",
             // Misc bulky non-source
             "**/*.sqlite", "**/*.db", "**/*.lock",
+            // Package artifacts
+            "**/*.vsix", "**/*.tgz", "**/*.whl", "**/*.gem", "**/*.nupkg",
+            // Vendored tree-sitter parser sources (generated C, not user code).
+            // Two globs needed: one matches the dir itself so it's skipped
+            // during directory walk, the other matches files inside it.
+            "**/tree-sitter-*-src", "**/tree-sitter-*-src/**",
             // Cryptographic material — never code; never want this content
             // either parsed OR embedded into graph.db. Coverage:
             //   - Private keys: PEM / DER / PKCS#12 / PKCS#8 / OpenSSH

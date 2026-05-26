@@ -325,9 +325,20 @@ impl CodeGraphBackend {
     /// Build an [`IndexConfig`](crate::indexer::IndexConfig) from the current
     /// LSP configuration.
     fn index_config_from_lsp(config: &CodeGraphConfig) -> crate::indexer::IndexConfig {
+        // Merge user-provided exclude patterns with the hardcoded defaults
+        // rather than replacing them. The defaults cover binary archives,
+        // secret files, package artifacts, and vendored parser sources.
+        // Without this merge, the VS Code setting's default value (a short
+        // 9-entry list) would override the hardened 50+ pattern list.
+        let mut patterns = crate::indexer::IndexConfig::default_exclude_patterns();
+        for p in &config.exclude_patterns {
+            if !patterns.contains(p) {
+                patterns.push(p.clone());
+            }
+        }
         crate::indexer::IndexConfig {
             exclude_dirs: crate::indexer::IndexConfig::default_exclude_dirs(),
-            exclude_patterns: config.exclude_patterns.clone(),
+            exclude_patterns: patterns,
             max_file_size_bytes: config.max_file_size_kb * 1024,
             ..crate::indexer::IndexConfig::default()
         }

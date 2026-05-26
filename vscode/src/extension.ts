@@ -23,6 +23,15 @@ let reporter: Reporter;
 let serverUptimeStart = 0;
 let serverRestartCount = 0;
 
+// Crash-loop detection: if the server crashes MAX_RAPID_CRASHES times
+// within RAPID_CRASH_WINDOW_MS, stop restarting and show a persistent
+// error. Without this, machines with antivirus/glibc/OOM issues generate
+// 50+ crash events per week in an infinite restart loop.
+const MAX_RAPID_CRASHES = 3;
+const RAPID_CRASH_WINDOW_MS = 60_000;
+let rapidCrashTimestamps: number[] = [];
+let crashLoopDetected = false;
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     const config = vscode.workspace.getConfiguration('codegraph', vscode.workspace.workspaceFolders?.[0]?.uri);
 
@@ -177,10 +186,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         });
     } catch (error) {
         vscode.window.showErrorMessage(`CodeGraph: Failed to start language server: ${error}`);
+        const errStr = String(error);
+        const isTimeout = errStr.toLowerCase().includes('timeout');
+
+        // Extract a short, privacy-safe hint from the error for diagnostics.
+        // Never send file paths or user-specific content — only the error
+        // class (glibc, ENOENT, EACCES, vcruntime, antivirus patterns).
+        let errorHint = 'unknown';
+        const lower = errStr.toLowerCase();
+        if (isTimeout) errorHint = 'timeout';
+        else if (lower.includes('enoent')) errorHint = 'ENOENT';
+        else if (lower.includes('eacces')) errorHint = 'EACCES';
+        else if (lower.includes('glibc') || lower.includes('libc')) errorHint = 'glibc_missing';
+        else if (lower.includes('vcruntime') || lower.includes('msvcp')) errorHint = 'vcruntime_missing';
+        else if (lower.includes('permission')) errorHint = 'permission_denied';
+        else if (lower.includes('virus') || lower.includes('quarantine') || lower.includes('blocked')) errorHint = 'antivirus_blocked';
+        else if (lower.includes('not a valid win32') || lower.includes('bad cpu') || lower.includes('exec format')) errorHint = 'wrong_architecture';
+        else if (lower.includes('eperm')) errorHint = 'EPERM';
+        else if (lower.includes('spawn')) errorHint = 'spawn_error';
+        else {
+            // Last resort: first 80 chars, strip anything that looks like a path
+            errorHint = errStr.substring(0, 80).replace(/[\/\\][^\s:]+/g, '<path>');
+        }
+
         reporter.activationServerStartResult({
-            outcome: String(error).toLowerCase().includes('timeout') ? 'timeout' : 'spawn_fail',
+            outcome: isTimeout ? 'timeout' : 'spawn_fail',
             durationMs: Date.now() - serverStartBegan,
             serverBinaryFound: !!serverInfo.path,
+            errorHint,
         });
         return;
     }
@@ -190,11 +223,50 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         client.onDidChangeState((evt) => {
             // evt.newState: 1=Stopped, 2=Starting, 3=Running
             if (evt.newState === 1 && serverUptimeStart > 0) {
+                const now = Date.now();
+                const uptimeSeconds = (now - serverUptimeStart) / 1000;
+
                 reporter.serverCrash({
-                    uptimeSeconds: (Date.now() - serverUptimeStart) / 1000,
+                    uptimeSeconds,
                     restartCount: serverRestartCount,
                     lastToolName: toolManager?.lastToolName,
                 });
+
+                // Crash-loop detection: track rapid crashes and stop
+                // restarting if we hit the cap. Prevents infinite
+                // restart loops on machines with antivirus, missing
+                // runtime deps, or OOM conditions (telemetry showed
+                // single machines generating 50+ crash events/week).
+                rapidCrashTimestamps.push(now);
+                rapidCrashTimestamps = rapidCrashTimestamps.filter(
+                    (t) => now - t < RAPID_CRASH_WINDOW_MS,
+                );
+
+                if (rapidCrashTimestamps.length >= MAX_RAPID_CRASHES) {
+                    crashLoopDetected = true;
+                    client.stop().catch(() => {});
+                    vscode.window
+                        .showErrorMessage(
+                            `CodeGraph: Server crashed ${MAX_RAPID_CRASHES} times in ${RAPID_CRASH_WINDOW_MS / 1000}s — stopped restarting. ` +
+                            'This is usually caused by antivirus software, missing runtime libraries, ' +
+                            'or insufficient memory. Check the Output panel (CodeGraph Debug) for details.',
+                            'Retry',
+                            'Open Output',
+                        )
+                        .then((choice) => {
+                            if (choice === 'Retry') {
+                                crashLoopDetected = false;
+                                rapidCrashTimestamps = [];
+                                serverRestartCount = 0;
+                                client.start().catch(() => {});
+                            } else if (choice === 'Open Output') {
+                                vscode.commands.executeCommand(
+                                    'workbench.action.output.toggleOutput',
+                                );
+                            }
+                        });
+                    return;
+                }
             }
             if (evt.newState === 3 && serverUptimeStart > 0) {
                 serverRestartCount += 1;
@@ -231,7 +303,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Settings snapshot once per session — observe what defaults users override.
     reporter.engagementSettingsSnapshot();
 
-    // Check if workspace is indexed — prompt if not
+    // Check if workspace is indexed — prompt if not.
+    // Delay the check briefly: the server loads the persisted graph and
+    // rebuilds search indexes after the LSP handshake. A symbolSearch
+    // fired immediately can hit an empty index and falsely trigger the
+    // "not indexed" prompt even when 13k+ nodes are already loaded.
+    await new Promise((r) => setTimeout(r, 2000));
     try {
         const check = await client.sendRequest<any>('workspace/executeCommand', {
             command: 'codegraph.symbolSearch',

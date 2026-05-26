@@ -23,6 +23,7 @@ mcp-package/*.tgz
 
 # Internal docs (not public)
 competitive-analysis.md
+./scripts/telemetry-summary.sh
 TODO.md
 TODO_*.md
 .mcp.json
