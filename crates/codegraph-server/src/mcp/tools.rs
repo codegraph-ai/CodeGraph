@@ -1402,6 +1402,15 @@ fn verify_design_tool() -> Tool {
             Some("forward"),
         ),
     );
+    properties.insert(
+        "compact".to_string(),
+        boolean_prop(
+            "Compact output: return only counts + gap items (skip the verified list \
+             in forward direction, skip undocumented list in reverse). Dramatically \
+             reduces output size for large codebases. Default: false.",
+            false,
+        ),
+    );
 
     Tool {
         name: "codegraph_verify_design".to_string(),

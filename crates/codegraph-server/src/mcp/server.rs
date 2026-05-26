@@ -2929,6 +2929,10 @@ impl McpServer {
 
             "codegraph_verify_design" | "codegraph_design_gaps" => {
                 let is_gaps_only = name == "codegraph_design_gaps";
+                let compact = args
+                    .get("compact")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(is_gaps_only); // design_gaps is compact by nature
                 let source = args
                     .get("source")
                     .and_then(|v| v.as_str())
@@ -2936,7 +2940,7 @@ impl McpServer {
                 let direction = args
                     .get("direction")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(if is_gaps_only { "forward" } else { "forward" });
+                    .unwrap_or("forward");
 
                 let chunks = self
                     .backend
@@ -2999,13 +3003,16 @@ impl McpServer {
                         }
                     }
 
-                    if is_gaps_only {
+                    if compact {
+                        // Compact: counts + gap items only (skip verified list)
                         result_json["forward"] = serde_json::json!({
                             "total_claims": claims.len(),
+                            "verified": verified.len(),
                             "gaps": gaps.len(),
-                            "items": gaps,
+                            "gap_items": gaps,
                         });
                     } else {
+                        // Full: both verified + gap item lists
                         result_json["forward"] = serde_json::json!({
                             "total_claims": claims.len(),
                             "verified": verified.len(),
@@ -3067,12 +3074,20 @@ impl McpServer {
                         a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
                     });
 
-                    result_json["reverse"] = serde_json::json!({
-                        "public_symbols_checked": checked,
-                        "documented": documented_count,
-                        "undocumented": undocumented.len(),
-                        "undocumented_items": undocumented,
-                    });
+                    if compact {
+                        result_json["reverse"] = serde_json::json!({
+                            "public_symbols_checked": checked,
+                            "documented": documented_count,
+                            "undocumented": undocumented.len(),
+                        });
+                    } else {
+                        result_json["reverse"] = serde_json::json!({
+                            "public_symbols_checked": checked,
+                            "documented": documented_count,
+                            "undocumented": undocumented.len(),
+                            "undocumented_items": undocumented,
+                        });
+                    }
                     result_json["reverse_message"] = serde_json::json!(format!(
                         "Code→Doc: {}/{} public symbols mentioned in docs",
                         documented_count, checked
