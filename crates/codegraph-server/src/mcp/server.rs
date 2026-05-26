@@ -5,6 +5,18 @@
 //!
 //! Handles MCP protocol requests and routes them to CodeGraph functionality.
 
+/// Emit a structured telemetry event to stderr for the npm wrapper to
+/// capture and forward to PostHog. The `TEL:` prefix lets the wrapper
+/// distinguish telemetry from normal tracing output. No network calls
+/// happen in the Rust binary — the JS wrapper handles PostHog ingestion.
+///
+/// Silently dropped if serialization fails (never blocks the server).
+fn emit_tel(value: serde_json::Value) {
+    if let Ok(json) = serde_json::to_string(&value) {
+        eprintln!("TEL: {json}");
+    }
+}
+
 use super::protocol::*;
 use super::resources::get_all_resources;
 use super::tools::{get_all_tools, tool_in_profile, ToolProfile};
@@ -894,8 +906,16 @@ impl McpServer {
     /// Run the MCP server event loop
     pub async fn run(&mut self) -> std::io::Result<()> {
         let mut transport = AsyncStdioTransport::new();
+        let start_time = std::time::Instant::now();
+        let mut tool_call_count = 0u64;
 
         tracing::info!("MCP server starting...");
+        emit_tel(serde_json::json!({
+            "event": "mcp.start",
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "version": crate::metadata::VERSION,
+        }));
 
         loop {
             match transport.read_request().await {
@@ -914,6 +934,11 @@ impl McpServer {
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::UnexpectedEof {
                         tracing::info!("Client disconnected");
+                        emit_tel(serde_json::json!({
+                            "event": "mcp.shutdown",
+                            "uptimeSeconds": start_time.elapsed().as_secs(),
+                            "toolCalls": tool_call_count,
+                        }));
                         break;
                     }
                     let response = JsonRpcResponse::error(
@@ -1087,8 +1112,15 @@ impl McpServer {
             }
         };
 
+        let tool_start = std::time::Instant::now();
         match self.execute_tool(&params.name, params.arguments).await {
             Ok(result) => {
+                emit_tel(serde_json::json!({
+                    "event": "mcp.tool_invoke",
+                    "tool": params.name,
+                    "durationMs": tool_start.elapsed().as_millis() as u64,
+                    "ok": true,
+                }));
                 let tool_result = ToolCallResult {
                     content: vec![ToolResultContent::Text {
                         text: serde_json::to_string_pretty(&result)
@@ -1099,6 +1131,12 @@ impl McpServer {
                 JsonRpcResponse::success(id, serde_json::to_value(tool_result).unwrap())
             }
             Err(e) => {
+                emit_tel(serde_json::json!({
+                    "event": "mcp.tool_error",
+                    "tool": params.name,
+                    "durationMs": tool_start.elapsed().as_millis() as u64,
+                    "errorClass": if e.len() > 60 { &e[..60] } else { &e },
+                }));
                 let tool_result = ToolCallResult {
                     content: vec![ToolResultContent::Text {
                         text: format!("Error: {}", e),
