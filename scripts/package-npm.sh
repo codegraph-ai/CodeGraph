@@ -105,7 +105,17 @@ if [ "${1:-}" = "--publish" ]; then
   echo "Publishing to npmjs.com..."
   npm publish --access public
   echo "✓ Published @astudioplus/codegraph-mcp@$PKG_VERSION"
+  echo ""
+  echo "Updating MCP Registry..."
+  if command -v mcp-publisher &>/dev/null; then
+    mcp-publisher publish --server-json server.json
+    echo "✓ MCP Registry updated"
+  else
+    echo "⚠ mcp-publisher not found — update the MCP Registry manually:"
+    echo "  cd mcp-package && mcp-publisher publish --server-json server.json"
+  fi
 else
   echo ""
   echo "To publish: cd mcp-package && npm publish --access public"
+  echo "Then update MCP Registry: mcp-publisher publish --server-json server.json"
 fi
