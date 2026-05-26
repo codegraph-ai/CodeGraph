@@ -319,6 +319,13 @@ Requires Rust stable, Node.js 18+, VS Code 1.90+.
 
 ---
 
+## Support the project
+
+CodeGraph is free, open-source, and maintained by a solo developer.
+If it saves you time, consider [sponsoring on GitHub](https://github.com/sponsors/anvanster) — it helps keep the project alive and growing.
+
+---
+
 ## License
 
 Apache-2.0
