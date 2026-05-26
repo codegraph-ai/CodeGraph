@@ -1,6 +1,6 @@
 # CodeGraph MCP Server
 
-Cross-language code intelligence for AI agents — 28 tools, 17 languages, persistent memory.
+Cross-language code intelligence for AI agents — 41 tools, 38 languages, persistent memory, documentation intelligence.
 
 ## Install
 
@@ -25,7 +25,7 @@ Add to `~/.claude.json`:
 }
 ```
 
-### Cursor / Other MCP clients
+### Cursor / Windsurf / Cline / Other MCP clients
 
 Same config — the `codegraph-mcp` command starts the server in MCP (stdio) mode.
 
@@ -50,6 +50,13 @@ Pass flags after `--`:
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
 | `--embedding-model <model>` | `bge-small` | `bge-small`, `jina-code-v2`, or `granite-97m` (32K context, multilingual) |
 | `--max-files <n>` | 5000 | Maximum files to index |
+| `--profile <name>` | `all` | Scope tool surface: `core` (8), `graph` (16), `memory` (14), `security` (pro), `all` (41) |
+
+### Agent rules (recommended)
+
+Pre-configured rule files that teach your AI agent to use CodeGraph tools before falling back to grep / multi-file reads:
+
+→ **[codegraph-rules-for-agents](https://github.com/codegraph-ai/codegraph-rules-for-agents)**
 
 ### Optional: automatic context injection in Claude Code
 
@@ -62,21 +69,39 @@ npx codegraph-mcp-install-hooks --force # skip prompt
 npx codegraph-mcp-install-hooks --uninstall
 ```
 
-The installer modifies `~/.claude/settings.json` idempotently. Re-running it after a package upgrade refreshes the hook path. Inspired by [GitNexus's](https://github.com/abhigyanpatwari/GitNexus) precomputed-context model — addresses the "agents ship blind edits" failure mode by surfacing call-graph awareness automatically instead of relying on the agent to remember to ask.
+## Tools (41)
 
-## Tools (28)
+**Analysis** (11): `get_ai_context`, `get_edit_context`, `get_curated_context`, `analyze_impact`, `analyze_complexity`, `find_circular_deps`, `find_hot_paths`, `find_dead_imports`, `get_module_summary`, `search_by_pattern`, `search_by_error`
 
-**Analysis**: `get_ai_context`, `get_edit_context`, `get_curated_context`, `analyze_impact`, `analyze_complexity`
+**Navigation** (13): `symbol_search`, `get_callers`, `get_callees`, `get_detailed_symbol`, `get_symbol_info`, `get_dependency_graph`, `get_call_graph`, `find_by_imports`, `find_by_signature`, `find_entry_points`, `find_implementors`, `find_related_tests`, `traverse_graph`
 
-**Navigation**: `symbol_search`, `get_callers`, `get_callees`, `get_detailed_symbol`, `get_symbol_info`, `get_dependency_graph`, `get_call_graph`, `find_by_imports`, `find_by_signature`, `find_entry_points`, `find_implementors`, `find_related_tests`, `traverse_graph`
+**Memory** (7): `memory_store`, `memory_get`, `memory_search`, `memory_context`, `memory_list`, `memory_stats`, `memory_invalidate`
 
-**Indexing**: `reindex_workspace`, `index_files`, `index_directory`
+**Documentation** (7): `index_markdown`, `search_docs`, `list_doc_sources`, `remove_doc_source`, `verify_design`, `design_gaps`, `generate_architecture_doc`
 
-**Memory**: `memory_store`, `memory_get`, `memory_search`, `memory_context`, `memory_list`, `memory_stats`, `memory_invalidate`
+**Indexing** (3): `reindex_workspace`, `index_files`, `index_directory`
 
-## Languages
+All tool names are prefixed with `codegraph_` (e.g. `codegraph_symbol_search`).
 
-TypeScript/JS, Python, Rust, Go, C, C++, Java, Kotlin, C#, PHP, Ruby, Swift, Tcl, Verilog, COBOL, Fortran
+## Languages (38)
+
+**Systems**: C, C++, Rust, Zig, Objective-C  
+**JVM**: Java, Kotlin, Scala, Groovy, Clojure  
+**Web/Scripting**: TypeScript/JS, Python, Ruby, PHP, Perl, Lua, Elixir, Elm  
+**Web/Style**: CSS  
+**Mobile**: Swift, Dart  
+**Functional**: Haskell, OCaml, Julia, Erlang  
+**Enterprise**: C#, COBOL, Fortran, Go  
+**Blockchain**: Solidity  
+**Shell/Config**: Bash, HCL/Terraform, TOML, YAML, Dockerfile  
+**Hardware**: Verilog/SystemVerilog, Tcl  
+**Data Science**: R
+
+## Telemetry
+
+Anonymous usage telemetry helps improve CodeGraph. Events tracked: tool invocations (name + duration), startup, errors. No file paths, code content, or PII is ever sent.
+
+Opt out: set `CODEGRAPH_TELEMETRY=off` in your environment.
 
 ## License
 
