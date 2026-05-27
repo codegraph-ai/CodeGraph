@@ -102,6 +102,16 @@ pub struct ContextMetadata {
     pub used_fallback: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_message: Option<String>,
+    pub graph_stats: GraphStats,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphStats {
+    pub entities_in_graph: usize,
+    pub entities_traversed: usize,
+    pub entities_kept: usize,
+    pub output_tokens: usize,
 }
 
 /// Compact sibling function info — signature only, no full source.
@@ -265,6 +275,8 @@ pub(crate) fn get_ai_context(
         None
     };
 
+    let entities_kept = 1 + related_symbols.len(); // primary + related
+
     Some(AiContextResult {
         primary_context,
         related_symbols,
@@ -279,6 +291,12 @@ pub(crate) fn get_ai_context(
             query_time,
             used_fallback: if used_fallback { Some(true) } else { None },
             fallback_message,
+            graph_stats: GraphStats {
+                entities_in_graph: graph.node_count(),
+                entities_traversed: seen.len(),
+                entities_kept,
+                output_tokens: budget.used,
+            },
         },
     })
 }

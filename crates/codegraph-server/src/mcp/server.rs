@@ -1195,6 +1195,37 @@ impl McpServer {
     async fn execute_tool(&self, name: &str, args: Option<Value>) -> Result<Value, String> {
         let args = args.unwrap_or(Value::Object(serde_json::Map::new()));
 
+        // Degradation warning: if the graph has very few nodes, the workspace
+        // probably isn't indexed. Add a warning to the response so the agent
+        // (and user) sees a quantified upgrade path rather than silently empty
+        // results. This is the "install codegraph" ad, without a separate product.
+        let degradation_warning = {
+            let graph = self.backend.graph.read().await;
+            let n = graph.node_count();
+            if n < 10 && !matches!(name, "codegraph_reindex_workspace" | "codegraph_index_directory" | "codegraph_index_files" | "codegraph_index_markdown") {
+                Some(format!(
+                    "Workspace has only {} nodes — it may not be indexed yet. \
+                     Run codegraph_reindex_workspace for full code intelligence \
+                     (typically 10-50× more results).", n
+                ))
+            } else {
+                None
+            }
+        };
+
+        let mut result = self.execute_tool_inner(name, args).await?;
+
+        // Inject warning into response if present
+        if let Some(warning) = degradation_warning {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("warning".to_string(), serde_json::json!(warning));
+            }
+        }
+
+        Ok(result)
+    }
+
+    async fn execute_tool_inner(&self, name: &str, args: Value) -> Result<Value, String> {
         match name {
             // ==================== Search Tools ====================
             "codegraph_symbol_search" => {
