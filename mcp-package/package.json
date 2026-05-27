@@ -1,6 +1,6 @@
 {
   "name": "@astudioplus/codegraph-mcp",
-  "version": "0.17.2",
+  "version": "0.17.3",
   "mcpName": "io.github.codegraph-ai/codegraph",
   "description": "CodeGraph MCP server — cross-language code intelligence with 41 tools, 38 languages",
   "author": "Andrey Vasilevsky <anvanster@gmail.com>",

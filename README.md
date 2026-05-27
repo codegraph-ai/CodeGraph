@@ -152,6 +152,8 @@ Persistent AI context across sessions — debugging insights, architectural deci
 | `memory_context` | Get memories relevant to a file/function |
 | `memory_list` / `memory_invalidate` / `memory_stats` | Browse, retire, monitor |
 
+Pairs well with [Tempera](https://github.com/anvanster/tempera) — an episodic memory system that captures transferable debugging strategies and solutions across projects. CodeGraph's memory tools store project-scoped notes; Tempera captures cross-project BKMs (best-known methods) that improve over time.
+
 ### Documentation (7)
 
 Persistent project documentation — index design docs, search them semantically, verify code matches the design, generate architecture docs from the code graph.
