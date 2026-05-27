@@ -85,6 +85,7 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
                 | "codegraph_find_dead_imports"
                 | "codegraph_get_module_summary"
                 | "codegraph_find_related_tests"
+                | "codegraph_pr_context"
         ),
         Memory => name.starts_with("codegraph_memory_")
             || name == "codegraph_index_markdown"
@@ -141,6 +142,8 @@ pub fn get_all_tools() -> Vec<Tool> {
         reindex_workspace_tool(),
         index_files_tool(),
         index_directory_tool(),
+        // PR / Change Analysis (1)
+        pr_context_tool(),
         // Docs Tools (7)
         index_markdown_tool(),
         search_docs_tool(),
@@ -1261,6 +1264,40 @@ fn find_circular_deps_tool() -> Tool {
 
 // === Docs Tools ===
 
+fn pr_context_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "baseBranch".to_string(),
+        string_prop(
+            "Base branch to diff against (default: 'main'). The tool runs \
+             git diff <baseBranch>...HEAD to find changed files.",
+        ),
+    );
+    properties.insert(
+        "compact".to_string(),
+        boolean_prop("Compact output — counts only, skip per-symbol detail", false),
+    );
+
+    Tool {
+        name: "codegraph_pr_context".to_string(),
+        description: Some(
+            "Analyze the current branch's changes against the code graph. \
+             Runs git diff to find changed files, then for each changed function: \
+             who calls it (blast radius), what tests cover it, which modules are \
+             affected. Returns a combined PR review context in one call — \
+             replaces manually running analyze_impact + find_related_tests on \
+             each file. USE WHEN: reviewing a PR, preparing a commit message, \
+             or checking what a branch might break before merging."
+                .to_string(),
+        ),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: None,
+        },
+    }
+}
+
 fn index_markdown_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
@@ -1656,14 +1693,14 @@ mod tests {
     #[test]
     fn test_get_all_tools_count() {
         let tools = get_all_tools();
-        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 7 = 41 community tools
+        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 7, PR: 1 = 42 community tools
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
         assert_eq!(
             tools.len(),
-            41,
-            "Expected 41 community tools, got {}",
+            42,
+            "Expected 42 community tools, got {}",
             tools.len()
         );
     }

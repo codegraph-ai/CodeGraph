@@ -3291,6 +3291,190 @@ impl McpServer {
                 }))
             }
 
+            "codegraph_pr_context" => {
+                let base = args
+                    .get("baseBranch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("main");
+                let compact = args
+                    .get("compact")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                // Get workspace root from the first workspace folder
+                let workspace_root = self.backend.workspace_folders
+                    .first()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| ".".to_string());
+
+                // Run git diff to find changed files
+                let diff_output = tokio::process::Command::new("git")
+                    .args(["diff", "--name-only", &format!("{}...HEAD", base)])
+                    .current_dir(&workspace_root)
+                    .output()
+                    .await
+                    .map_err(|e| format!("git diff failed: {}", e))?;
+
+                if !diff_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&diff_output.stderr);
+                    return Err(format!("git diff failed: {}", stderr.trim()));
+                }
+
+                let changed_files: Vec<String> = String::from_utf8_lossy(&diff_output.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| {
+                        let p = std::path::Path::new(&workspace_root).join(l);
+                        p.to_string_lossy().to_string()
+                    })
+                    .collect();
+
+                if changed_files.is_empty() {
+                    return Ok(serde_json::json!({
+                        "message": format!("No changed files between {} and HEAD", base),
+                        "changed_files": 0,
+                    }));
+                }
+
+                // For each changed file, find function-level nodes and collect impacts
+                let graph = self.backend.graph.read().await;
+                let mut file_impacts = Vec::new();
+                let mut all_affected_files = std::collections::HashSet::new();
+                let mut all_callers = Vec::new();
+                let mut all_tests = Vec::new();
+                let mut total_direct = 0usize;
+                let mut total_indirect = 0usize;
+                let mut highest_risk = "low";
+
+                for file in &changed_files {
+                    // Find all function nodes in this file
+                    let file_nodes: Vec<(codegraph::NodeId, String)> = graph
+                        .iter_nodes()
+                        .filter(|(_, n)| {
+                            n.node_type == codegraph::NodeType::Function
+                                && n.properties.get_string("path").map_or(false, |p| p == file.as_str())
+                        })
+                        .map(|(id, n)| {
+                            let name = crate::domain::node_props::name(n).to_string();
+                            (id, name)
+                        })
+                        .collect();
+
+                    for (node_id, func_name) in &file_nodes {
+                        // Get direct callers
+                        if let Ok(neighbors) = graph.get_neighbors(*node_id, codegraph::Direction::Incoming) {
+                            for caller_id in neighbors {
+                                if let Ok(caller) = graph.get_node(caller_id) {
+                                    let caller_name = crate::domain::node_props::name(caller).to_string();
+                                    let caller_file = caller.properties.get_string("path").unwrap_or("").to_string();
+                                    all_affected_files.insert(caller_file.clone());
+                                    if !compact {
+                                        all_callers.push(serde_json::json!({
+                                            "caller": caller_name,
+                                            "file": caller_file,
+                                            "calls": func_name,
+                                        }));
+                                    }
+                                    total_direct += 1;
+                                }
+                            }
+                        }
+
+                        // Check for test-like callers
+                        if let Ok(neighbors) = graph.get_neighbors(*node_id, codegraph::Direction::Incoming) {
+                            for caller_id in neighbors {
+                                if let Ok(caller) = graph.get_node(caller_id) {
+                                    let cname = crate::domain::node_props::name(caller).to_lowercase();
+                                    let cfile = caller.properties.get_string("path").unwrap_or("");
+                                    if cname.starts_with("test_") || cname.contains("_test")
+                                        || cfile.contains("/tests/") || cfile.contains("/test_")
+                                    {
+                                        all_tests.push(serde_json::json!({
+                                            "test": crate::domain::node_props::name(caller),
+                                            "file": cfile,
+                                            "covers": func_name,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let short_file = file.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+                    file_impacts.push(serde_json::json!({
+                        "file": short_file,
+                        "functions_changed": file_nodes.len(),
+                        "functions": file_nodes.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+                    }));
+                }
+
+                // Determine risk level
+                if total_direct > 20 {
+                    highest_risk = "high";
+                } else if total_direct > 5 {
+                    highest_risk = "medium";
+                }
+
+                // Deduplicate tests
+                let unique_tests: Vec<_> = {
+                    let mut seen = std::collections::HashSet::new();
+                    all_tests.into_iter().filter(|t| {
+                        let key = t["test"].as_str().unwrap_or("").to_string();
+                        seen.insert(key)
+                    }).collect()
+                };
+
+                // Affected modules (unique parent dirs of affected files)
+                let affected_modules: Vec<String> = {
+                    let mut mods: Vec<String> = all_affected_files.iter()
+                        .filter_map(|f| std::path::Path::new(f).parent())
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    mods.sort();
+                    mods.iter().map(|m| {
+                        m.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/")
+                    }).collect()
+                };
+
+                drop(graph);
+
+                let mut result = serde_json::json!({
+                    "base_branch": base,
+                    "changed_files": changed_files.len(),
+                    "functions_touched": file_impacts.iter()
+                        .map(|f| f["functions_changed"].as_u64().unwrap_or(0))
+                        .sum::<u64>(),
+                    "direct_callers": total_direct,
+                    "related_tests": unique_tests.len(),
+                    "affected_modules": affected_modules,
+                    "risk_level": highest_risk,
+                    "files": file_impacts,
+                    "message": format!(
+                        "PR changes {} files ({} functions). {} direct callers affected, {} tests cover the changes. Risk: {}.",
+                        changed_files.len(),
+                        file_impacts.iter().map(|f| f["functions_changed"].as_u64().unwrap_or(0)).sum::<u64>(),
+                        total_direct,
+                        unique_tests.len(),
+                        highest_risk,
+                    ),
+                });
+
+                if !compact {
+                    if let Some(obj) = result.as_object_mut() {
+                        if !all_callers.is_empty() {
+                            obj.insert("callers".to_string(), serde_json::json!(all_callers));
+                        }
+                        if !unique_tests.is_empty() {
+                            obj.insert("tests".to_string(), serde_json::json!(unique_tests));
+                        }
+                    }
+                }
+
+                Ok(result)
+            }
+
             "codegraph_list_doc_sources" => {
                 let sources = self
                     .backend
