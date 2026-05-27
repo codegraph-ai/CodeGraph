@@ -3301,54 +3301,114 @@ impl McpServer {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
-                // Get workspace root from the first workspace folder
                 let workspace_root = self.backend.workspace_folders
                     .first()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| ".".to_string());
 
-                // Run git diff to find changed files
-                let diff_output = tokio::process::Command::new("git")
+                // ── Step 1: git diff --name-only for file list ──
+                let name_output = tokio::process::Command::new("git")
                     .args(["diff", "--name-only", &format!("{}...HEAD", base)])
                     .current_dir(&workspace_root)
                     .output()
                     .await
                     .map_err(|e| format!("git diff failed: {}", e))?;
 
-                if !diff_output.status.success() {
-                    let stderr = String::from_utf8_lossy(&diff_output.stderr);
-                    return Err(format!("git diff failed: {}", stderr.trim()));
+                if !name_output.status.success() {
+                    return Err(format!("git diff failed: {}", String::from_utf8_lossy(&name_output.stderr).trim()));
                 }
 
-                let changed_files: Vec<String> = String::from_utf8_lossy(&diff_output.stdout)
+                let changed_rel: Vec<String> = String::from_utf8_lossy(&name_output.stdout)
                     .lines()
                     .filter(|l| !l.is_empty())
-                    .map(|l| {
-                        let p = std::path::Path::new(&workspace_root).join(l);
-                        p.to_string_lossy().to_string()
-                    })
+                    .map(|l| l.to_string())
                     .collect();
 
-                if changed_files.is_empty() {
+                if changed_rel.is_empty() {
                     return Ok(serde_json::json!({
                         "message": format!("No changed files between {} and HEAD", base),
                         "changed_files": 0,
                     }));
                 }
 
-                // For each changed file, find function-level nodes and collect impacts
+                let changed_abs: Vec<String> = changed_rel.iter()
+                    .map(|l| std::path::Path::new(&workspace_root).join(l).to_string_lossy().to_string())
+                    .collect();
+
+                // ── Step 2: git diff --stat for line counts ──
+                let stat_output = tokio::process::Command::new("git")
+                    .args(["diff", "--numstat", &format!("{}...HEAD", base)])
+                    .current_dir(&workspace_root)
+                    .output()
+                    .await
+                    .ok();
+                let mut lines_added = 0u64;
+                let mut lines_removed = 0u64;
+                if let Some(out) = &stat_output {
+                    for line in String::from_utf8_lossy(&out.stdout).lines() {
+                        let parts: Vec<&str> = line.split('\t').collect();
+                        if parts.len() >= 2 {
+                            lines_added += parts[0].parse::<u64>().unwrap_or(0);
+                            lines_removed += parts[1].parse::<u64>().unwrap_or(0);
+                        }
+                    }
+                }
+
+                // ── Step 3: git diff with function context for change classification ──
+                let diff_full = tokio::process::Command::new("git")
+                    .args(["diff", "-U0", "--no-color", &format!("{}...HEAD", base)])
+                    .current_dir(&workspace_root)
+                    .output()
+                    .await
+                    .ok();
+
+                // Parse diff hunks to find which line ranges changed per file
+                let mut file_changed_lines: std::collections::HashMap<String, Vec<(u32, u32)>> =
+                    std::collections::HashMap::new();
+                if let Some(out) = &diff_full {
+                    let diff_text = String::from_utf8_lossy(&out.stdout);
+                    let mut current_file: Option<String> = None;
+                    for line in diff_text.lines() {
+                        if line.starts_with("+++ b/") {
+                            let rel = &line[6..];
+                            current_file = Some(
+                                std::path::Path::new(&workspace_root)
+                                    .join(rel)
+                                    .to_string_lossy()
+                                    .to_string(),
+                            );
+                        } else if line.starts_with("@@ ") {
+                            // Parse @@ -old,count +new,count @@
+                            if let Some(ref f) = current_file {
+                                if let Some(plus) = line.find('+') {
+                                    let after = &line[plus + 1..];
+                                    let end = after.find(' ').unwrap_or(after.len());
+                                    let range = &after[..end];
+                                    let parts: Vec<&str> = range.split(',').collect();
+                                    let start: u32 = parts[0].parse().unwrap_or(0);
+                                    let count: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                                    file_changed_lines
+                                        .entry(f.clone())
+                                        .or_default()
+                                        .push((start, start + count));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Step 4: graph analysis per changed function ──
                 let graph = self.backend.graph.read().await;
                 let mut file_impacts = Vec::new();
-                let mut all_affected_files = std::collections::HashSet::new();
                 let mut all_callers = Vec::new();
                 let mut all_tests = Vec::new();
+                let mut untested_functions = Vec::new();
                 let mut total_direct = 0usize;
-                let mut total_indirect = 0usize;
-                let mut highest_risk = "low";
+                let mut all_affected_files = std::collections::HashSet::new();
+                let mut func_details = Vec::new();
 
-                for file in &changed_files {
-                    // Find all function nodes in this file
-                    let file_nodes: Vec<(codegraph::NodeId, String)> = graph
+                for (idx, file) in changed_abs.iter().enumerate() {
+                    let file_nodes: Vec<(codegraph::NodeId, String, u32, u32)> = graph
                         .iter_nodes()
                         .filter(|(_, n)| {
                             n.node_type == codegraph::NodeType::Function
@@ -3356,119 +3416,245 @@ impl McpServer {
                         })
                         .map(|(id, n)| {
                             let name = crate::domain::node_props::name(n).to_string();
-                            (id, name)
+                            let ls = crate::domain::node_props::line_start(n);
+                            let le = crate::domain::node_props::line_end(n);
+                            (id, name, ls, le)
                         })
                         .collect();
 
-                    for (node_id, func_name) in &file_nodes {
-                        // Get direct callers
+                    let changed_ranges = file_changed_lines.get(file);
+
+                    for (node_id, func_name, line_start, line_end) in &file_nodes {
+                        // #85: Classify change type based on diff hunks
+                        let change_type = if let Some(ranges) = changed_ranges {
+                            let func_touched = ranges.iter().any(|(s, e)| {
+                                *s <= *line_end && *e >= *line_start
+                            });
+                            let sig_line_touched = ranges.iter().any(|(s, e)| {
+                                *s <= *line_start && *e >= *line_start
+                            });
+                            if !func_touched {
+                                "unchanged"
+                            } else if sig_line_touched {
+                                "signature_changed"
+                            } else {
+                                "body_changed"
+                            }
+                        } else {
+                            "unknown"
+                        };
+
+                        if change_type == "unchanged" {
+                            continue;
+                        }
+
+                        // Collect callers
+                        let mut caller_count = 0u32;
+                        let mut has_test_caller = false;
                         if let Ok(neighbors) = graph.get_neighbors(*node_id, codegraph::Direction::Incoming) {
                             for caller_id in neighbors {
                                 if let Ok(caller) = graph.get_node(caller_id) {
-                                    let caller_name = crate::domain::node_props::name(caller).to_string();
-                                    let caller_file = caller.properties.get_string("path").unwrap_or("").to_string();
-                                    all_affected_files.insert(caller_file.clone());
-                                    if !compact {
-                                        all_callers.push(serde_json::json!({
-                                            "caller": caller_name,
-                                            "file": caller_file,
-                                            "calls": func_name,
+                                    let cname = crate::domain::node_props::name(caller);
+                                    let cfile = caller.properties.get_string("path").unwrap_or("");
+                                    let is_test = cname.to_lowercase().starts_with("test_")
+                                        || cname.to_lowercase().contains("_test")
+                                        || cfile.contains("/tests/")
+                                        || cfile.contains("/test_");
+
+                                    if is_test {
+                                        has_test_caller = true;
+                                        all_tests.push(serde_json::json!({
+                                            "test": cname, "file": cfile, "covers": func_name,
                                         }));
+                                    } else {
+                                        all_affected_files.insert(cfile.to_string());
+                                        caller_count += 1;
+                                        if !compact {
+                                            all_callers.push(serde_json::json!({
+                                                "caller": cname, "file": cfile,
+                                                "calls": func_name, "breaking": change_type == "signature_changed",
+                                            }));
+                                        }
                                     }
-                                    total_direct += 1;
                                 }
                             }
                         }
+                        total_direct += caller_count as usize;
 
-                        // Check for test-like callers
-                        if let Ok(neighbors) = graph.get_neighbors(*node_id, codegraph::Direction::Incoming) {
-                            for caller_id in neighbors {
-                                if let Ok(caller) = graph.get_node(caller_id) {
-                                    let cname = crate::domain::node_props::name(caller).to_lowercase();
-                                    let cfile = caller.properties.get_string("path").unwrap_or("");
-                                    if cname.starts_with("test_") || cname.contains("_test")
-                                        || cfile.contains("/tests/") || cfile.contains("/test_")
-                                    {
-                                        all_tests.push(serde_json::json!({
-                                            "test": crate::domain::node_props::name(caller),
-                                            "file": cfile,
-                                            "covers": func_name,
-                                        }));
-                                    }
-                                }
-                            }
+                        // #87: Test gap — function has no test callers
+                        if !has_test_caller {
+                            untested_functions.push(serde_json::json!({
+                                "function": func_name,
+                                "file": &changed_rel[idx],
+                                "change_type": change_type,
+                                "callers": caller_count,
+                            }));
+                        }
+
+                        // #88: Complexity (current value from graph, if stored)
+                        let complexity = graph.get_node(*node_id).ok()
+                            .and_then(|n| n.properties.get_string("cyclomatic_complexity")
+                                .and_then(|s| s.parse::<u32>().ok()))
+                            .unwrap_or(0);
+
+                        if !compact {
+                            func_details.push(serde_json::json!({
+                                "name": func_name,
+                                "file": &changed_rel[idx],
+                                "change_type": change_type,
+                                "callers": caller_count,
+                                "has_tests": has_test_caller,
+                                "complexity": complexity,
+                            }));
                         }
                     }
 
-                    let short_file = file.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+                    let rel = &changed_rel[idx];
+                    let funcs_in_file: Vec<&str> = file_nodes.iter().map(|(_, n, _, _)| n.as_str()).collect();
                     file_impacts.push(serde_json::json!({
-                        "file": short_file,
-                        "functions_changed": file_nodes.len(),
-                        "functions": file_nodes.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+                        "file": rel,
+                        "functions_changed": funcs_in_file.len(),
+                        "functions": funcs_in_file,
                     }));
                 }
 
-                // Determine risk level
-                if total_direct > 20 {
-                    highest_risk = "high";
-                } else if total_direct > 5 {
-                    highest_risk = "medium";
-                }
-
-                // Deduplicate tests
+                // Dedup tests
                 let unique_tests: Vec<_> = {
                     let mut seen = std::collections::HashSet::new();
                     all_tests.into_iter().filter(|t| {
-                        let key = t["test"].as_str().unwrap_or("").to_string();
-                        seen.insert(key)
+                        seen.insert(t["test"].as_str().unwrap_or("").to_string())
                     }).collect()
                 };
 
-                // Affected modules (unique parent dirs of affected files)
+                // Affected modules
                 let affected_modules: Vec<String> = {
                     let mut mods: Vec<String> = all_affected_files.iter()
                         .filter_map(|f| std::path::Path::new(f).parent())
-                        .map(|p| p.to_string_lossy().to_string())
+                        .map(|p| {
+                            let s = p.to_string_lossy().to_string();
+                            s.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/")
+                        })
                         .collect::<std::collections::HashSet<_>>()
                         .into_iter()
                         .collect();
                     mods.sort();
-                    mods.iter().map(|m| {
-                        m.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/")
-                    }).collect()
+                    mods
                 };
+
+                // #86: Check indexed docs for stale-doc warnings
+                let mut stale_doc_warnings = Vec::new();
+                for rel_file in &changed_rel {
+                    let stem = std::path::Path::new(rel_file)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !stem.is_empty() {
+                        if let Ok(results) = self.backend.memory_manager.search_docs(&stem, 1).await {
+                            for r in results {
+                                if r.score > 0.5 {
+                                    stale_doc_warnings.push(serde_json::json!({
+                                        "changed_file": rel_file,
+                                        "doc_source": r.chunk.source_file,
+                                        "doc_section": r.chunk.heading_path.join(" > "),
+                                        "relevance": (r.score * 100.0).round() / 100.0,
+                                        "warning": format!(
+                                            "PR modifies '{}' which is described in '{}' section '{}'. Doc may need updating.",
+                                            rel_file, r.chunk.source_file, r.chunk.heading_path.join(" > ")
+                                        ),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // #90: git blame for reviewer hints
+                let mut blame_authors: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                for rel_file in &changed_rel {
+                    if let Ok(blame_out) = tokio::process::Command::new("git")
+                        .args(["blame", "--porcelain", rel_file])
+                        .current_dir(&workspace_root)
+                        .output()
+                        .await
+                    {
+                        if blame_out.status.success() {
+                            for line in String::from_utf8_lossy(&blame_out.stdout).lines() {
+                                if let Some(author) = line.strip_prefix("author ") {
+                                    *blame_authors.entry(author.trim().to_string()).or_default() += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut top_authors: Vec<_> = blame_authors.into_iter().collect();
+                top_authors.sort_by(|a, b| b.1.cmp(&a.1));
+                let reviewer_hints: Vec<_> = top_authors.iter().take(5)
+                    .map(|(name, lines)| serde_json::json!({"author": name, "lines_owned": lines}))
+                    .collect();
 
                 drop(graph);
 
+                // Risk level
+                let risk_level = if total_direct > 20 || untested_functions.len() > 5 {
+                    "high"
+                } else if total_direct > 5 || untested_functions.len() > 2 {
+                    "medium"
+                } else {
+                    "low"
+                };
+
+                // #89: Commit-message hint from module locations
+                let primary_module = affected_modules.first()
+                    .and_then(|m| m.rsplit('/').next())
+                    .unwrap_or("core");
+                let has_new = func_details.iter().any(|f| f["change_type"] == "signature_changed");
+                let commit_prefix = if has_new { "feat" } else { "fix" };
+                let commit_hint = format!("{}({}): <describe the change>", commit_prefix, primary_module);
+
+                let total_functions: u64 = file_impacts.iter()
+                    .map(|f| f["functions_changed"].as_u64().unwrap_or(0))
+                    .sum();
+
                 let mut result = serde_json::json!({
                     "base_branch": base,
-                    "changed_files": changed_files.len(),
-                    "functions_touched": file_impacts.iter()
-                        .map(|f| f["functions_changed"].as_u64().unwrap_or(0))
-                        .sum::<u64>(),
+                    "changed_files": changed_rel.len(),
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                    "functions_touched": total_functions,
                     "direct_callers": total_direct,
                     "related_tests": unique_tests.len(),
+                    "untested_functions": untested_functions.len(),
                     "affected_modules": affected_modules,
-                    "risk_level": highest_risk,
+                    "risk_level": risk_level,
+                    "commit_hint": commit_hint,
                     "files": file_impacts,
                     "message": format!(
-                        "PR changes {} files ({} functions). {} direct callers affected, {} tests cover the changes. Risk: {}.",
-                        changed_files.len(),
-                        file_impacts.iter().map(|f| f["functions_changed"].as_u64().unwrap_or(0)).sum::<u64>(),
-                        total_direct,
-                        unique_tests.len(),
-                        highest_risk,
+                        "PR changes {} files (+{}/-{}, {} functions). {} direct callers, {} tests, {} untested. Risk: {}.",
+                        changed_rel.len(), lines_added, lines_removed, total_functions,
+                        total_direct, unique_tests.len(), untested_functions.len(), risk_level,
                     ),
                 });
 
-                if !compact {
-                    if let Some(obj) = result.as_object_mut() {
+                if let Some(obj) = result.as_object_mut() {
+                    if !compact {
+                        if !func_details.is_empty() {
+                            obj.insert("function_details".to_string(), serde_json::json!(func_details));
+                        }
                         if !all_callers.is_empty() {
                             obj.insert("callers".to_string(), serde_json::json!(all_callers));
                         }
                         if !unique_tests.is_empty() {
                             obj.insert("tests".to_string(), serde_json::json!(unique_tests));
                         }
+                    }
+                    if !untested_functions.is_empty() {
+                        obj.insert("test_gaps".to_string(), serde_json::json!(untested_functions));
+                    }
+                    if !stale_doc_warnings.is_empty() {
+                        obj.insert("stale_docs".to_string(), serde_json::json!(stale_doc_warnings));
+                    }
+                    if !reviewer_hints.is_empty() {
+                        obj.insert("suggested_reviewers".to_string(), serde_json::json!(reviewer_hints));
                     }
                 }
 
