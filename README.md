@@ -99,7 +99,7 @@ Plus glob patterns for binary archives, native libraries, OS metadata, and **sec
 
 ---
 
-## Tools (41 community + 27 pro, 17 security)
+## Tools (42 community + 27 pro, 17 security)
 
 ### Code Analysis (11)
 
@@ -154,6 +154,12 @@ Persistent AI context across sessions — debugging insights, architectural deci
 
 Pairs well with [Tempera](https://github.com/anvanster/tempera) — an episodic memory system that captures transferable debugging strategies and solutions across projects. CodeGraph's memory tools store project-scoped notes; Tempera captures cross-project BKMs (best-known methods) that improve over time.
 
+### PR / Change Analysis (1)
+
+| Tool | What it does |
+|------|-------------|
+| `pr_context` | **One-call PR review.** Runs git diff against base branch, finds changed functions in the graph, reports: blast radius (callers), test coverage + gaps, affected modules, diff-aware change classification (signature vs body), stale-doc warnings, complexity, commit-message hint, suggested reviewers from git blame. |
+
 ### Documentation (7)
 
 Persistent project documentation — index design docs, search them semantically, verify code matches the design, generate architecture docs from the code graph.
@@ -207,10 +213,21 @@ codegraph_memory_store(kind: "debug_context", title: "Nginx body size limit",
   agentSource: "claude")
 ```
 
-**Get AI context with automatic design doc augmentation:**
+**Get AI context with graph compression stats + design doc augmentation:**
 ```
 codegraph_get_ai_context(uri: "file:///projects/myapp/src/auth.rs", line: 42, intent: "modify")
-// → Code context + design_context section from indexed docs mentioning "auth"
+// → Code context + graphStats: {entitiesInGraph: 13555, entitiesTraversed: 47, entitiesKept: 8}
+// → design_context section from indexed docs mentioning "auth"
+```
+
+**Review a PR — blast radius, test gaps, stale docs, reviewers in one call:**
+```
+codegraph_pr_context(baseBranch: "main")
+// → "PR changes 4 files (+263/-77, 12 functions). 37 direct callers, 8 tests, 3 untested. Risk: medium."
+// → test_gaps: [refresh_token, revoke_session] — functions with 0 test callers
+// → stale_docs: ["auth.rs described in ARCHITECTURE.md > Authentication — doc may need updating"]
+// → suggested_reviewers: [{author: "anvanster", lines_owned: 3200}]
+// → commit_hint: "feat(mcp): <describe the change>"
 ```
 
 **Narrow the tool surface for chatty sessions:**
