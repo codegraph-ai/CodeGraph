@@ -11,6 +11,8 @@
 /// happen in the Rust binary — the JS wrapper handles PostHog ingestion.
 ///
 /// Silently dropped if serialization fails (never blocks the server).
+/// The wrapper parses these lines from stderr; stdout stays reserved for
+/// the JSON-RPC channel.
 fn emit_tel(value: serde_json::Value) {
     if let Ok(json) = serde_json::to_string(&value) {
         eprintln!("TEL: {json}");
