@@ -1277,6 +1277,17 @@ fn pr_context_tool() -> Tool {
         "compact".to_string(),
         boolean_prop("Compact output — counts only, skip per-symbol detail", false),
     );
+    properties.insert(
+        "format".to_string(),
+        enum_prop(
+            "Output format. 'json' (default) returns structured data. \
+             'markdown' returns a ready-to-post PR comment (risk summary, \
+             blast radius, test gaps, stale docs, suggested reviewers) — \
+             ideal for posting directly to a GitHub PR via a CI action.",
+            vec!["json", "markdown"],
+            Some("json"),
+        ),
+    );
 
     Tool {
         name: "codegraph_pr_context".to_string(),

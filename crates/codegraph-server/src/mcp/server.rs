@@ -55,6 +55,10 @@ pub struct McpBackend {
     pub indexer: Arc<Indexer>,
     /// Index state for hash persistence (shared with indexer)
     index_state: Arc<Mutex<IndexState>>,
+    /// Skip embedding generation — graph + structural tools only.
+    /// For CI / one-shot runs where semantic search isn't needed.
+    /// Avoids loading the ~100MB ONNX model entirely.
+    pub graph_only: bool,
 }
 
 impl McpBackend {
@@ -146,6 +150,7 @@ impl McpBackend {
             max_files,
             indexer,
             index_state,
+            graph_only: false,
         }
     }
 
@@ -584,7 +589,12 @@ impl McpBackend {
         if result.files_parsed > 0 || graph_has_data {
             self.query_engine.build_indexes().await;
 
-            if let Some(engine) = self.memory_manager.get_vector_engine().await {
+            // Graph-only mode: skip all embedding work. The ONNX model is
+            // never loaded. Structural tools (pr_context, get_callers,
+            // analyze_impact, etc.) work on the graph alone.
+            if self.graph_only {
+                tracing::info!("Graph-only mode — skipping embedding generation");
+            } else if let Some(engine) = self.memory_manager.get_vector_engine().await {
                 self.query_engine.set_vector_engine(engine).await;
 
                 // Load persisted vectors synchronously (fast — just reads from RocksDB)
@@ -861,6 +871,24 @@ impl McpServer {
     pub fn with_tool_profile(mut self, profile: ToolProfile) -> Self {
         self.tool_profile = profile;
         self
+    }
+
+    /// Skip embedding generation (graph + structural tools only).
+    /// Avoids loading the ONNX model. For CI / one-shot runs.
+    pub fn with_graph_only(mut self, graph_only: bool) -> Self {
+        self.backend.graph_only = graph_only;
+        self
+    }
+
+    /// Index the workspace once, run a single tool, return its JSON result.
+    /// Used by `--run-tool` for CI / scripting — no MCP stdio handshake.
+    pub async fn run_single_tool(
+        &mut self,
+        tool_name: &str,
+        tool_args: Option<Value>,
+    ) -> Result<Value, String> {
+        self.ensure_indexed().await;
+        self.execute_tool(tool_name, tool_args).await
     }
 
     /// Ensure workspace is indexed (lazy — runs on first tool call)
@@ -3300,6 +3328,11 @@ impl McpServer {
                     .get("compact")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let as_markdown = args
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .map(|f| f == "markdown")
+                    .unwrap_or(false);
 
                 let workspace_root = self.backend.workspace_folders
                     .first()
@@ -3423,6 +3456,7 @@ impl McpServer {
                         .collect();
 
                     let changed_ranges = file_changed_lines.get(file);
+                    let mut changed_func_names: Vec<&str> = Vec::new();
 
                     for (node_id, func_name, line_start, line_end) in &file_nodes {
                         // #85: Classify change type based on diff hunks
@@ -3447,6 +3481,7 @@ impl McpServer {
                         if change_type == "unchanged" {
                             continue;
                         }
+                        changed_func_names.push(func_name.as_str());
 
                         // Collect callers
                         let mut caller_count = 0u32;
@@ -3481,8 +3516,14 @@ impl McpServer {
                         }
                         total_direct += caller_count as usize;
 
-                        // #87: Test gap — function has no test callers
-                        if !has_test_caller {
+                        // #87: Test gap — function has no test callers.
+                        // Skip functions that ARE tests (they don't need
+                        // their own coverage) and trivial getters/setters.
+                        let fn_is_test = func_name.to_lowercase().starts_with("test_")
+                            || func_name.to_lowercase().contains("_test")
+                            || changed_rel[idx].contains("/tests/")
+                            || changed_rel[idx].contains("_test.");
+                        if !has_test_caller && !fn_is_test {
                             untested_functions.push(serde_json::json!({
                                 "function": func_name,
                                 "file": &changed_rel[idx],
@@ -3510,11 +3551,10 @@ impl McpServer {
                     }
 
                     let rel = &changed_rel[idx];
-                    let funcs_in_file: Vec<&str> = file_nodes.iter().map(|(_, n, _, _)| n.as_str()).collect();
                     file_impacts.push(serde_json::json!({
                         "file": rel,
-                        "functions_changed": funcs_in_file.len(),
-                        "functions": funcs_in_file,
+                        "functions_changed": changed_func_names.len(),
+                        "functions": changed_func_names,
                     }));
                 }
 
@@ -3523,6 +3563,20 @@ impl McpServer {
                     let mut seen = std::collections::HashSet::new();
                     all_tests.into_iter().filter(|t| {
                         seen.insert(t["test"].as_str().unwrap_or("").to_string())
+                    }).collect()
+                };
+
+                // Dedup test gaps by (function, file) — incremental indexing
+                // can leave duplicate function nodes in the graph.
+                let untested_functions: Vec<_> = {
+                    let mut seen = std::collections::HashSet::new();
+                    untested_functions.into_iter().filter(|f| {
+                        let key = format!(
+                            "{}::{}",
+                            f["function"].as_str().unwrap_or(""),
+                            f["file"].as_str().unwrap_or(""),
+                        );
+                        seen.insert(key)
                     }).collect()
                 };
 
@@ -3656,6 +3710,86 @@ impl McpServer {
                     if !reviewer_hints.is_empty() {
                         obj.insert("suggested_reviewers".to_string(), serde_json::json!(reviewer_hints));
                     }
+                }
+
+                if as_markdown {
+                    let risk_emoji = match risk_level {
+                        "high" => "🔴",
+                        "medium" => "🟡",
+                        _ => "🟢",
+                    };
+                    let mut md = String::new();
+                    md.push_str("## 🔍 CodeGraph PR Review\n\n");
+                    md.push_str(&format!(
+                        "**{} files changed** (+{}/−{}, {} functions) · Risk: {} **{}**\n\n",
+                        changed_rel.len(), lines_added, lines_removed, total_functions,
+                        risk_emoji, risk_level,
+                    ));
+
+                    if total_direct > 0 {
+                        md.push_str(&format!(
+                            "### Blast radius\n{} direct caller{} affected",
+                            total_direct, if total_direct == 1 { "" } else { "s" },
+                        ));
+                        if !affected_modules.is_empty() {
+                            let mods: Vec<String> = affected_modules.iter().take(5)
+                                .map(|m| format!("`{}`", m)).collect();
+                            md.push_str(&format!(" across {}", mods.join(", ")));
+                        }
+                        md.push_str("\n\n");
+                    }
+
+                    if !untested_functions.is_empty() {
+                        md.push_str(&format!(
+                            "### ⚠️ Test gaps ({} function{}, 0 coverage)\n",
+                            untested_functions.len(),
+                            if untested_functions.len() == 1 { "" } else { "s" },
+                        ));
+                        for f in untested_functions.iter().take(10) {
+                            md.push_str(&format!(
+                                "- `{}` ({}) — {}\n",
+                                f["function"].as_str().unwrap_or("?"),
+                                f["file"].as_str().unwrap_or("?"),
+                                f["change_type"].as_str().unwrap_or("changed"),
+                            ));
+                        }
+                        if untested_functions.len() > 10 {
+                            md.push_str(&format!("- …and {} more\n", untested_functions.len() - 10));
+                        }
+                        md.push('\n');
+                    }
+
+                    if !stale_doc_warnings.is_empty() {
+                        md.push_str("### 📝 Docs may be stale\n");
+                        for w in stale_doc_warnings.iter().take(5) {
+                            md.push_str(&format!(
+                                "- `{}` is described in {} § {}\n",
+                                w["changed_file"].as_str().unwrap_or("?"),
+                                w["doc_source"].as_str().unwrap_or("?"),
+                                w["doc_section"].as_str().unwrap_or("?"),
+                            ));
+                        }
+                        md.push('\n');
+                    }
+
+                    if !reviewer_hints.is_empty() {
+                        let revs: Vec<String> = reviewer_hints.iter()
+                            .map(|r| format!(
+                                "{} ({} lines)",
+                                r["author"].as_str().unwrap_or("?"),
+                                r["lines_owned"].as_u64().unwrap_or(0),
+                            ))
+                            .collect();
+                        md.push_str(&format!("### Suggested reviewers\n{}\n\n", revs.join(", ")));
+                    }
+
+                    md.push_str(&format!(
+                        "<sub>Suggested commit: `{}` · {} tests cover the changes</sub>\n",
+                        commit_hint, unique_tests.len(),
+                    ));
+                    md.push_str("<sub>🤖 Generated by [CodeGraph](https://github.com/codegraph-ai/CodeGraph)</sub>\n");
+
+                    return Ok(serde_json::json!({ "markdown": md }));
                 }
 
                 Ok(result)

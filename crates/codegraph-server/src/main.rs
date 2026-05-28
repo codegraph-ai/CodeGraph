@@ -72,6 +72,25 @@ struct Args {
     /// MCP mode only — LSP mode ignores this.
     #[arg(long)]
     profile: Option<String>,
+
+    /// Skip embedding generation — build the graph and serve structural
+    /// tools only. The ONNX model is never loaded (faster startup, lower
+    /// memory, ~10-50× faster indexing). Semantic search and similarity
+    /// tools are unavailable. Ideal for CI / one-shot graph queries.
+    #[arg(long)]
+    graph_only: bool,
+
+    /// One-shot mode: index the workspace, run a single tool, print its
+    /// JSON result to stdout, and exit. No MCP stdio handshake. Pair with
+    /// --tool-args for arguments and --graph-only for CI speed. Example:
+    ///   codegraph-server --graph-only --run-tool codegraph_pr_context \
+    ///     --tool-args '{"baseBranch":"main","format":"markdown"}'
+    #[arg(long)]
+    run_tool: Option<String>,
+
+    /// JSON arguments for --run-tool (default: {}).
+    #[arg(long, default_value = "{}")]
+    tool_args: String,
 }
 
 /// Re-entrancy guard for the panic hook. A second panic during hook
@@ -168,6 +187,53 @@ async fn main() {
     // before any RocksDB open so the LOCK release path is wired up first.
     spawn_signal_listeners();
 
+    // One-shot tool mode: index, run a single tool, print JSON, exit.
+    if let Some(tool_name) = args.run_tool.clone() {
+        let workspaces = if args.workspace.is_empty() {
+            vec![std::env::current_dir().expect("Failed to get current directory")]
+        } else {
+            args.workspace.clone()
+        };
+        let embedding_model = match args.embedding_model.as_str() {
+            "jina-code-v2" => codegraph_memory::CodeGraphEmbeddingModel::JinaCodeV2,
+            "granite-97m" | "granite" | "granite-97m-multilingual-r2" => {
+                codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2
+            }
+            _ => codegraph_memory::CodeGraphEmbeddingModel::BgeSmall,
+        };
+        let tool_args: serde_json::Value = serde_json::from_str(&args.tool_args)
+            .unwrap_or_else(|e| {
+                eprintln!("Invalid --tool-args JSON: {e}");
+                std::process::exit(2);
+            });
+
+        let mut server = codegraph_server::mcp::McpServer::new(
+            workspaces,
+            args.exclude.clone(),
+            args.max_files,
+            embedding_model,
+            args.full_body_embedding,
+        )
+        .with_graph_only(args.graph_only);
+
+        match server.run_single_tool(&tool_name, Some(tool_args)).await {
+            Ok(result) => {
+                // If the tool returned a markdown field, print it raw —
+                // CI pipes it straight into a PR comment. Otherwise print JSON.
+                if let Some(md) = result.get("markdown").and_then(|v| v.as_str()) {
+                    println!("{md}");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+                }
+            }
+            Err(e) => {
+                eprintln!("Tool '{tool_name}' failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if args.mcp {
         // MCP mode
         let workspaces = if args.workspace.is_empty() {
@@ -211,7 +277,8 @@ async fn main() {
             embedding_model,
             args.full_body_embedding,
         )
-        .with_tool_profile(tool_profile);
+        .with_tool_profile(tool_profile)
+        .with_graph_only(args.graph_only);
         if let Err(e) = server.run().await {
             tracing::error!("MCP server error: {}", e);
             std::process::exit(1);

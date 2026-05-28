@@ -47,6 +47,26 @@ to grep / multi-file reads. Maps natural-language intent to the right
 Setup is `cp <agent>/codegraph.md ~/<agent>/` (one line per agent — see
 the rules repo's README).
 
+### GitHub Action — PR review in CI
+
+Drop a workflow into your repo to get an automatic code-graph analysis
+comment on every PR — blast radius, test gaps, stale docs, suggested
+reviewers. Runs **graph-only** (no embeddings, no ONNX model), so it's
+fast and needs no API keys — just the built-in `GITHUB_TOKEN`.
+
+Copy [`.github/workflows/codegraph-pr.yml`](.github/workflows/codegraph-pr.yml)
+into your repo. The core invocation is a single command:
+
+```bash
+codegraph-server --graph-only \
+  --run-tool codegraph_pr_context \
+  --tool-args '{"baseBranch":"main","format":"markdown"}'
+```
+
+This prints a ready-to-post markdown comment. The `--graph-only` flag
+skips embedding generation (10-50× faster indexing); `--run-tool` runs
+one tool and exits without the MCP stdio handshake — ideal for scripting.
+
 ---
 
 ## Configuration
@@ -61,6 +81,8 @@ the rules repo's README).
 | `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
 | `--max-files <n>` | 5000 | Maximum files to index |
 | `--profile <name>` | `all` | Filter the exposed MCP tool surface to a named subset (see below) |
+| `--graph-only` | off | Skip embedding generation — build the graph and serve structural tools only. No ONNX model load, 10-50× faster indexing. Semantic search unavailable. For CI / one-shot graph queries. |
+| `--run-tool <name>` | — | One-shot mode: index, run a single tool, print its result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
 
 #### `--profile` — narrow the MCP tool surface
 
