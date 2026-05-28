@@ -3341,6 +3341,36 @@ impl McpServer {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| ".".to_string());
 
+                // Resolve the base ref. In CI (GitHub Actions etc.) the
+                // checkout is a detached HEAD and the base branch only
+                // exists as a remote-tracking ref (origin/main), not a
+                // local branch. Try the bare ref first (works locally),
+                // then fall back to origin/<ref> (works in CI).
+                let base = {
+                    let probe = tokio::process::Command::new("git")
+                        .args(["rev-parse", "--verify", "--quiet", base])
+                        .current_dir(&workspace_root)
+                        .output()
+                        .await;
+                    let bare_ok = probe.map(|o| o.status.success()).unwrap_or(false);
+                    if bare_ok {
+                        base.to_string()
+                    } else {
+                        let remote = format!("origin/{}", base);
+                        let probe2 = tokio::process::Command::new("git")
+                            .args(["rev-parse", "--verify", "--quiet", &remote])
+                            .current_dir(&workspace_root)
+                            .output()
+                            .await;
+                        if probe2.map(|o| o.status.success()).unwrap_or(false) {
+                            remote
+                        } else {
+                            base.to_string() // let the diff surface the error
+                        }
+                    }
+                };
+                let base = base.as_str();
+
                 // ── Step 1: git diff --name-only for file list ──
                 let name_output = tokio::process::Command::new("git")
                     .args(["diff", "--name-only", &format!("{}...HEAD", base)])

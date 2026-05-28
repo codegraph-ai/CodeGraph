@@ -35,12 +35,25 @@ jobs:
         run: |
           # Resolve the npm-installed binary for this platform
           BIN="$(npm root -g)/@astudioplus/codegraph-mcp/bin/codegraph-server-linux-x64"
-          chmod +x "$BIN"
-          "$BIN" \
-            --graph-only \
-            --run-tool codegraph_pr_context \
-            --tool-args "{\"baseBranch\":\"${{ github.base_ref }}\",\"format\":\"markdown\"}" \
-            > review.md 2>/dev/null || echo "CodeGraph review failed" > review.md
+          # stderr → log (visible in the Actions run); stdout → comment body
+          # Use origin/<base> — in a PR checkout the base branch exists as
+          # a remote-tracking ref, not a local branch. (codegraph 0.17.6+
+          # auto-resolves this, but origin/ works on all versions.)
+          if "$BIN" \
+              --graph-only \
+              --run-tool codegraph_pr_context \
+              --tool-args "{\"baseBranch\":\"origin/${{ github.base_ref }}\",\"format\":\"markdown\"}" \
+              > review.md 2> review.err; then
+            echo "CodeGraph review succeeded"
+          else
+            echo "::warning::CodeGraph review failed — see stderr below"
+            cat review.err
+            {
+              echo "## 🔍 CodeGraph PR Review"
+              echo ""
+              echo "Review could not be generated for this PR. <sub>(CodeGraph)</sub>"
+            } > review.md
+          fi
 
       - name: Post or update PR comment
         uses: actions/github-script@v7
