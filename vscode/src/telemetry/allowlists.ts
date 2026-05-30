@@ -106,7 +106,13 @@ export const ERROR_CATEGORIES = [
     'timeout',
     'cancelled',
     'server_unavailable',
+    'connection_lost',
     'null_response',
+    'not_indexed',
+    'not_found',
+    'invalid_params',
+    'internal_error',
+    'parse_error',
     'rpc_error',
     'other',
 ] as const;
@@ -115,24 +121,91 @@ export type ErrorCategory = (typeof ERROR_CATEGORIES)[number];
 /**
  * Map an arbitrary error/string to a categorical bucket. The raw message
  * is NEVER returned — only one of the enum values above.
+ *
+ * Prefers the structured JSON-RPC `code` (vscode `ResponseError` carries a
+ * numeric `.code`) since it's stable across locales; falls back to message
+ * matching. The previous version collapsed almost everything to `'other'`
+ * (telemetry showed 100% `other`), which made tool.error untriageable.
  */
 export function categorizeError(err: unknown): ErrorCategory {
-    const message = String(err).toLowerCase();
+    const code =
+        typeof err === 'object' && err !== null && typeof (err as { code?: unknown }).code === 'number'
+            ? ((err as { code: number }).code)
+            : undefined;
+    if (code !== undefined) {
+        switch (code) {
+            case -32700:
+                return 'parse_error';
+            case -32602:
+                return 'invalid_params';
+            case -32603:
+                return 'internal_error';
+            case -32800: // RequestCancelled
+            case -32801: // ContentModified
+            case -32802: // ServerCancelled
+                return 'cancelled';
+        }
+    }
+
+    const message = String((err as { message?: unknown } | undefined)?.message ?? err).toLowerCase();
+
+    // Connection / pipe death — the server process died mid-request. Same
+    // failure family as the dominant spawn_fail hints (EPIPE, stream
+    // destroyed, connection disposed); see extension.ts errorHint.
+    if (
+        message.includes('epipe') ||
+        message.includes('write after') ||
+        message.includes('stream was destroyed') ||
+        message.includes('connection got disposed') ||
+        message.includes('connection is disposed') ||
+        message.includes('pending response rejected') ||
+        message.includes('socket hang up')
+    )
+        return 'connection_lost';
+
     if (message.includes('cancel')) return 'cancelled';
     if (message.includes('timeout') || message.includes('timed out')) return 'timeout';
-    if (message.includes('temporarily unavailable')) return 'server_unavailable';
+    if (
+        message.includes('temporarily unavailable') ||
+        message.includes('restarting') ||
+        message.includes('not running')
+    )
+        return 'server_unavailable';
     if (
         message.includes('returned null') ||
         message.includes('null —') ||
         message.includes('null -')
     )
         return 'null_response';
+    if (
+        message.includes('not indexed') ||
+        message.includes('no index') ||
+        message.includes('index is empty')
+    )
+        return 'not_indexed';
+    if (
+        message.includes('not found') ||
+        message.includes('no such') ||
+        message.includes('no results') ||
+        message.includes('does not exist') ||
+        message.includes('unknown symbol')
+    )
+        return 'not_found';
+    if (
+        message.includes('invalid param') ||
+        message.includes('missing required') ||
+        message.includes('bad request') ||
+        message.includes('invalid argument')
+    )
+        return 'invalid_params';
+    if (message.includes('panic') || message.includes('internal error')) return 'internal_error';
+    if (message.includes('parse error') || message.includes('failed to parse')) return 'parse_error';
     if (message.includes('rpc') || message.includes('jsonrpc')) return 'rpc_error';
     return 'other';
 }
 
 /** Activation outcomes from `client.start()`. */
-export const ACTIVATION_OUTCOMES = ['ok', 'spawn_fail', 'stdio_fail', 'timeout'] as const;
+export const ACTIVATION_OUTCOMES = ['ok', 'spawn_fail', 'stdio_fail', 'timeout', 'pro_detected'] as const;
 export type ActivationOutcome = (typeof ACTIVATION_OUTCOMES)[number];
 
 /** Index outcomes. */
@@ -159,6 +232,30 @@ export type GraphPanel = (typeof GRAPH_PANELS)[number];
 /** Server-health reasons. */
 export const SERVER_RESTART_REASONS = ['crash', 'manual', 'setting_change'] as const;
 export type ServerRestartReason = (typeof SERVER_RESTART_REASONS)[number];
+
+/**
+ * Crash-cause classes. `panic_*` come from the server's local crash
+ * breadcrumb (`~/.codegraph/last-crash.*.json`, written by the panic hook);
+ * `signal`/`hard_crash` are inferred by the extension when no breadcrumb
+ * exists (SIGSEGV/SIGABRT/OOM-kill can't run the hook). Never raw text.
+ */
+export const CRASH_CAUSES = [
+    'rocksdb_lock',
+    'utf8_parse',
+    'mutex_poison',
+    'oom',
+    'bounds',
+    'panic_other',
+    'signal',
+    'hard_crash',
+    'unknown',
+] as const;
+export type CrashCause = (typeof CRASH_CAUSES)[number];
+const CRASH_CAUSE_SET = new Set<string>(CRASH_CAUSES);
+export function normalizeCrashCause(s: string | undefined): CrashCause {
+    if (!s) return 'unknown';
+    return (CRASH_CAUSE_SET.has(s) ? s : 'panic_other') as CrashCause;
+}
 
 /**
  * Settings included in `engagement.settingsSnapshot`. Only booleans,

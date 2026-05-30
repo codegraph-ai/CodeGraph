@@ -14,8 +14,64 @@
 /// The wrapper parses these lines from stderr; stdout stays reserved for
 /// the JSON-RPC channel.
 fn emit_tel(value: serde_json::Value) {
+    // Opt-out at the source too (the npm wrapper also gates forwarding).
+    if std::env::var("CODEGRAPH_TELEMETRY")
+        .map(|v| v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return;
+    }
     if let Ok(json) = serde_json::to_string(&value) {
         eprintln!("TEL: {json}");
+    }
+}
+
+/// Map a raw tool-error string to a coarse, allowlisted class. The raw
+/// message MUST NOT be emitted — it routinely contains file paths and
+/// usernames (e.g. "No symbols found in 'file:///Users/<name>/...'").
+/// Mirrors the extension's `categorizeError` so both channels align.
+fn classify_tool_error(e: &str) -> &'static str {
+    let m = e.to_ascii_lowercase();
+    if m.contains("not initialized") || m.contains("not running") || m.contains("unavailable") {
+        "server_unavailable"
+    } else if m.contains("not indexed") || m.contains("no index") || m.contains("index is empty") {
+        "not_indexed"
+    } else if m.contains("no symbols found")
+        || m.contains("not found")
+        || m.contains("no such")
+        || m.contains("no results")
+        || m.contains("does not exist")
+    {
+        "not_found"
+    } else if m.contains("invalid uri")
+        || m.contains("invalid file path")
+        || m.contains("invalid param")
+        || m.contains("missing required")
+        || m.contains("invalid argument")
+    {
+        "invalid_params"
+    } else if m.contains("timeout") || m.contains("timed out") {
+        "timeout"
+    } else if m.contains("parse") {
+        "parse_error"
+    } else if m.contains("panic") || m.contains("internal error") {
+        "internal_error"
+    } else {
+        "other"
+    }
+}
+
+/// Guard the tool name before logging: only pass through our own fixed
+/// `codegraph_*` identifiers, so a malformed `tools/call` can't smuggle an
+/// arbitrary string (potential PII) into telemetry.
+fn safe_tool_name(name: &str) -> &str {
+    if name.len() <= 64
+        && name.starts_with("codegraph_")
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        name
+    } else {
+        "other"
     }
 }
 
@@ -1147,7 +1203,7 @@ impl McpServer {
             Ok(result) => {
                 emit_tel(serde_json::json!({
                     "event": "mcp.tool_invoke",
-                    "tool": params.name,
+                    "tool": safe_tool_name(&params.name),
                     "durationMs": tool_start.elapsed().as_millis() as u64,
                     "ok": true,
                 }));
@@ -1163,9 +1219,9 @@ impl McpServer {
             Err(e) => {
                 emit_tel(serde_json::json!({
                     "event": "mcp.tool_error",
-                    "tool": params.name,
+                    "tool": safe_tool_name(&params.name),
                     "durationMs": tool_start.elapsed().as_millis() as u64,
-                    "errorClass": if e.len() > 60 { &e[..60] } else { &e },
+                    "errorClass": classify_tool_error(&e),
                 }));
                 let tool_result = ToolCallResult {
                     content: vec![ToolResultContent::Text {

@@ -3,6 +3,8 @@
 
 import * as vscode from 'vscode';
 import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
     LanguageClient,
     LanguageClientOptions,
@@ -31,8 +33,75 @@ const MAX_RAPID_CRASHES = 3;
 const RAPID_CRASH_WINDOW_MS = 60_000;
 let rapidCrashTimestamps: number[] = [];
 let crashLoopDetected = false;
+// Set true right before an intentional server stop (crash-loop give-up,
+// deactivate) so the onDidChangeState→Stopped that follows isn't logged
+// as a crash. Consume-once: the handler resets it after skipping.
+let expectedShutdown = false;
+
+/**
+ * Read + classify the server's crash breadcrumb. The server's panic hook
+ * drops `~/.codegraph/last-crash.<pid>.json` with an enum `class`/`site`
+ * (never source or message text). Returns the allowlisted cause; if no
+ * fresh breadcrumb exists the crash was a signal/segfault/OOM-kill that
+ * couldn't run the hook → `hard_crash`. Best-effort; never throws.
+ */
+function readAndClassifyCrash(): string {
+    try {
+        const dir = path.join(os.homedir(), '.codegraph');
+        let files: string[];
+        try {
+            files = fs.readdirSync(dir).filter((f) => /^last-crash\..*\.json$/.test(f));
+        } catch {
+            return 'hard_crash';
+        }
+        if (files.length === 0) return 'hard_crash';
+        let newest: { file: string; mtime: number } | undefined;
+        for (const f of files) {
+            try {
+                const m = fs.statSync(path.join(dir, f)).mtimeMs;
+                if (!newest || m > newest.mtime) newest = { file: f, mtime: m };
+            } catch {
+                /* ignore unreadable entry */
+            }
+        }
+        let cause = 'hard_crash';
+        // Only trust a breadcrumb written within ~15s of this crash, so a
+        // stale file from a prior session can't mislabel the current one.
+        if (newest && Date.now() - newest.mtime <= 15_000) {
+            try {
+                const raw = JSON.parse(fs.readFileSync(path.join(dir, newest.file), 'utf8'));
+                if (raw && raw.kind === 'signal') cause = 'signal';
+                else if (raw && raw.kind === 'panic' && typeof raw.class === 'string') cause = raw.class;
+            } catch {
+                /* corrupt breadcrumb → leave as hard_crash */
+            }
+        }
+        // Clean up every breadcrumb so none lingers to mislabel a future crash.
+        for (const f of files) {
+            try {
+                fs.unlinkSync(path.join(dir, f));
+            } catch {
+                /* ignore */
+            }
+        }
+        return cause;
+    } catch {
+        return 'hard_crash';
+    }
+}
+
+// Idempotency guard. VS Code calls activate() once per host, but a stale
+// client surviving a host reload can re-run server-command registration and
+// throw `command 'codegraph.getDependencyGraph' already exists` (seen in
+// spawn_fail telemetry). Bail if activation already ran in this host.
+let hasActivated = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+    if (hasActivated) {
+        return;
+    }
+    hasActivated = true;
+
     const config = vscode.workspace.getConfiguration('codegraph', vscode.workspace.workspaceFolders?.[0]?.uri);
 
     // Debug output channel (enabled via codegraph.debug setting)
@@ -75,6 +144,45 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
 
     if (!config.get<boolean>('enabled', true)) {
+        return;
+    }
+
+    // Pro/community coexistence guard. If the paid CodeGraph Pro extension
+    // is installed and enabled, it runs its own server that owns the index
+    // database (RocksDB holds an exclusive lock). Starting the community
+    // server too crashes on the lock conflict. Defer to Pro and nudge the
+    // user — once — to uninstall the redundant free extension.
+    const proExtension = vscode.extensions.getExtension('aStudioPlus.codegraph-pro');
+    if (proExtension) {
+        setServerEdition('pro');
+        reporter.activationServerStartResult({
+            outcome: 'pro_detected',
+            durationMs: 0,
+            serverBinaryFound: true,
+        });
+
+        const proStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+        proStatus.text = '$(shield) CodeGraph Pro';
+        proStatus.tooltip = 'CodeGraph Pro is active — the free CodeGraph extension is idle to avoid conflicts.';
+        proStatus.show();
+        context.subscriptions.push(proStatus);
+
+        const NOTIFIED_KEY = 'codegraph.proCoexistenceNotified';
+        if (!context.globalState.get<boolean>(NOTIFIED_KEY)) {
+            void context.globalState.update(NOTIFIED_KEY, true);
+            void vscode.window
+                .showWarningMessage(
+                    'CodeGraph Pro is installed. The free "CodeGraph" extension is redundant and can ' +
+                        'conflict with it (both manage the same index database). Uninstall the free ' +
+                        'extension to avoid errors.',
+                    'Manage Extensions',
+                )
+                .then((choice) => {
+                    if (choice === 'Manage Extensions') {
+                        void vscode.commands.executeCommand('workbench.extensions.search', '@installed codegraph');
+                    }
+                });
+        }
         return;
     }
 
@@ -203,6 +311,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         else if (lower.includes('virus') || lower.includes('quarantine') || lower.includes('blocked')) errorHint = 'antivirus_blocked';
         else if (lower.includes('not a valid win32') || lower.includes('bad cpu') || lower.includes('exec format')) errorHint = 'wrong_architecture';
         else if (lower.includes('eperm')) errorHint = 'EPERM';
+        // Handshake-death failures — the server process spawned but died
+        // during the LSP handshake. These dominate real spawn_fails (was
+        // landing in the null/unknown bucket). EPIPE/stream-destroyed mean
+        // the server exited immediately (missing dep, panic-on-start, or
+        // the Windows path-with-spaces bug from issue #2 on old versions).
+        else if (lower.includes('epipe')) errorHint = 'EPIPE';
+        else if (lower.includes('write after') || lower.includes('stream was destroyed')) errorHint = 'stream_destroyed';
+        else if (lower.includes('connection got disposed') || lower.includes('connection is disposed') || lower.includes('pending response rejected')) errorHint = 'connection_disposed';
+        else if (lower.includes('already exists')) errorHint = 'command_conflict';
         else if (lower.includes('spawn')) errorHint = 'spawn_error';
         else {
             // Last resort: first 80 chars, strip anything that looks like a path
@@ -223,13 +340,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         client.onDidChangeState((evt) => {
             // evt.newState: 1=Stopped, 2=Starting, 3=Running
             if (evt.newState === 1 && serverUptimeStart > 0) {
+                // Intentional stop (crash-loop give-up / deactivate) — don't
+                // count it as a crash. Consume-once.
+                if (expectedShutdown) {
+                    expectedShutdown = false;
+                    return;
+                }
                 const now = Date.now();
                 const uptimeSeconds = (now - serverUptimeStart) / 1000;
+                const crashCause = readAndClassifyCrash();
 
                 reporter.serverCrash({
                     uptimeSeconds,
                     restartCount: serverRestartCount,
                     lastToolName: toolManager?.lastToolName,
+                    crashCause,
                 });
 
                 // Crash-loop detection: track rapid crashes and stop
@@ -244,6 +369,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
                 if (rapidCrashTimestamps.length >= MAX_RAPID_CRASHES) {
                     crashLoopDetected = true;
+                    expectedShutdown = true;
                     client.stop().catch(() => {});
                     vscode.window
                         .showErrorMessage(
@@ -443,6 +569,7 @@ export async function deactivate(): Promise<void> {
         await reporter.dispose();
     }
     if (client) {
+        expectedShutdown = true;
         await client.stop();
     }
 }

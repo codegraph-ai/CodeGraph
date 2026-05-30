@@ -38,6 +38,7 @@ import {
     isCommandId,
     isToolName,
     type Language,
+    normalizeCrashCause,
     normalizeLanguage,
     type ServerRestartReason,
     SETTINGS_SNAPSHOT_KEYS,
@@ -125,7 +126,7 @@ export interface Reporter {
     engagementGraphPanelOpened(panel: GraphPanel): void;
     engagementSettingsSnapshot(): void;
 
-    serverCrash(props: { uptimeSeconds: number; lastToolName?: string; restartCount: number }): void;
+    serverCrash(props: { uptimeSeconds: number; lastToolName?: string; restartCount: number; crashCause?: string }): void;
     serverRestart(reason: ServerRestartReason): void;
     serverRpcTimeout(props: { command: string; attemptCount: number }): void;
 
@@ -259,7 +260,7 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
                     serverBinaryFound: props.serverBinaryFound,
                     ...(props.errorHint ? { errorHint: props.errorHint } : {}),
                 },
-                props.outcome !== 'ok',
+                props.outcome !== 'ok' && props.outcome !== 'pro_detected',
             );
         },
         activationToolRegistration(props) {
@@ -400,6 +401,7 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
                 'server.crash',
                 {
                     uptimeBucket: uptimeBucket(props.uptimeSeconds),
+                    crashCause: normalizeCrashCause(props.crashCause),
                     lastToolName: props.lastToolName && isToolName(props.lastToolName)
                         ? props.lastToolName
                         : props.lastToolName

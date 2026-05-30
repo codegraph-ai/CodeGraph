@@ -97,6 +97,72 @@ struct Args {
 /// execution skips the hook body and aborts directly to avoid deadlock.
 static PANIC_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
+/// Best-effort: write a tiny crash breadcrumb to `~/.codegraph/` that the
+/// VS Code extension reads on the next start to classify the crash cause.
+/// Contains only an enum `class` + `site` bucket — never source, path
+/// content, or the panic message text. Must never panic (runs inside the
+/// panic hook), so every fallible step is swallowed.
+fn write_crash_breadcrumb(kind: &str, class: &str, site: &str) {
+    let home = match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(h) => h,
+        None => return,
+    };
+    let dir = std::path::PathBuf::from(home).join(".codegraph");
+    let _ = std::fs::create_dir_all(&dir);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    // Every field value is a known ASCII enum — no JSON escaping required.
+    let json = format!(
+        "{{\"schema\":1,\"ts\":{ts},\"pid\":{pid},\"kind\":\"{kind}\",\"class\":\"{class}\",\"site\":\"{site}\"}}"
+    );
+    let _ = std::fs::write(dir.join(format!("last-crash.{pid}.json")), json);
+}
+
+/// Map a panic message + location into a coarse (class, site) pair. Both
+/// are fixed enums; the raw message is never persisted or transmitted.
+fn classify_panic(payload: &str, location: &str) -> (&'static str, &'static str) {
+    let p = payload.to_ascii_lowercase();
+    let class = if p.contains("lock") || p.contains("rocksdb") {
+        "rocksdb_lock"
+    } else if p.contains("utf-8")
+        || p.contains("utf8")
+        || p.contains("byte index")
+        || p.contains("char boundary")
+    {
+        "utf8_parse"
+    } else if p.contains("poison") {
+        "mutex_poison"
+    } else if p.contains("memory allocation")
+        || p.contains("capacity overflow")
+        || p.contains("cannot allocate")
+    {
+        "oom"
+    } else if p.contains("out of bounds") || p.contains("out of range") || p.contains("slice index")
+    {
+        "bounds"
+    } else {
+        "panic_other"
+    };
+    let l = location.to_ascii_lowercase();
+    let site = if l.contains("codegraph-memory") || l.contains("codegraph_memory") {
+        "memory"
+    } else if l.contains("mcp") {
+        "mcp"
+    } else if l.contains("rocks") || l.contains("backend") || l.contains("storage") {
+        "storage"
+    } else if l.contains("parser") || l.contains("tree-sitter") || l.contains("tree_sitter") {
+        "parser"
+    } else if l.contains("codegraph-server") {
+        "server"
+    } else {
+        "other"
+    };
+    (class, site)
+}
+
 /// Install a panic hook + signal listeners so the process exits cleanly
 /// instead of leaving the RocksDB `LOCK` held by a wedged or panicking
 /// instance.
@@ -124,6 +190,10 @@ fn install_crash_handlers() {
             .copied()
             .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
             .unwrap_or("<non-string panic payload>");
+        // Drop a sanitized breadcrumb (enum class only) so the extension
+        // can report WHY we crashed, not just that we did.
+        let (class, site) = classify_panic(payload, &location);
+        write_crash_breadcrumb("panic", class, site);
         // Use eprintln in addition to tracing — the panic may fire before
         // the subscriber is installed (e.g. during arg parsing).
         eprintln!(
@@ -296,5 +366,84 @@ async fn main() {
         let (service, socket) = LspService::new(CodeGraphBackend::new);
 
         Server::new(stdin, stdout, socket).serve(service).await;
+    }
+}
+
+#[cfg(test)]
+mod crash_breadcrumb_tests {
+    use super::{classify_panic, write_crash_breadcrumb};
+
+    #[test]
+    fn classify_panic_maps_message_class() {
+        assert_eq!(
+            classify_panic("Result::unwrap() on Err: RocksDB LOCK held", "x").0,
+            "rocksdb_lock"
+        );
+        assert_eq!(
+            classify_panic("byte index 7 is not a char boundary", "x").0,
+            "utf8_parse"
+        );
+        assert_eq!(classify_panic("PoisonError { .. }", "x").0, "mutex_poison");
+        assert_eq!(
+            classify_panic("memory allocation of 9999 bytes failed", "x").0,
+            "oom"
+        );
+        assert_eq!(
+            classify_panic("index out of bounds: the len is 3", "x").0,
+            "bounds"
+        );
+        assert_eq!(classify_panic("something unexpected", "x").0, "panic_other");
+    }
+
+    #[test]
+    fn classify_panic_maps_site() {
+        assert_eq!(
+            classify_panic("x", "crates/codegraph-memory/src/embed.rs:1").1,
+            "memory"
+        );
+        assert_eq!(
+            classify_panic("x", "crates/codegraph-server/src/mcp/server.rs:1").1,
+            "mcp"
+        );
+        assert_eq!(
+            classify_panic("x", "crates/codegraph-server/src/main.rs:1").1,
+            "server"
+        );
+    }
+
+    #[test]
+    fn breadcrumb_roundtrip_writes_parseable_json() {
+        // Isolate HOME to a temp dir so we never touch the real ~/.codegraph.
+        let tmp = std::env::temp_dir().join(format!("cg-crash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let prev_home = std::env::var_os("HOME");
+        let prev_up = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", &tmp);
+        std::env::set_var("USERPROFILE", &tmp);
+
+        write_crash_breadcrumb("panic", "rocksdb_lock", "storage");
+
+        let dir = tmp.join(".codegraph");
+        let entry = std::fs::read_dir(&dir)
+            .expect("breadcrumb dir exists")
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with("last-crash."))
+            .expect("a breadcrumb file was written");
+        let content = std::fs::read_to_string(entry.path()).expect("readable");
+        let v: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+        assert_eq!(v["kind"], "panic");
+        assert_eq!(v["class"], "rocksdb_lock");
+        assert_eq!(v["site"], "storage");
+        assert_eq!(v["schema"], 1);
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_up {
+            Some(h) => std::env::set_var("USERPROFILE", h),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
