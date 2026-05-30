@@ -258,6 +258,30 @@ export function normalizeCrashCause(s: string | undefined): CrashCause {
 }
 
 /**
+ * Init phase the server reached before death — from `~/.codegraph/last-phase.*`,
+ * stamped by the server as init progresses. Pairs with `crashCause`: a
+ * `hard_crash` at phase `onnx_load` means the native ONNX load killed the
+ * process (OOM/segfault) where the panic hook can't fire.
+ */
+export const CRASH_PHASES = [
+    'startup',
+    'rocksdb_open',
+    'onnx_load',
+    'post_onnx',
+    'onnx_skipped_lowmem',
+    'indexing',
+    'serving',
+    'ready',
+    'unknown',
+] as const;
+export type CrashPhase = (typeof CRASH_PHASES)[number];
+const CRASH_PHASE_SET = new Set<string>(CRASH_PHASES);
+export function normalizeCrashPhase(s: string | undefined): CrashPhase {
+    if (!s) return 'unknown';
+    return (CRASH_PHASE_SET.has(s) ? s : 'unknown') as CrashPhase;
+}
+
+/**
  * Settings included in `engagement.settingsSnapshot`. Only booleans,
  * server-defined enums, and bucketed numbers — NEVER free-form strings
  * (`excludePatterns`, `indexPaths`, custom `languages`) or path-bearing

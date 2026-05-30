@@ -26,6 +26,7 @@ pub mod ai_query;
 pub mod backend;
 pub mod branch_watcher;
 pub mod cache;
+pub mod crash_phase;
 pub mod custom_requests;
 pub mod domain;
 pub mod error;

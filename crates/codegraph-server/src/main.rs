@@ -210,6 +210,7 @@ fn spawn_signal_listeners() {
     tokio::spawn(async {
         if tokio::signal::ctrl_c().await.is_ok() {
             tracing::info!("Ctrl-C received — shutting down");
+            codegraph_server::crash_phase::clear();
             std::process::exit(0);
         }
     });
@@ -220,6 +221,7 @@ fn spawn_signal_listeners() {
         if let Ok(mut term) = signal(SignalKind::terminate()) {
             if term.recv().await.is_some() {
                 tracing::info!("SIGTERM received — shutting down");
+                codegraph_server::crash_phase::clear();
                 std::process::exit(0);
             }
         }
@@ -229,6 +231,7 @@ fn spawn_signal_listeners() {
 #[tokio::main]
 async fn main() {
     install_crash_handlers();
+    codegraph_server::crash_phase::mark("startup");
 
     let args = Args::parse();
 
@@ -349,10 +352,12 @@ async fn main() {
         )
         .with_tool_profile(tool_profile)
         .with_graph_only(args.graph_only);
+        codegraph_server::crash_phase::mark("serving");
         if let Err(e) = server.run().await {
             tracing::error!("MCP server error: {}", e);
             std::process::exit(1);
         }
+        codegraph_server::crash_phase::clear();
     } else {
         // LSP mode (default)
         use codegraph_server::CodeGraphBackend;
@@ -365,7 +370,9 @@ async fn main() {
 
         let (service, socket) = LspService::new(CodeGraphBackend::new);
 
+        codegraph_server::crash_phase::mark("serving");
         Server::new(stdin, stdout, socket).serve(service).await;
+        codegraph_server::crash_phase::clear();
     }
 }
 

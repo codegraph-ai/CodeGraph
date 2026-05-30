@@ -213,6 +213,36 @@ impl MemoryManager {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(".codegraph")
             .join("fastembed_cache");
+        // RAM gate: loading the ONNX model + runtime can OOM-kill the process
+        // on constrained machines — a NATIVE crash Rust can't catch (this is
+        // the dominant `hard_crash` in crash telemetry). If too little memory
+        // is free right now, skip the model and run graph-only (degraded beats
+        // dead). `available_memory` reflects what we can actually allocate.
+        {
+            let mut sys = sysinfo::System::new();
+            sys.refresh_memory();
+            let avail = sys.available_memory();
+            const MIN_FREE_BYTES: u64 = 1_500_000_000; // ~1.5 GB for model + ort runtime
+            tracing::info!(
+                "[MemoryManager::initialize] available memory: {} MB",
+                avail / 1_000_000
+            );
+            if avail < MIN_FREE_BYTES {
+                crate::crash_phase::mark("onnx_skipped_lowmem");
+                tracing::warn!(
+                    "[MemoryManager::initialize] only {} MB free — skipping embedding model to avoid OOM; semantic search disabled (graph-only)",
+                    avail / 1_000_000
+                );
+                return Err(MemoryError::Other(format!(
+                    "insufficient memory ({} MB free) to load embedding model; running graph-only",
+                    avail / 1_000_000
+                )));
+            }
+        }
+
+        // Phase marker: a native crash during the ONNX model load never runs
+        // the panic hook, so stamp the phase for the extension to read post-mortem.
+        crate::crash_phase::mark("onnx_load");
         let engine = VectorEngine::with_model(cache_dir, self.embedding_model).map_err(|e| {
             tracing::error!(
                 "[MemoryManager::initialize] VectorEngine initialization failed: {:?}",
@@ -220,6 +250,7 @@ impl MemoryManager {
             );
             e
         })?;
+        crate::crash_phase::mark("post_onnx");
 
         // Store resolved path and engine for on-demand use
         *self.data_dir.write().await = Some(data_dir.clone());

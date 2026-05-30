@@ -45,48 +45,62 @@ let expectedShutdown = false;
  * fresh breadcrumb exists the crash was a signal/segfault/OOM-kill that
  * couldn't run the hook → `hard_crash`. Best-effort; never throws.
  */
-function readAndClassifyCrash(): string {
+function readAndClassifyCrash(): { cause: string; phase?: string } {
     try {
         const dir = path.join(os.homedir(), '.codegraph');
         let files: string[];
         try {
-            files = fs.readdirSync(dir).filter((f) => /^last-crash\..*\.json$/.test(f));
+            files = fs.readdirSync(dir);
         } catch {
-            return 'hard_crash';
+            return { cause: 'hard_crash' };
         }
-        if (files.length === 0) return 'hard_crash';
-        let newest: { file: string; mtime: number } | undefined;
-        for (const f of files) {
-            try {
-                const m = fs.statSync(path.join(dir, f)).mtimeMs;
-                if (!newest || m > newest.mtime) newest = { file: f, mtime: m };
-            } catch {
-                /* ignore unreadable entry */
+        // Newest matching marker, but only trusted within ~15s of this crash
+        // so a stale file from a prior session can't mislabel the current one.
+        const pickFresh = (re: RegExp): Record<string, unknown> | undefined => {
+            let best: { file: string; mtime: number } | undefined;
+            for (const f of files) {
+                if (!re.test(f)) continue;
+                try {
+                    const m = fs.statSync(path.join(dir, f)).mtimeMs;
+                    if (!best || m > best.mtime) best = { file: f, mtime: m };
+                } catch {
+                    /* ignore unreadable entry */
+                }
             }
-        }
+            if (!best || Date.now() - best.mtime > 15_000) return undefined;
+            try {
+                return JSON.parse(fs.readFileSync(path.join(dir, best.file), 'utf8'));
+            } catch {
+                return undefined;
+            }
+        };
+
+        // Panic breadcrumb → precise cause; absent → signal/segfault/OOM-kill.
         let cause = 'hard_crash';
-        // Only trust a breadcrumb written within ~15s of this crash, so a
-        // stale file from a prior session can't mislabel the current one.
-        if (newest && Date.now() - newest.mtime <= 15_000) {
-            try {
-                const raw = JSON.parse(fs.readFileSync(path.join(dir, newest.file), 'utf8'));
-                if (raw && raw.kind === 'signal') cause = 'signal';
-                else if (raw && raw.kind === 'panic' && typeof raw.class === 'string') cause = raw.class;
-            } catch {
-                /* corrupt breadcrumb → leave as hard_crash */
-            }
+        const crumb = pickFresh(/^last-crash\..*\.json$/);
+        if (crumb) {
+            if (crumb.kind === 'signal') cause = 'signal';
+            else if (crumb.kind === 'panic' && typeof crumb.class === 'string') cause = crumb.class;
         }
-        // Clean up every breadcrumb so none lingers to mislabel a future crash.
+
+        // Phase marker → WHERE the (native) death happened, e.g. onnx_load.
+        let phase: string | undefined;
+        const ph = pickFresh(/^last-phase\..*\.json$/);
+        if (ph && typeof ph.phase === 'string') phase = ph.phase;
+
+        // Clean up all crash + phase markers so none lingers to mislabel later.
         for (const f of files) {
-            try {
-                fs.unlinkSync(path.join(dir, f));
-            } catch {
-                /* ignore */
+            if (/^last-(crash|phase)\..*\.json$/.test(f)) {
+                try {
+                    fs.unlinkSync(path.join(dir, f));
+                } catch {
+                    /* ignore */
+                }
             }
         }
-        return cause;
+        return { cause, phase };
     } catch {
-        return 'hard_crash';
+        return { cause: 'hard_crash' };
     }
 }
 
@@ -348,13 +362,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 }
                 const now = Date.now();
                 const uptimeSeconds = (now - serverUptimeStart) / 1000;
-                const crashCause = readAndClassifyCrash();
+                const { cause: crashCause, phase: crashPhase } = readAndClassifyCrash();
 
                 reporter.serverCrash({
                     uptimeSeconds,
                     restartCount: serverRestartCount,
                     lastToolName: toolManager?.lastToolName,
                     crashCause,
+                    crashPhase,
                 });
 
                 // Crash-loop detection: track rapid crashes and stop

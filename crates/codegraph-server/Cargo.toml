@@ -28,6 +28,8 @@ serde_json.workspace = true
 
 # Utilities
 thiserror.workspace = true
+# System memory introspection for the embedding-load RAM gate (OOM avoidance)
+sysinfo = "0.30"
 dashmap.workspace = true
 notify.workspace = true
 tracing.workspace = true

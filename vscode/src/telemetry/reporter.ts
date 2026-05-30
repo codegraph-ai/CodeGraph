@@ -39,6 +39,7 @@ import {
     isToolName,
     type Language,
     normalizeCrashCause,
+    normalizeCrashPhase,
     normalizeLanguage,
     type ServerRestartReason,
     SETTINGS_SNAPSHOT_KEYS,
@@ -126,7 +127,7 @@ export interface Reporter {
     engagementGraphPanelOpened(panel: GraphPanel): void;
     engagementSettingsSnapshot(): void;
 
-    serverCrash(props: { uptimeSeconds: number; lastToolName?: string; restartCount: number; crashCause?: string }): void;
+    serverCrash(props: { uptimeSeconds: number; lastToolName?: string; restartCount: number; crashCause?: string; crashPhase?: string }): void;
     serverRestart(reason: ServerRestartReason): void;
     serverRpcTimeout(props: { command: string; attemptCount: number }): void;
 
@@ -402,6 +403,7 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
                 {
                     uptimeBucket: uptimeBucket(props.uptimeSeconds),
                     crashCause: normalizeCrashCause(props.crashCause),
+                    ...(props.crashPhase ? { crashPhase: normalizeCrashPhase(props.crashPhase) } : {}),
                     lastToolName: props.lastToolName && isToolName(props.lastToolName)
                         ? props.lastToolName
                         : props.lastToolName

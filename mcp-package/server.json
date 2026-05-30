@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.codegraph-ai/codegraph",
-  "description": "Semantic code graph with 34 tools: callers, impact, complexity, AI context, memory. 38 languages.",
+  "description": "Semantic code graph: 42 tools, 38 languages. Callers, impact, AI context, memory, PR review.",
   "repository": {
     "url": "https://github.com/codegraph-ai/CodeGraph",
     "source": "github"
   },
-  "version": "0.17.5",
+  "version": "0.17.8",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@astudioplus/codegraph-mcp",
-      "version": "0.17.5",
+      "version": "0.17.8",
       "transport": {
         "type": "stdio"
       },
