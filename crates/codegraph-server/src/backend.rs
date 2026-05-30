@@ -1178,12 +1178,25 @@ impl LanguageServer for CodeGraphBackend {
                 }
                 Err(e) => {
                     tracing::error!("Memory store initialization failed: {:?}", e);
-                    self.client
-                        .log_message(
-                            MessageType::ERROR,
-                            format!("✗ Failed to initialize memory store: {}. Memory features will be disabled.", e),
-                        )
-                        .await;
+                    let msg = e.to_string();
+                    if msg.contains("insufficient memory") {
+                        // RAM gate fired — surface a visible toast so the user
+                        // knows WHY semantic search is off and how to restore it,
+                        // rather than silently degrading.
+                        self.client
+                            .show_message(
+                                MessageType::WARNING,
+                                "CodeGraph: low memory — semantic search & memory features are disabled to avoid an out-of-memory crash (running graph-only). Close other apps to free RAM, then reload the window to enable them.",
+                            )
+                            .await;
+                    } else {
+                        self.client
+                            .log_message(
+                                MessageType::ERROR,
+                                format!("✗ Failed to initialize memory store: {}. Memory features will be disabled.", e),
+                            )
+                            .await;
+                    }
                 }
             }
         } else {
