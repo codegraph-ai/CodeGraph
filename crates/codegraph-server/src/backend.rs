@@ -6,6 +6,7 @@
 //! This module implements the Language Server Protocol for CodeGraph.
 
 use crate::ai_query::QueryEngine;
+use crate::embed_queue::{EmbedMode, EmbedQueue};
 use crate::branch_watcher::BranchWatcher;
 use crate::cache::QueryCache;
 use crate::domain::node_props;
@@ -36,10 +37,18 @@ pub struct CodeGraphConfig {
     pub index_paths: Vec<String>,
     #[serde(default = "default_max_file_size_kb")]
     pub max_file_size_kb: u64,
+    /// Embed files as they're opened/changed (background) so semantic search
+    /// stays current. When false, embeddings refresh only on save / reindex.
+    #[serde(default = "default_embed_on_open")]
+    pub embed_on_open: bool,
 }
 
 fn default_max_file_size_kb() -> u64 {
     1024
+}
+
+fn default_embed_on_open() -> bool {
+    true
 }
 
 impl Default for CodeGraphConfig {
@@ -49,6 +58,7 @@ impl Default for CodeGraphConfig {
             exclude_patterns: Vec::new(),
             index_paths: Vec::new(),
             max_file_size_kb: 1024,
+            embed_on_open: true,
         }
     }
 }
@@ -102,6 +112,9 @@ pub struct CodeGraphBackend {
 
     /// Shared indexer for directory walking and file parsing.
     pub indexer: Arc<crate::indexer::Indexer>,
+
+    /// Debounced background re-embedding for on-demand (open/change/watch) indexing.
+    pub embed_queue: EmbedQueue,
 }
 
 impl CodeGraphBackend {
@@ -118,9 +131,12 @@ impl CodeGraphBackend {
             Arc::clone(&index_state),
         ));
 
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        let embed_queue = EmbedQueue::new(Arc::clone(&query_engine));
+
         Self {
             client,
-            query_engine: Arc::new(QueryEngine::new(Arc::clone(&graph))),
+            query_engine,
             graph,
             parsers,
             file_cache: Arc::new(DashMap::new()),
@@ -135,6 +151,7 @@ impl CodeGraphBackend {
             command_prefix: "codegraph".to_string(),
             index_state,
             indexer,
+            embed_queue,
         }
     }
 
@@ -168,6 +185,8 @@ impl CodeGraphBackend {
             Arc::clone(&index_state),
         ));
 
+        let embed_queue = EmbedQueue::new(Arc::clone(&query_engine));
+
         Self {
             client: dummy_client,
             query_engine,
@@ -185,6 +204,7 @@ impl CodeGraphBackend {
             command_prefix: "codegraph".to_string(),
             index_state,
             indexer,
+            embed_queue,
         }
     }
 
@@ -196,6 +216,9 @@ impl CodeGraphBackend {
             Arc::clone(&self.parsers),
             self.client.clone(),
             Arc::clone(&self.memory_manager),
+            Arc::clone(&self.symbol_index),
+            Arc::clone(&self.query_engine),
+            self.embed_queue.clone(),
         ) {
             Ok(mut watcher) => {
                 // Start watching each folder
@@ -320,6 +343,61 @@ impl CodeGraphBackend {
         // Invalidate caches
         self.query_cache.invalidate_file(&path.to_path_buf());
         self.symbol_index.remove_file(path);
+    }
+
+    /// Parse `text` for `path` and bring every in-memory structure in sync:
+    /// graph, symbol index, file cache, and the AI query indexes. Embeddings are
+    /// handled per `embed`. Returns `true` if the file parsed successfully.
+    ///
+    /// Every interactive index path (open / change / save) funnels through here,
+    /// so the three structures — graph, symbol index, vectors — cannot drift apart.
+    async fn index_source(
+        &self,
+        uri: &Url,
+        path: &std::path::Path,
+        text: &str,
+        embed: EmbedMode,
+    ) -> bool {
+        let Some(parser) = self.parsers.parser_for_path(path) else {
+            tracing::warn!("No parser found for: {:?}", path);
+            return false;
+        };
+
+        // Remove stale nodes first so re-parsing doesn't leave duplicates.
+        self.remove_file_from_graph(path).await;
+
+        let parsed = {
+            let mut graph = self.graph.write().await;
+            match parser.parse_source(text, path, &mut graph) {
+                Ok(file_info) => {
+                    GraphUpdater::resolve_cross_file_imports(&mut graph);
+                    self.symbol_index
+                        .add_file(path.to_path_buf(), &file_info, &graph);
+                    self.file_cache.insert(uri.clone(), file_info);
+                    true
+                }
+                Err(e) => {
+                    tracing::error!("Parse failed for {:?}: {}", path, e);
+                    false
+                }
+            }
+        };
+
+        if parsed {
+            // Refresh caller/callee/import indexes for the new node IDs.
+            self.query_engine.build_indexes().await;
+            match embed {
+                EmbedMode::Now => {
+                    self.query_engine
+                        .update_file_vectors(&path.to_string_lossy())
+                        .await
+                }
+                EmbedMode::Enqueue => self.embed_queue.enqueue(path.to_path_buf()),
+                EmbedMode::Skip => {}
+            }
+        }
+
+        parsed
     }
 
     /// Build an [`IndexConfig`](crate::indexer::IndexConfig) from the current
@@ -790,9 +868,13 @@ impl LanguageServer for CodeGraphBackend {
                     .get("maxFileSizeKB")
                     .and_then(|v| v.as_u64())
                     .unwrap_or_else(default_max_file_size_kb),
+                embed_on_open: opts
+                    .get("embedOnOpen")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or_else(default_embed_on_open),
             };
-            tracing::info!("CodeGraph config: index_on_startup={}, exclude_patterns={:?}, index_paths={:?}, max_file_size_kb={}",
-                config.index_on_startup, config.exclude_patterns, config.index_paths, config.max_file_size_kb);
+            tracing::info!("CodeGraph config: index_on_startup={}, exclude_patterns={:?}, index_paths={:?}, max_file_size_kb={}, embed_on_open={}",
+                config.index_on_startup, config.exclude_patterns, config.index_paths, config.max_file_size_kb, config.embed_on_open);
             *self.config.write().await = config;
         }
 
@@ -878,6 +960,8 @@ impl LanguageServer for CodeGraphBackend {
             // Initialize index state with project slug from first workspace
             if let Some(first) = workspace_folders.first() {
                 let slug = crate::memory::project_slug(first);
+                // Give the embed queue the slug so background re-embeds persist.
+                self.embed_queue.set_slug(slug.clone()).await;
                 let mut state = self.index_state.lock().await;
                 *state = crate::index_state::IndexState::for_workspace(&slug, first);
                 let loaded = state.load();
@@ -1083,12 +1167,29 @@ impl LanguageServer for CodeGraphBackend {
                     .await;
             }
 
-            // Rebuild query indexes (needed whether loaded from persistence or freshly parsed)
+            // Rebuild the semantic/vector index. On a persisted load the
+            // vectors are read straight from disk (load_symbol_vectors), so
+            // this is only needed after a fresh parse.
             if !loaded_from_persistence {
                 self.query_engine.build_indexes().await;
                 self.client
                     .log_message(MessageType::INFO, "Semantic search index ready")
                     .await;
+            }
+
+            // The in-memory symbol_index (position→node lookup behind hover,
+            // go-to-definition, and the graph-query fallback) is filled only
+            // while PARSING files. On a persisted-graph load the unchanged
+            // files aren't re-parsed, so rebuild it from the loaded graph —
+            // otherwise find_node_at_position returns 0 symbols and hover/goto
+            // silently break after every restart until a manual reindex.
+            if loaded_from_persistence {
+                let graph = self.graph.read().await;
+                self.symbol_index.rebuild_from_graph(&graph);
+                tracing::info!(
+                    "Rebuilt symbol index from persisted graph ({} files)",
+                    self.symbol_index.file_count()
+                );
             }
 
             // Persist graph to RocksDB so next startup loads instantly
@@ -1248,68 +1349,27 @@ impl LanguageServer for CodeGraphBackend {
             }
         };
 
-        // Respect indexOnStartup=false: only index on did_open if the file
-        // was previously indexed (exists in symbol_index), or if indexOnStartup is true.
-        // We check symbol_index instead of file_cache because did_close removes from
-        // file_cache, causing VS Code's close/reopen cycles to lose track of files.
         let config = self.config.read().await.clone();
-        let previously_indexed = !self.symbol_index.get_file_symbols(&path).is_empty();
-        if !config.index_on_startup && !previously_indexed {
-            tracing::info!(
-                "Skipping did_open index for {:?}: indexOnStartup=false and file not yet indexed",
-                path
-            );
-            return;
-        }
 
-        // Skip files matching exclude patterns
+        // Skip files matching exclude patterns (binary archives, vendored sources, secrets…).
         let exclude_set = Self::index_config_from_lsp(&config).build_exclude_set();
-        let path_str = path.to_string_lossy();
-        if exclude_set.is_match(path_str.as_ref()) {
+        if exclude_set.is_match(path.to_string_lossy().as_ref()) {
             tracing::info!("Skipping did_open for {:?}: matched exclude pattern", path);
             return;
         }
 
-        if let Some(parser) = self.parsers.parser_for_path(&path) {
-            tracing::info!("Parser found for: {:?}", path);
-
-            // Remove old entries first to prevent duplicate nodes with stale IDs
-            self.remove_file_from_graph(&path).await;
-
-            let mut graph = self.graph.write().await;
-
-            match parser.parse_source(&text, &path, &mut graph) {
-                Ok(file_info) => {
-                    tracing::info!("Parse succeeded for: {:?}", path);
-
-                    // Resolve cross-file imports after parsing
-                    GraphUpdater::resolve_cross_file_imports(&mut graph);
-
-                    // Update symbol index
-                    self.symbol_index.add_file(path.clone(), &file_info, &graph);
-
-                    // Update file cache
-                    self.file_cache.insert(uri.clone(), file_info);
-
-                    self.client
-                        .log_message(MessageType::INFO, format!("Indexed: {uri}"))
-                        .await;
-                }
-                Err(e) => {
-                    tracing::error!("Parse failed for {:?}: {}", path, e);
-                    self.client
-                        .log_message(MessageType::ERROR, format!("Parse error in {uri}: {e}"))
-                        .await;
-                }
-            }
-
-            // Drop graph write lock before rebuilding query indexes
-            drop(graph);
-
-            // Rebuild AI query engine indexes so callee/caller indexes reflect new node IDs
-            self.query_engine.build_indexes().await;
+        // Index on demand: any supported, non-excluded file is indexed when opened,
+        // even if it wasn't part of a prior workspace index. This is what makes hover
+        // and goto work on freshly-created (or never-indexed) files without a reindex.
+        let embed = if config.embed_on_open {
+            EmbedMode::Enqueue
         } else {
-            tracing::warn!("No parser found for: {:?}", path);
+            EmbedMode::Skip
+        };
+        if self.index_source(&uri, &path, &text, embed).await {
+            self.client
+                .log_message(MessageType::INFO, format!("Indexed: {uri}"))
+                .await;
         }
     }
 
@@ -1321,27 +1381,14 @@ impl LanguageServer for CodeGraphBackend {
             Err(_) => return,
         };
 
-        // Get the full text (assuming full sync mode)
+        // Full sync mode: the last change carries the complete document text.
         if let Some(change) = params.content_changes.into_iter().next() {
-            if let Some(parser) = self.parsers.parser_for_path(&path) {
-                // Remove old entries
-                self.remove_file_from_graph(&path).await;
-
-                // Re-parse with new content
-                {
-                    let mut graph = self.graph.write().await;
-                    if let Ok(file_info) = parser.parse_source(&change.text, &path, &mut graph) {
-                        // Resolve cross-file imports after parsing
-                        GraphUpdater::resolve_cross_file_imports(&mut graph);
-
-                        self.symbol_index.add_file(path.clone(), &file_info, &graph);
-                        self.file_cache.insert(uri, file_info);
-                    }
-                }
-
-                // Rebuild AI query engine indexes so callee/caller indexes reflect new node IDs
-                self.query_engine.build_indexes().await;
-            }
+            let embed = if self.config.read().await.embed_on_open {
+                EmbedMode::Enqueue
+            } else {
+                EmbedMode::Skip
+            };
+            self.index_source(&uri, &path, &change.text, embed).await;
         }
     }
 
@@ -1354,29 +1401,10 @@ impl LanguageServer for CodeGraphBackend {
             Err(_) => return,
         };
 
-        if let Some(parser) = self.parsers.parser_for_path(&path) {
-            if let Some(text) = params.text {
-                tracing::info!("did_save has text, re-parsing + re-embedding: {}", uri);
-                self.remove_file_from_graph(&path).await;
-
-                {
-                    let mut graph = self.graph.write().await;
-                    if let Ok(file_info) = parser.parse_source(&text, &path, &mut graph) {
-                        // Resolve cross-file imports after parsing
-                        GraphUpdater::resolve_cross_file_imports(&mut graph);
-
-                        self.symbol_index.add_file(path.clone(), &file_info, &graph);
-                        self.file_cache.insert(uri, file_info);
-                    }
-                }
-
-                // Rebuild AI query engine indexes
-                self.query_engine.build_indexes().await;
-
-                // Incrementally re-embed only this file's symbols (not the whole codebase)
-                let path_str = path.to_string_lossy().to_string();
-                self.query_engine.update_file_vectors(&path_str).await;
-            }
+        // Save is the durable event: re-parse and re-embed this file synchronously
+        // so semantic search is current immediately, regardless of embedOnOpen.
+        if let Some(text) = params.text {
+            self.index_source(&uri, &path, &text, EmbedMode::Now).await;
         }
     }
 

@@ -5,11 +5,11 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as cp from 'child_process';
 import {
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
-    TransportKind,
 } from 'vscode-languageclient/node';
 import { registerCommands } from './commands';
 import { registerTreeDataProviders } from './views/treeProviders';
@@ -24,6 +24,11 @@ let toolManager: CodeGraphToolManager;
 let reporter: Reporter;
 let serverUptimeStart = 0;
 let serverRestartCount = 0;
+// Captured from the server child process's `exit` so a crash report can say
+// WHY it died: a unix signal (SIGSEGV / SIGKILL=OOM-kill / SIGABRT) or a
+// Windows exit code (0xC0000005 = access violation, AV TerminateProcess, …).
+let lastExitCode: number | null = null;
+let lastExitSignal: string | null = null;
 
 // Crash-loop detection: if the server crashes MAX_RAPID_CRASHES times
 // within RAPID_CRASH_WINDOW_MS, stop restarting and show a persistent
@@ -219,32 +224,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     const serverModule = serverInfo.path;
 
-    // Server options - add Windows-specific spawn options.
-    //
-    // Windows + shell:true means LanguageClient spawns cmd.exe with the
-    // command string raw. If the binary path contains spaces (e.g.
-    // `C:\Users\Muhammad Daniyal\.vscode\extensions\...\codegraph-server-win32-x64.exe`),
-    // cmd.exe splits at the space and tries to execute the prefix as
-    // the command. Symptom: `'C:\Users\Muhammad' is not recognized as
-    // an internal or external command` + EPIPE crash. Affects every
-    // Windows user whose username contains a space (very common).
-    // GitHub issue #2.
-    //
-    // Fix: wrap the path in double quotes on Windows. shell:true is
-    // retained because cmd.exe is the documented path for spawning
-    // .exe files via vscode-languageclient.
-    const isWindows = os.platform() === 'win32';
-    const command = isWindows ? `"${serverModule}"` : serverModule;
-    const serverOptions: ServerOptions = {
-        command,
-        args: [],
-        transport: TransportKind.stdio,
-        options: {
-            // On Windows, we need shell: true to properly spawn .exe files
-            shell: isWindows,
-            // Ensure proper working directory
-            cwd: context.extensionPath,
-        },
+    // Spawn the server ourselves (function-form ServerOptions) so we can
+    // observe its exit code/signal for crash diagnostics. Spawning the binary
+    // directly with no shell also fixes the Windows path-with-spaces bug
+    // (issue #2) properly — Node passes argv without shell word-splitting, so
+    // `C:\Users\First Last\...\codegraph-server.exe` no longer breaks at the
+    // space the way `shell:true` + cmd.exe did. stdio defaults to pipes, which
+    // vscode-languageclient uses for the LSP transport (stderr → outputChannel).
+    const serverOptions: ServerOptions = () => {
+        const child = cp.spawn(serverModule, [], { cwd: context.extensionPath });
+        child.once('exit', (code, signal) => {
+            lastExitCode = code;
+            lastExitSignal = signal;
+        });
+        return Promise.resolve(child);
     };
 
     // Client options
@@ -281,6 +274,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 maxFileSizeKB: latestConfig.get<number>('maxFileSizeKB'),
                 embeddingModel: latestConfig.get<string>('embeddingModel'),
                 fullBodyEmbedding: latestConfig.get<boolean>('fullBodyEmbedding'),
+                embedOnOpen: latestConfig.get<boolean>('embedOnOpen'),
             };
             console.log('[CodeGraph] Initialization options:', JSON.stringify(opts));
             return opts;
@@ -370,7 +364,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     lastToolName: toolManager?.lastToolName,
                     crashCause,
                     crashPhase,
+                    exitCode: lastExitCode ?? undefined,
+                    exitSignal: lastExitSignal ?? undefined,
                 });
+                lastExitCode = null;
+                lastExitSignal = null;
 
                 // Crash-loop detection: track rapid crashes and stop
                 // restarting if we hit the cap. Prevents infinite
@@ -502,6 +500,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     excludePatterns: updated.get<string[]>('excludePatterns'),
                     indexPaths: updated.get<string[]>('indexPaths'),
                     maxFileSizeKB: updated.get<number>('maxFileSizeKB'),
+                    embedOnOpen: updated.get<boolean>('embedOnOpen'),
                 };
                 try {
                     await client.sendRequest('workspace/executeCommand', {

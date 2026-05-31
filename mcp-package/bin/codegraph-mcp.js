@@ -15,6 +15,9 @@ const TELEMETRY_ENABLED =
 
 let posthog = null;
 let machineId = null;
+// Set when WE initiate shutdown (forwarded signal) so a normal exit isn't
+// misreported as a crash.
+let intentionalShutdown = false;
 
 if (TELEMETRY_ENABLED) {
   try {
@@ -164,7 +167,21 @@ child.on("exit", (code, signal) => {
   if (stderrBuf.trim()) {
     process.stderr.write(stderrBuf);
   }
-  if (signal) {
+  // Report abnormal, non-self-initiated exits so the MCP channel surfaces WHY
+  // the server died (mirrors the extension's server.crash exit info): a unix
+  // signal (SIGSEGV / SIGKILL=OOM) or a non-zero / Windows exit code.
+  const abnormal =
+    !intentionalShutdown &&
+    (signal != null || (typeof code === "number" && code !== 0));
+  if (abnormal) {
+    sendTelemetry({
+      event: "mcp.crash",
+      exitCode: typeof code === "number" ? code : -1,
+      exitSignal: signal || "none",
+    });
+    // Flush before exiting so the crash event isn't lost.
+    flushAndExit(typeof code === "number" ? code : 1);
+  } else if (signal) {
     process.kill(process.pid, signal);
   } else {
     flushAndExit(code ?? 1);
@@ -172,5 +189,8 @@ child.on("exit", (code, signal) => {
 });
 
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-  process.on(sig, () => child.kill(sig));
+  process.on(sig, () => {
+    intentionalShutdown = true;
+    child.kill(sig);
+  });
 }

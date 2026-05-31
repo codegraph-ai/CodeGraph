@@ -2877,6 +2877,20 @@ impl McpServer {
                     total - parsed
                 );
 
+                // Embed any new/changed symbols so semantic search reflects the reindex.
+                if !self.backend.graph_only {
+                    self.backend.query_engine.embed_missing_symbols().await;
+                    self.backend.query_engine.prune_orphan_vectors().await;
+                    if let Err(e) = self
+                        .backend
+                        .query_engine
+                        .save_symbol_vectors(&self.backend.project_slug)
+                        .await
+                    {
+                        tracing::warn!("Failed to persist vectors after reindex: {}", e);
+                    }
+                }
+
                 Ok(serde_json::json!({
                     "status": "success",
                     "message": format!("Reindexed {} files ({} changed, {} skipped)", total, parsed, total - parsed),

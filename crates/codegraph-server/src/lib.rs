@@ -29,6 +29,7 @@ pub mod cache;
 pub mod crash_phase;
 pub mod custom_requests;
 pub mod domain;
+pub mod embed_queue;
 pub mod error;
 pub mod git_mining;
 pub mod handlers;

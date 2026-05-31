@@ -282,6 +282,31 @@ export function normalizeCrashPhase(s: string | undefined): CrashPhase {
 }
 
 /**
+ * Process exit signal of the crashed server child (unix). Distinguishes our
+ * own crash (SIGSEGV/SIGILL/SIGABRT/SIGBUS/SIGFPE) from an external kill
+ * (SIGKILL = OOM-killer or `kill -9`; SIGTERM = AV / shutdown). Windows has
+ * no signals — it reports the exit code instead (see `exitCode`).
+ */
+export const EXIT_SIGNALS = [
+    'SIGSEGV',
+    'SIGABRT',
+    'SIGKILL',
+    'SIGILL',
+    'SIGBUS',
+    'SIGFPE',
+    'SIGTERM',
+    'SIGINT',
+    'SIGHUP',
+    'other',
+] as const;
+export type ExitSignal = (typeof EXIT_SIGNALS)[number];
+const EXIT_SIGNAL_SET = new Set<string>(EXIT_SIGNALS);
+export function normalizeExitSignal(s: string | undefined): ExitSignal {
+    if (!s) return 'other';
+    return (EXIT_SIGNAL_SET.has(s) ? s : 'other') as ExitSignal;
+}
+
+/**
  * Settings included in `engagement.settingsSnapshot`. Only booleans,
  * server-defined enums, and bucketed numbers — NEVER free-form strings
  * (`excludePatterns`, `indexPaths`, custom `languages`) or path-bearing

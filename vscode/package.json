@@ -2,7 +2,7 @@
     "name": "codegraph",
     "displayName": "CodeGraph",
     "description": "Cross-language code intelligence powered by graph analysis",
-    "version": "0.17.8",
+    "version": "0.17.10",
     "publisher": "aStudioPlus",
     "author": "Andrey Vasilevsky <anvanster@gmail.com>",
     "license": "Apache-2.0",
@@ -289,6 +289,12 @@
                     "default": true,
                     "scope": "resource",
                     "description": "Embed full function body (first ~50 lines) instead of just name+signature. Better quality for NL search and clone detection, ~3x slower indexing. Requires reindex after changing."
+                },
+                "codegraph.embedOnOpen": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Re-embed files in the background as you open or edit them so semantic search stays current. When off, embeddings refresh only on save or reindex (lower CPU). No effect when embeddings are disabled by the low-memory gate."
                 },
                 "codegraph.visualization.defaultDepth": {
                     "type": "number",

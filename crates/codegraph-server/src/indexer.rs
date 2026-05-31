@@ -370,7 +370,7 @@ impl Indexer {
             let exclude_set = config.build_exclude_set();
             let supported_extensions = self.parsers.supported_extensions();
 
-            tracing::info!("Indexing directory: {:?}", dir);
+            tracing::debug!("Scanning directory: {:?}", dir);
 
             let mut total = 0usize;
             let mut parsed = 0usize;

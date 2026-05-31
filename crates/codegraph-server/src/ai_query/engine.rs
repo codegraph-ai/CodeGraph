@@ -681,6 +681,30 @@ impl QueryEngine {
         }
     }
 
+    /// Drop vectors whose node no longer exists in the graph.
+    ///
+    /// Re-parsing a file deletes its old nodes and creates new ones with fresh
+    /// IDs, leaving the old IDs' vectors orphaned. Left unchecked these accumulate
+    /// across every edit. Semantic search already skips dead nodes, so this is
+    /// hygiene (bounded memory) rather than a correctness fix.
+    pub async fn prune_orphan_vectors(&self) {
+        let live: std::collections::HashSet<NodeId> = {
+            let graph = self.graph.read().await;
+            graph.iter_nodes().map(|(id, _)| id).collect()
+        };
+
+        let mut vecs = self.symbol_vectors.write().await;
+        let before = vecs.len();
+        vecs.retain(|id, _| live.contains(id));
+        let removed = before - vecs.len();
+        drop(vecs);
+
+        if removed > 0 {
+            self.symbol_texts.write().await.retain(|id, _| live.contains(id));
+            tracing::debug!("[QueryEngine] pruned {} orphan vectors", removed);
+        }
+    }
+
     /// Search for symbols by name, docstring, or comments.
     /// Uses hybrid BM25 + semantic scoring when vector engine is available.
     pub async fn symbol_search(&self, query: &str, options: &SearchOptions) -> SymbolSearchResult {

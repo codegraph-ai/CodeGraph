@@ -3,6 +3,9 @@
 
 //! File system watcher for incremental updates.
 
+use crate::ai_query::QueryEngine;
+use crate::embed_queue::EmbedQueue;
+use crate::index::SymbolIndex;
 use crate::memory::MemoryManager;
 use crate::parser_registry::ParserRegistry;
 use codegraph::CodeGraph;
@@ -30,6 +33,9 @@ impl FileWatcher {
         parsers: Arc<ParserRegistry>,
         client: Client,
         memory_manager: Arc<MemoryManager>,
+        symbol_index: Arc<SymbolIndex>,
+        query_engine: Arc<QueryEngine>,
+        embed_queue: EmbedQueue,
     ) -> Result<Self, notify::Error> {
         let (tx, mut rx) = mpsc::channel::<Event>(100);
 
@@ -48,6 +54,9 @@ impl FileWatcher {
         let parsers_clone = Arc::clone(&parsers);
         let client_clone = client.clone();
         let memory_clone = Arc::clone(&memory_manager);
+        let symbol_index_clone = Arc::clone(&symbol_index);
+        let query_engine_clone = Arc::clone(&query_engine);
+        let embed_queue_clone = embed_queue.clone();
 
         tokio::spawn(async move {
             let debounce_duration = Duration::from_millis(DEFAULT_DEBOUNCE_MS);
@@ -88,7 +97,17 @@ impl FileWatcher {
                                 paths: vec![path],
                                 attrs: Default::default(),
                             };
-                            Self::handle_event(&graph_clone, &parsers_clone, &client_clone, &memory_clone, event).await;
+                            Self::handle_event(
+                                &graph_clone,
+                                &parsers_clone,
+                                &client_clone,
+                                &memory_clone,
+                                &symbol_index_clone,
+                                &query_engine_clone,
+                                &embed_queue_clone,
+                                event,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -109,11 +128,15 @@ impl FileWatcher {
     }
 
     /// Handle a file system event.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_event(
         graph: &Arc<RwLock<CodeGraph>>,
         parsers: &Arc<ParserRegistry>,
         client: &Client,
         memory_manager: &Arc<MemoryManager>,
+        symbol_index: &Arc<SymbolIndex>,
+        query_engine: &Arc<QueryEngine>,
+        embed_queue: &EmbedQueue,
         event: Event,
     ) {
         match event.kind {
@@ -124,8 +147,16 @@ impl FileWatcher {
                         continue;
                     }
 
-                    if let Err(e) =
-                        Self::handle_file_change(graph, parsers, memory_manager, &path).await
+                    if let Err(e) = Self::handle_file_change(
+                        graph,
+                        parsers,
+                        memory_manager,
+                        symbol_index,
+                        query_engine,
+                        embed_queue,
+                        &path,
+                    )
+                    .await
                     {
                         client
                             .log_message(
@@ -140,7 +171,15 @@ impl FileWatcher {
             }
             EventKind::Remove(_) => {
                 for path in event.paths {
-                    if let Err(e) = Self::handle_file_remove(graph, memory_manager, &path).await {
+                    if let Err(e) = Self::handle_file_remove(
+                        graph,
+                        memory_manager,
+                        symbol_index,
+                        embed_queue,
+                        &path,
+                    )
+                    .await
+                    {
                         client
                             .log_message(
                                 MessageType::WARNING,
@@ -157,10 +196,14 @@ impl FileWatcher {
     }
 
     /// Handle a file creation or modification.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_file_change(
         graph: &Arc<RwLock<CodeGraph>>,
         parsers: &Arc<ParserRegistry>,
         memory_manager: &Arc<MemoryManager>,
+        symbol_index: &Arc<SymbolIndex>,
+        query_engine: &Arc<QueryEngine>,
+        embed_queue: &EmbedQueue,
         path: &Path,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Skip non-parseable files
@@ -186,11 +229,18 @@ impl FileWatcher {
             Self::remove_file_nodes(&mut graph, path)?;
 
             // Parse and add new nodes
-            parser.parse_source(&content, path, &mut graph)?;
+            let file_info = parser.parse_source(&content, path, &mut graph)?;
 
             // Resolve cross-file imports after parsing
             GraphUpdater::resolve_cross_file_imports(&mut graph);
+
+            // Keep the LSP symbol index (hover/goto) in sync with the graph.
+            symbol_index.add_file(path.to_path_buf(), &file_info, &graph);
         }
+
+        // Refresh caller/callee/import indexes, then queue re-embedding.
+        query_engine.build_indexes().await;
+        embed_queue.enqueue(path.to_path_buf());
 
         // Auto-invalidate memories linked to changed nodes (after releasing graph lock)
         if !node_id_strings.is_empty() {
@@ -210,6 +260,8 @@ impl FileWatcher {
     async fn handle_file_remove(
         graph: &Arc<RwLock<CodeGraph>>,
         memory_manager: &Arc<MemoryManager>,
+        symbol_index: &Arc<SymbolIndex>,
+        embed_queue: &EmbedQueue,
         path: &Path,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let path_str = path.to_string_lossy().to_string();
@@ -224,6 +276,11 @@ impl FileWatcher {
 
             Self::remove_file_nodes(&mut graph, path)?;
         }
+
+        // Drop the file's symbols from the hover index; queue a pass to prune
+        // the now-orphaned vectors (update_file_vectors finds nothing to add).
+        symbol_index.remove_file(path);
+        embed_queue.enqueue(path.to_path_buf());
 
         // Auto-invalidate memories linked to deleted nodes
         if !node_id_strings.is_empty() {
