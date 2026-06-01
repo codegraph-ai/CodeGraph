@@ -933,8 +933,18 @@ impl McpServer {
         self.execute_tool(tool_name, tool_args).await
     }
 
-    /// Ensure workspace is indexed (lazy — runs on first tool call)
-    async fn ensure_indexed(&mut self) {
+    /// Inject a shared VectorEngine (Model B engine) before indexing so this
+    /// workspace reuses the one model instead of loading its own.
+    pub(crate) async fn set_shared_engine(
+        &self,
+        engine: std::sync::Arc<codegraph_memory::VectorEngine>,
+    ) {
+        self.backend.memory_manager.set_engine(engine).await;
+    }
+
+    /// Ensure workspace is indexed (lazy — runs on first tool call, or once at
+    /// engine startup before serving connections).
+    pub(crate) async fn ensure_indexed(&mut self) {
         if self.indexed {
             return;
         }
@@ -1096,6 +1106,55 @@ impl McpServer {
         }
     }
 
+    /// `&self` request dispatch for the socket engine (Model B): serves many
+    /// concurrent connections against one shared, already-indexed server.
+    /// Mirrors [`Self::handle_request`] but never mutates — `initialize` is
+    /// answered statically and indexing happened once at engine load. Returns
+    /// `None` for notifications (no response written).
+    pub(crate) async fn handle_request_shared(
+        &self,
+        request: JsonRpcRequest,
+    ) -> Option<JsonRpcResponse> {
+        let id = request.id.clone();
+        let resp = match request.method.as_str() {
+            "initialize" => {
+                let result = InitializeResult {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    capabilities: ServerCapabilities {
+                        experimental: None,
+                        logging: Some(LoggingCapability {}),
+                        prompts: None,
+                        resources: Some(ResourcesCapability {
+                            subscribe: Some(false),
+                            list_changed: Some(false),
+                        }),
+                        tools: Some(ToolsCapability {
+                            list_changed: Some(false),
+                        }),
+                    },
+                    server_info: ServerInfo {
+                        name: SERVER_NAME.to_string(),
+                        version: Some(SERVER_VERSION.to_string()),
+                    },
+                };
+                JsonRpcResponse::success(id, serde_json::to_value(result).unwrap())
+            }
+            "ping" => {
+                JsonRpcResponse::success(id, serde_json::to_value(PingResult {}).unwrap())
+            }
+            "tools/list" => self.handle_tools_list(id).await,
+            "tools/call" => self.tools_call_response(id, request.params).await,
+            "resources/list" => self.handle_resources_list(id).await,
+            "resources/read" => self.handle_resources_read(id, request.params).await,
+            "initialized"
+            | "notifications/initialized"
+            | "notifications/cancelled"
+            | "notifications/roots/list_changed" => return None,
+            other => JsonRpcResponse::error(id, JsonRpcError::method_not_found(other)),
+        };
+        Some(resp)
+    }
+
     async fn handle_initialize(
         &mut self,
         id: Option<Value>,
@@ -1208,7 +1267,18 @@ impl McpServer {
         params: Option<Value>,
     ) -> JsonRpcResponse {
         self.ensure_indexed().await;
+        self.tools_call_response(id, params).await
+    }
 
+    /// Tool-call dispatch without the lazy index step. Shared by the stdio
+    /// handler (which calls `ensure_indexed` first) and the socket engine
+    /// (indexed once at load), so both produce identical tool results. `&self`
+    /// so the engine can serve it concurrently across connections.
+    async fn tools_call_response(
+        &self,
+        id: Option<Value>,
+        params: Option<Value>,
+    ) -> JsonRpcResponse {
         let params: ToolCallParams = match params {
             Some(p) => match serde_json::from_value(p) {
                 Ok(p) => p,

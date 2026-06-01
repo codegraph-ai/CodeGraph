@@ -206,6 +206,15 @@ impl MemoryManager {
             e
         })?;
 
+        // Model B: if a shared VectorEngine was injected via `set_engine`, reuse
+        // it and skip the per-workspace RAM gate + model load entirely — the
+        // socket engine holds ONE model across all workspaces.
+        if self.engine.read().await.is_some() {
+            *self.data_dir.write().await = Some(data_dir.clone());
+            tracing::info!("[MemoryManager::initialize] reusing shared vector engine (no per-workspace model load)");
+            return Ok(());
+        }
+
         // Initialize vector engine with selected model (cached, doesn't hold DB lock)
         let cache_dir = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
@@ -309,6 +318,12 @@ impl MemoryManager {
     /// Returns None if memory manager hasn't been initialized yet.
     pub async fn get_vector_engine(&self) -> Option<Arc<VectorEngine>> {
         self.engine.read().await.clone()
+    }
+
+    /// Inject a shared VectorEngine (Model B socket engine) so this manager
+    /// reuses one model instead of loading its own. Call before `initialize`.
+    pub async fn set_engine(&self, engine: Arc<VectorEngine>) {
+        *self.engine.write().await = Some(engine);
     }
 
     /// Open a fresh MemoryStore for an operation
