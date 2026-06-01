@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-harness"
-version = "0.17.11"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-memory"
-version = "0.17.11"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1070,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-server"
-version = "0.17.11"
+version = "0.18.0"
 dependencies = [
  "clap",
  "codegraph",
