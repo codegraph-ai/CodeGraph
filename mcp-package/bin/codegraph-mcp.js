@@ -125,7 +125,19 @@ function findBinary() {
 // ── Spawn the Rust binary ────────────────────────────────────────────
 
 const binaryPath = findBinary();
-const args = ["--mcp", ...process.argv.slice(2)];
+
+// Model B (opt-in): route this session through the shared socket engine via a
+// thin `--connect` relay (~20 MB) instead of a full per-session server (~360 MB+).
+// The relay auto-spawns the engine on first use; the engine holds one model
+// across all sessions/projects. Unix-only for now; OFF by default so existing
+// behavior is unchanged until the engine is proven in the wild.
+const USE_ENGINE =
+  ["1", "true", "on", "yes"].includes(
+    (process.env.CODEGRAPH_ENGINE || "").toLowerCase()
+  ) && os.platform() !== "win32";
+const args = USE_ENGINE
+  ? ["--connect", "--workspace", process.cwd(), ...process.argv.slice(2)]
+  : ["--mcp", ...process.argv.slice(2)];
 
 // stdin/stdout are inherited (JSON-RPC channel — untouched).
 // stderr is piped so we can intercept TEL: lines for PostHog.
