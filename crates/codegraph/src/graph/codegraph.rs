@@ -620,8 +620,35 @@ impl CodeGraph {
             self.edges.len()
         );
 
+        // Keys this snapshot will (re)write.
+        let current_nodes: std::collections::HashSet<Vec<u8>> = self
+            .nodes
+            .keys()
+            .map(|id| format!("node:{id}").into_bytes())
+            .collect();
+        let current_edges: std::collections::HashSet<Vec<u8>> = self
+            .edges
+            .keys()
+            .map(|id| format!("edge:{id}").into_bytes())
+            .collect();
+
         // Build batch of all nodes and edges
         let mut operations = Vec::with_capacity(self.nodes.len() + self.edges.len() + 1);
+
+        // persist_to writes the whole graph as a snapshot. Delete any node:/edge:
+        // keys still on disk but absent in memory — e.g. nodes a re-parse removed,
+        // which get fresh ids on re-add. Without this the persist is add-only, so
+        // stale keys orphan on disk and reload as duplicate nodes.
+        for (key, _) in backend.scan_prefix(b"node:")? {
+            if !current_nodes.contains(&key) {
+                operations.push(crate::storage::BatchOperation::Delete { key });
+            }
+        }
+        for (key, _) in backend.scan_prefix(b"edge:")? {
+            if !current_edges.contains(&key) {
+                operations.push(crate::storage::BatchOperation::Delete { key });
+            }
+        }
 
         for (&id, node) in &self.nodes {
             let key = format!("node:{id}");
@@ -903,5 +930,37 @@ impl CodeGraph {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::CodeGraph;
+    use super::super::property::PropertyMap;
+    use super::super::types::NodeType;
+    use crate::storage::{MemoryBackend, StorageBackend};
+
+    /// persist_to must write a full snapshot, not append: nodes removed in memory
+    /// (e.g. by a re-parse, which re-adds survivors with fresh ids) must have their
+    /// stale keys deleted on disk. Otherwise they orphan and reload as duplicates.
+    #[test]
+    fn persist_to_deletes_orphaned_node_keys() {
+        let backend = MemoryBackend::new();
+
+        // v1: two nodes (ids 0 and 1) persisted to the shared backend.
+        let mut g1 = CodeGraph::in_memory().unwrap();
+        g1.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g1.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g1.persist_to(Box::new(backend.clone())).unwrap();
+        assert_eq!(backend.scan_prefix(b"node:").unwrap().len(), 2);
+
+        // v2: a fresh graph with a single node (id 0) — stands in for a re-parse
+        // that dropped one node and re-added the survivor with a new id.
+        let mut g2 = CodeGraph::in_memory().unwrap();
+        g2.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g2.persist_to(Box::new(backend.clone())).unwrap();
+
+        // The orphaned node:1 from v1 must be gone (was 2 before the snapshot fix).
+        assert_eq!(backend.scan_prefix(b"node:").unwrap().len(), 1);
     }
 }

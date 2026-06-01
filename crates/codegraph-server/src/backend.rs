@@ -422,6 +422,30 @@ impl CodeGraphBackend {
         }
     }
 
+    /// Persist the current in-memory graph and symbol vectors for the first
+    /// workspace folder. Used by the watcher daemon's periodic flush — the same
+    /// brief open→write→close discipline the rest of the persistence layer uses,
+    /// so the DB is never held busy between flushes.
+    pub async fn persist_workspace_graph(&self) {
+        let first = {
+            let folders = self.workspace_folders.read().await;
+            folders.first().cloned()
+        };
+        let Some(first) = first else {
+            return;
+        };
+        let slug = crate::memory::project_slug(&first);
+        {
+            let graph = self.graph.read().await;
+            if let Err(e) = Self::persist_graph_to_rocksdb(&slug, &first, &graph) {
+                tracing::warn!("Daemon graph persist failed: {}", e);
+            }
+        }
+        if let Err(e) = self.query_engine.save_symbol_vectors(&slug).await {
+            tracing::warn!("Daemon vector persist failed: {}", e);
+        }
+    }
+
     /// Persist the in-memory graph to RocksDB for cross-session persistence.
     fn persist_graph_to_rocksdb(
         slug: &str,

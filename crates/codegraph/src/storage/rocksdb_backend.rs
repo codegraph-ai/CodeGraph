@@ -96,6 +96,62 @@ impl RocksDBBackend {
         Ok(Self { db: Arc::new(db) })
     }
 
+    /// Open the database as a read-only **secondary** instance.
+    ///
+    /// A secondary opens the same on-disk database WITHOUT taking the primary's
+    /// `LOCK`, so it can read a `graph.db` that a live writer (the watcher
+    /// daemon) currently owns. It sees a point-in-time view of the primary's
+    /// flushed state plus tailed WAL; call [`Self::try_catch_up_with_primary`]
+    /// to pull in writes the primary has made since.
+    ///
+    /// `secondary_path` is a private scratch directory for the secondary's own
+    /// info logs and manifest — it MUST be different from `primary_path`.
+    ///
+    /// Writes on a secondary instance fail; this is a read path only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::Storage`] if the secondary cannot be opened (e.g.
+    /// the primary database does not exist yet).
+    pub fn open_as_secondary<P: AsRef<Path>, Q: AsRef<Path>>(
+        primary_path: P,
+        secondary_path: Q,
+    ) -> Result<Self> {
+        let opts = Options::default();
+        let db = DB::open_as_secondary(&opts, primary_path.as_ref(), secondary_path.as_ref())
+            .map_err(|e| {
+                GraphError::storage(
+                    format!(
+                        "Failed to open RocksDB secondary at {:?} (primary {:?})",
+                        secondary_path.as_ref(),
+                        primary_path.as_ref()
+                    ),
+                    Some(e),
+                )
+            })?;
+
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    /// Pull in the primary's latest flushed writes.
+    ///
+    /// Only meaningful on an instance opened via [`Self::open_as_secondary`];
+    /// a secondary does not auto-refresh, so callers invoke this before reads
+    /// that must reflect the primary's current state. A no-op-ish call on a
+    /// primary instance returns an error from RocksDB, which callers may ignore.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::Storage`] if catch-up fails.
+    pub fn try_catch_up_with_primary(&self) -> Result<()> {
+        self.db.try_catch_up_with_primary().map_err(|e| {
+            GraphError::storage(
+                "Failed to catch up RocksDB secondary with primary".to_string(),
+                Some(e),
+            )
+        })
+    }
+
     /// Get the underlying RocksDB database handle.
     ///
     /// Useful for advanced operations not exposed by the storage trait.
@@ -351,6 +407,35 @@ mod tests {
         // Should not error
         backend.flush().unwrap();
         assert_eq!(backend.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+    }
+
+    #[test]
+    fn test_secondary_reads_primary_writes_after_catch_up() {
+        let primary_dir = TempDir::new().unwrap();
+        let secondary_dir = TempDir::new().unwrap();
+        let primary_path = primary_dir.path().to_path_buf();
+        let secondary_path = secondary_dir.path().to_path_buf();
+
+        // Primary writer owns the LOCK and writes a key.
+        let mut primary = RocksDBBackend::open(&primary_path).unwrap();
+        primary.put(b"alpha", b"1").unwrap();
+        primary.flush().unwrap();
+
+        // Secondary opens read-only WITHOUT taking the primary's LOCK
+        // (the primary handle above is still live) and catches up to the write.
+        let mut secondary =
+            RocksDBBackend::open_as_secondary(&primary_path, &secondary_path).unwrap();
+        secondary.try_catch_up_with_primary().unwrap();
+        assert_eq!(secondary.get(b"alpha").unwrap(), Some(b"1".to_vec()));
+
+        // A subsequent primary write is visible after another catch-up.
+        primary.put(b"beta", b"2").unwrap();
+        primary.flush().unwrap();
+        secondary.try_catch_up_with_primary().unwrap();
+        assert_eq!(secondary.get(b"beta").unwrap(), Some(b"2".to_vec()));
+
+        // A secondary is read-only: writes must fail rather than corrupt state.
+        assert!(secondary.put(b"gamma", b"3").is_err());
     }
 
     #[test]

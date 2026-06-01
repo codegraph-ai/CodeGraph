@@ -5,26 +5,10 @@
 //!
 //! Handles MCP protocol requests and routes them to CodeGraph functionality.
 
-/// Emit a structured telemetry event to stderr for the npm wrapper to
-/// capture and forward to PostHog. The `TEL:` prefix lets the wrapper
-/// distinguish telemetry from normal tracing output. No network calls
-/// happen in the Rust binary — the JS wrapper handles PostHog ingestion.
-///
-/// Silently dropped if serialization fails (never blocks the server).
-/// The wrapper parses these lines from stderr; stdout stays reserved for
-/// the JSON-RPC channel.
-fn emit_tel(value: serde_json::Value) {
-    // Opt-out at the source too (the npm wrapper also gates forwarding).
-    if std::env::var("CODEGRAPH_TELEMETRY")
-        .map(|v| v.eq_ignore_ascii_case("off"))
-        .unwrap_or(false)
-    {
-        return;
-    }
-    if let Ok(json) = serde_json::to_string(&value) {
-        eprintln!("TEL: {json}");
-    }
-}
+// Telemetry emission is shared with the daemon and other modes; see
+// `crate::telemetry`. The `TEL:` stderr protocol is forwarded to PostHog by the
+// npm wrapper — no network calls happen in the Rust binary.
+use crate::telemetry::emit_tel;
 
 /// Map a raw tool-error string to a coarse, allowlisted class. The raw
 /// message MUST NOT be emitted — it routinely contains file paths and
@@ -955,6 +939,48 @@ impl McpServer {
             return;
         }
         self.indexed = true;
+
+        // If a watcher daemon already owns this workspace, its periodic persist
+        // keeps graph.db warm. Build the in-memory query indexes from the graph
+        // we loaded at startup and load the daemon's vectors, but SKIP the
+        // expensive walk + parse + embed and our own watcher (the daemon owns
+        // writing + watching). This is the daemon's whole point for stateless
+        // MCP sessions — warm start without the cold-start reindex.
+        if let Some(d) = crate::daemon::live_daemon_for(&self.backend.project_slug) {
+            tracing::info!(
+                "Watcher daemon (pid {}) owns this workspace — using its warm graph, skipping reindex",
+                d.pid
+            );
+            emit_tel(serde_json::json!({
+                "event": "mcp.daemon_attached",
+                "os": std::env::consts::OS,
+                "version": crate::metadata::VERSION,
+            }));
+
+            for folder in &self.backend.workspace_folders {
+                if let Err(e) = self.backend.memory_manager.initialize(folder).await {
+                    tracing::warn!("Failed to initialize memory manager: {:?}", e);
+                }
+            }
+            // Build text/caller/callee indexes from the loaded graph (cheap — no
+            // parsing) so search and graph tools work immediately.
+            self.backend.query_engine.build_indexes().await;
+            if !self.backend.graph_only {
+                if let Some(engine) = self.backend.memory_manager.get_vector_engine().await {
+                    self.backend.query_engine.set_vector_engine(engine).await;
+                    let loaded = self
+                        .backend
+                        .query_engine
+                        .load_symbol_vectors(&self.backend.project_slug)
+                        .await;
+                    tracing::info!(
+                        "Loaded {} persisted symbol vectors from daemon-maintained graph",
+                        loaded
+                    );
+                }
+            }
+            return;
+        }
 
         // Load saved index state from previous session for incremental indexing
         let had_previous_state = self.backend.load_index_state().await;

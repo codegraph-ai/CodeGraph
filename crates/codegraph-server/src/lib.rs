@@ -28,6 +28,7 @@ pub mod branch_watcher;
 pub mod cache;
 pub mod crash_phase;
 pub mod custom_requests;
+pub mod daemon;
 pub mod domain;
 pub mod embed_queue;
 pub mod error;
@@ -42,6 +43,7 @@ pub mod memory;
 pub mod metadata;
 pub mod parser_registry;
 pub mod runtime_deps;
+pub mod telemetry;
 pub mod watcher;
 
 pub use backend::CodeGraphBackend;

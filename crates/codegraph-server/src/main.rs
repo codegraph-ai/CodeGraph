@@ -91,6 +91,18 @@ struct Args {
     /// JSON arguments for --run-tool (default: {}).
     #[arg(long, default_value = "{}")]
     tool_args: String,
+
+    /// Run as a background watcher daemon: index the workspace, keep it fresh
+    /// as files change (file watcher + incremental embedding), and persist
+    /// periodically so MCP/LSP sessions load a warm graph instead of
+    /// re-indexing. Runs until SIGINT/SIGTERM. Use with --workspace.
+    #[arg(long)]
+    watch: bool,
+
+    /// Path to the extension/package directory that contains the embedding
+    /// model (daemon mode). When omitted the daemon runs graph-only.
+    #[arg(long)]
+    extension_path: Option<PathBuf>,
 }
 
 /// Re-entrancy guard for the panic hook. A second panic during hook
@@ -255,6 +267,28 @@ async fn main() {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
+
+    // Background watcher daemon. It owns its own signal handling and clean
+    // shutdown (final persist + heartbeat removal), so it runs BEFORE the global
+    // process::exit signal hook below — which would otherwise abort mid-flush.
+    if args.watch {
+        let workspace = args
+            .workspace
+            .first()
+            .cloned()
+            .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current directory"));
+        let config = codegraph_server::daemon::DaemonConfig {
+            workspace,
+            exclude_patterns: args.exclude.clone(),
+            extension_path: args.extension_path.clone(),
+            embedding_model: Some(args.embedding_model.clone()),
+        };
+        if let Err(e) = codegraph_server::daemon::run(config).await {
+            eprintln!("daemon error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Install AFTER the runtime starts (tokio::spawn requires it). Runs
     // before any RocksDB open so the LOCK release path is wired up first.
