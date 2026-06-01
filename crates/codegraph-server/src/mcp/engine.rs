@@ -12,6 +12,9 @@
 //! (`{"cg_attach":{"workspace":"<abs>"}}`) naming its workspace; the engine
 //! lazily loads that workspace's backend (reusing the shared model) and routes
 //! the connection's requests to it via the `&self` `handle_request_shared`.
+//!
+//! Lifecycle: a `--connect` shim auto-spawns the engine if no socket is live,
+//! and the engine self-exits after an idle period with no connections.
 
 use std::path::PathBuf;
 
@@ -41,11 +44,31 @@ fn model_cache_dir() -> PathBuf {
         .join("fastembed_cache")
 }
 
+/// Seconds with no connections before the engine self-exits.
+/// Override with `CODEGRAPH_ENGINE_IDLE_SECS` (default 1800 = 30 min).
+#[cfg(unix)]
+fn idle_timeout_secs() -> u64 {
+    std::env::var("CODEGRAPH_ENGINE_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800)
+}
+
+#[cfg(unix)]
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(unix)]
 mod imp {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::Mutex;
@@ -60,6 +83,10 @@ mod imp {
         /// One model shared by every workspace; `None` if the model couldn't be
         /// loaded (low memory) — workspaces then run graph-only.
         shared_engine: Option<Arc<VectorEngine>>,
+        /// Live connection count and the unix time the engine last went idle
+        /// (0 while connections are active) — drives the idle-exit timer.
+        active: AtomicUsize,
+        idle_since: AtomicU64,
     }
 
     /// Load (or fetch from the registry) the backend for `workspace`, reusing the
@@ -110,6 +137,18 @@ mod imp {
     }
 
     async fn handle_conn(engine: Arc<Engine>, stream: UnixStream) {
+        engine.active.fetch_add(1, Ordering::SeqCst);
+        engine.idle_since.store(0, Ordering::SeqCst);
+
+        serve_conn(&engine, stream).await;
+
+        if engine.active.fetch_sub(1, Ordering::SeqCst) == 1 {
+            // Last connection closed — start the idle clock.
+            engine.idle_since.store(now_unix(), Ordering::SeqCst);
+        }
+    }
+
+    async fn serve_conn(engine: &Arc<Engine>, stream: UnixStream) {
         let (read_half, mut write_half) = stream.into_split();
         let mut lines = BufReader::new(read_half).lines();
 
@@ -123,7 +162,7 @@ mod imp {
         let workspace = attach_ws
             .or_else(|| engine.cfg.seeds.first().cloned())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let server = get_or_load(&engine, workspace).await;
+        let server = get_or_load(engine, workspace).await;
 
         // If the first line was actually a request (no attach frame), dispatch it.
         let mut queued = pending;
@@ -160,7 +199,20 @@ mod imp {
         }
     }
 
+    /// True if a live engine is already listening on the socket (probe by
+    /// connecting). Distinguishes a stale socket file from a running engine so we
+    /// neither steal a live socket nor refuse to start over a dead one.
+    async fn engine_is_live(socket_path: &std::path::Path) -> bool {
+        UnixStream::connect(socket_path).await.is_ok()
+    }
+
     pub async fn serve(cfg: EngineConfig) -> Result<(), String> {
+        // Don't start a second engine over a live one (handles auto-spawn races).
+        if engine_is_live(&cfg.socket_path).await {
+            tracing::info!("Engine: another instance is already live — exiting");
+            return Ok(());
+        }
+
         // One model for the whole engine. Gate on free memory the same way the
         // per-workspace path does, so a constrained box runs graph-only instead
         // of OOM-crashing on the model load.
@@ -190,6 +242,8 @@ mod imp {
             cfg,
             registry: Arc::new(Mutex::new(HashMap::new())),
             shared_engine,
+            active: AtomicUsize::new(0),
+            idle_since: AtomicU64::new(now_unix()),
         });
 
         // Pre-load any seed workspaces.
@@ -197,6 +251,8 @@ mod imp {
             let _ = get_or_load(&engine, ws).await;
         }
 
+        // Stale socket from a prior run — safe to clear now (probe above showed
+        // no live engine).
         let _ = std::fs::remove_file(&socket_path);
         if let Some(parent) = socket_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -204,6 +260,29 @@ mod imp {
         let listener = UnixListener::bind(&socket_path)
             .map_err(|e| format!("Failed to bind {}: {e}", socket_path.display()))?;
         tracing::info!("Engine listening on {}", socket_path.display());
+
+        // Idle-exit monitor: stop the process after `idle_timeout_secs` with no
+        // connections, so an auto-spawned engine doesn't linger forever.
+        {
+            let engine = Arc::clone(&engine);
+            let timeout = idle_timeout_secs();
+            let check = (timeout / 2).clamp(2, 30);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(check)).await;
+                    if engine.active.load(Ordering::SeqCst) == 0 {
+                        let since = engine.idle_since.load(Ordering::SeqCst);
+                        if since != 0 && now_unix().saturating_sub(since) >= timeout {
+                            tracing::info!(
+                                "Engine: idle {timeout}s with no clients — shutting down"
+                            );
+                            let _ = std::fs::remove_file(&engine.cfg.socket_path);
+                            std::process::exit(0);
+                        }
+                    }
+                }
+            });
+        }
 
         loop {
             let (stream, _) = listener
@@ -215,14 +294,59 @@ mod imp {
         }
     }
 
-    pub async fn connect(socket_path: &std::path::Path, workspace: PathBuf) -> Result<(), String> {
+    /// Spawn a detached engine for `socket_path` using this binary, so the engine
+    /// outlives the shim. Best-effort; the caller retries the connect.
+    fn spawn_engine(socket_path: &std::path::Path, embedding_model: &str) {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Engine auto-spawn: cannot resolve current exe: {e}");
+                return;
+            }
+        };
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--serve")
+            .arg("--socket")
+            .arg(socket_path)
+            .arg("--embedding-model")
+            .arg(embedding_model)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match cmd.spawn() {
+            Ok(_) => tracing::info!("Engine auto-spawn: started engine for {}", socket_path.display()),
+            Err(e) => tracing::warn!("Engine auto-spawn failed: {e}"),
+        }
+    }
+
+    pub async fn connect(
+        socket_path: &std::path::Path,
+        workspace: PathBuf,
+        embedding_model: &str,
+    ) -> Result<(), String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let stream = UnixStream::connect(socket_path).await.map_err(|e| {
-            format!(
-                "Failed to connect to engine at {}: {e}",
-                socket_path.display()
-            )
-        })?;
+
+        // Connect, auto-spawning the engine if none is live yet.
+        let stream = match UnixStream::connect(socket_path).await {
+            Ok(s) => s,
+            Err(_) => {
+                spawn_engine(socket_path, embedding_model);
+                let mut connected = None;
+                for _ in 0..60 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if let Ok(s) = UnixStream::connect(socket_path).await {
+                        connected = Some(s);
+                        break;
+                    }
+                }
+                connected.ok_or_else(|| {
+                    format!(
+                        "engine did not come up at {} within 30s",
+                        socket_path.display()
+                    )
+                })?
+            }
+        };
         let (mut sock_read, mut sock_write) = stream.into_split();
 
         // Bind this connection to the workspace before relaying.
@@ -274,6 +398,10 @@ pub async fn serve(_cfg: EngineConfig) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-pub async fn connect(_socket_path: &std::path::Path, _workspace: PathBuf) -> Result<(), String> {
+pub async fn connect(
+    _socket_path: &std::path::Path,
+    _workspace: PathBuf,
+    _embedding_model: &str,
+) -> Result<(), String> {
     Err("the socket engine is not yet supported on this platform".to_string())
 }

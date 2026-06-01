@@ -303,7 +303,9 @@ async fn main() {
             .first()
             .cloned()
             .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current directory"));
-        if let Err(e) = codegraph_server::mcp::engine::connect(&sock, workspace).await {
+        if let Err(e) =
+            codegraph_server::mcp::engine::connect(&sock, workspace, &args.embedding_model).await
+        {
             eprintln!("connect failed: {e}");
             std::process::exit(1);
         }
