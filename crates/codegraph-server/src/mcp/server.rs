@@ -681,7 +681,9 @@ impl McpBackend {
                         if let Err(e) = query_engine.save_symbol_vectors(&slug).await {
                             tracing::warn!("Failed to persist symbol vectors: {}", e);
                         }
-                        tracing::info!("Background embedding generation complete — semantic search ready");
+                        tracing::info!(
+                            "Background embedding generation complete — semantic search ready"
+                        );
                     });
                 }
             }
@@ -1139,9 +1141,7 @@ impl McpServer {
                 };
                 JsonRpcResponse::success(id, serde_json::to_value(result).unwrap())
             }
-            "ping" => {
-                JsonRpcResponse::success(id, serde_json::to_value(PingResult {}).unwrap())
-            }
+            "ping" => JsonRpcResponse::success(id, serde_json::to_value(PingResult {}).unwrap()),
             "tools/list" => self.handle_tools_list(id).await,
             "tools/call" => self.tools_call_response(id, request.params).await,
             "resources/list" => self.handle_resources_list(id).await,
@@ -1384,11 +1384,20 @@ impl McpServer {
         let degradation_warning = {
             let graph = self.backend.graph.read().await;
             let n = graph.node_count();
-            if n < 10 && !matches!(name, "codegraph_reindex_workspace" | "codegraph_index_directory" | "codegraph_index_files" | "codegraph_index_markdown") {
+            if n < 10
+                && !matches!(
+                    name,
+                    "codegraph_reindex_workspace"
+                        | "codegraph_index_directory"
+                        | "codegraph_index_files"
+                        | "codegraph_index_markdown"
+                )
+            {
                 Some(format!(
                     "Workspace has only {} nodes — it may not be indexed yet. \
                      Run codegraph_reindex_workspace for full code intelligence \
-                     (typically 10-50× more results).", n
+                     (typically 10-50× more results).",
+                    n
                 ))
             } else {
                 None
@@ -2288,10 +2297,12 @@ impl McpServer {
                 // Phase 2: auto-augment with indexed doc chunks if any
                 // exist. Search by filename + directory name to catch
                 // both "auth.rs" and "auth module" mentions in docs.
-                let file_stem = path.file_stem()
+                let file_stem = path
+                    .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
-                let parent_name = path.parent()
+                let parent_name = path
+                    .parent()
                     .and_then(|p| p.file_name())
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
@@ -2301,16 +2312,21 @@ impl McpServer {
                     format!("{} {}", parent_name, file_stem)
                 };
                 if !doc_query.is_empty() {
-                    if let Ok(doc_results) = self.backend.memory_manager.search_docs(&doc_query, 2).await {
+                    if let Ok(doc_results) =
+                        self.backend.memory_manager.search_docs(&doc_query, 2).await
+                    {
                         if !doc_results.is_empty() {
-                            let doc_chunks: Vec<serde_json::Value> = doc_results.iter().map(|r| {
-                                serde_json::json!({
-                                    "section": r.chunk.heading_path.join(" > "),
-                                    "source": r.chunk.source_file,
-                                    "content": r.chunk.content,
-                                    "score": (r.score * 1000.0).round() / 1000.0,
+                            let doc_chunks: Vec<serde_json::Value> = doc_results
+                                .iter()
+                                .map(|r| {
+                                    serde_json::json!({
+                                        "section": r.chunk.heading_path.join(" > "),
+                                        "source": r.chunk.source_file,
+                                        "content": r.chunk.content,
+                                        "score": (r.score * 1000.0).round() / 1000.0,
+                                    })
                                 })
-                            }).collect();
+                                .collect();
                             if let Some(obj) = json.as_object_mut() {
                                 obj.insert("design_context".to_string(), serde_json::json!({
                                     "note": "Relevant sections from indexed project docs (via codegraph_index_markdown)",
@@ -3110,10 +3126,7 @@ impl McpServer {
                     .get("query")
                     .and_then(|v| v.as_str())
                     .ok_or("query parameter is required")?;
-                let limit = args
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(5) as usize;
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
                 let results = self
                     .backend
@@ -3250,7 +3263,11 @@ impl McpServer {
                     }
                     result_json["forward_message"] = serde_json::json!(format!(
                         "Doc→Code: {}/{} identifiers verified",
-                        if is_gaps_only { claims.len() - gaps.len() } else { verified.len() },
+                        if is_gaps_only {
+                            claims.len() - gaps.len()
+                        } else {
+                            verified.len()
+                        },
                         claims.len()
                     ));
                 }
@@ -3258,7 +3275,8 @@ impl McpServer {
                 // Reverse: code → doc (are public symbols documented?)
                 if run_reverse {
                     // Build a word-set from all indexed doc chunks for fast lookup
-                    let doc_text: String = chunks.iter()
+                    let doc_text: String = chunks
+                        .iter()
                         .map(|c| format!("{} {}", c.title, c.content))
                         .collect::<Vec<_>>()
                         .join(" ")
@@ -3271,8 +3289,16 @@ impl McpServer {
 
                     for (_node_id, node) in graph.iter_nodes() {
                         // Only check public functions, classes, traits, interfaces
-                        let vis = node.properties.get_string("visibility").unwrap_or("private");
-                        if vis != "public" && vis != "pub" && vis != "pub(crate)" && vis != "export" && vis != "exported" {
+                        let vis = node
+                            .properties
+                            .get_string("visibility")
+                            .unwrap_or("private");
+                        if vis != "public"
+                            && vis != "pub"
+                            && vis != "pub(crate)"
+                            && vis != "export"
+                            && vis != "exported"
+                        {
                             continue;
                         }
                         let sym_name = match node.properties.get_string("name") {
@@ -3298,7 +3324,10 @@ impl McpServer {
 
                     // Sort by name for stable output
                     undocumented.sort_by(|a, b| {
-                        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+                        a["name"]
+                            .as_str()
+                            .unwrap_or("")
+                            .cmp(b["name"].as_str().unwrap_or(""))
                     });
 
                     if compact {
@@ -3325,10 +3354,7 @@ impl McpServer {
             }
 
             "codegraph_generate_architecture_doc" => {
-                let top_n = args
-                    .get("topN")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(10) as usize;
+                let top_n = args.get("topN").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("");
 
                 let graph = self.backend.graph.read().await;
@@ -3337,7 +3363,8 @@ impl McpServer {
                 let mut dir_set = std::collections::HashSet::new();
                 let mut total_files = 0usize;
                 let mut total_functions = 0usize;
-                let mut lang_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                let mut lang_counts: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
 
                 for (_id, node) in graph.iter_nodes() {
                     let path = node.properties.get_string("path").unwrap_or("");
@@ -3367,22 +3394,32 @@ impl McpServer {
                 // Build module summaries for top-level dirs (limit depth)
                 let mut module_sections = Vec::new();
                 for dir in dirs.iter().take(30) {
-                    let summary = crate::domain::module_summary::get_module_summary(
-                        &graph, dir, top_n,
-                    );
+                    let summary =
+                        crate::domain::module_summary::get_module_summary(&graph, dir, top_n);
                     if summary.files == 0 && summary.total_functions == 0 {
                         continue;
                     }
-                    let langs: String = summary.languages.iter()
+                    let langs: String = summary
+                        .languages
+                        .iter()
                         .map(|l| format!("{} ({})", l.language, l.files))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let complex: String = summary.top_complex_functions.iter()
+                    let complex: String = summary
+                        .top_complex_functions
+                        .iter()
                         .take(3)
                         .map(|f| format!("`{}` ({})", f.name, f.complexity))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let short_dir = dir.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+                    let short_dir = dir
+                        .rsplit('/')
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("/");
 
                     let mut section = format!(
                         "### {}\n- {} files, {} functions, {} classes\n",
@@ -3400,13 +3437,18 @@ impl McpServer {
                 // Hot paths — filter out trivially-named methods (len/new/iter/get/set/...)
                 // and scope to the requested directory if set
                 let trivial_names: std::collections::HashSet<&str> = [
-                    "len", "new", "get", "set", "fmt", "eq", "ne", "cmp",
-                    "hash", "clone", "drop", "from", "into", "iter", "next",
-                    "map", "run", "init", "default", "display", "index",
-                ].iter().copied().collect();
+                    "len", "new", "get", "set", "fmt", "eq", "ne", "cmp", "hash", "clone", "drop",
+                    "from", "into", "iter", "next", "map", "run", "init", "default", "display",
+                    "index",
+                ]
+                .iter()
+                .copied()
+                .collect();
 
                 let hot = crate::domain::hot_paths::find_hot_paths(&graph, top_n * 5);
-                let filtered_hot: Vec<_> = hot.functions.iter()
+                let filtered_hot: Vec<_> = hot
+                    .functions
+                    .iter()
                     .filter(|f| {
                         !trivial_names.contains(f.name.as_str())
                             && f.name.len() > 3
@@ -3441,7 +3483,8 @@ impl McpServer {
                 // Language summary
                 let mut lang_summary: Vec<_> = lang_counts.into_iter().collect();
                 lang_summary.sort_by(|a, b| b.1.cmp(&a.1));
-                let lang_line = lang_summary.iter()
+                let lang_line = lang_summary
+                    .iter()
                     .take(10)
                     .map(|(l, c)| format!("{} ({})", l, c))
                     .collect::<Vec<_>>()
@@ -3502,7 +3545,9 @@ impl McpServer {
                     .map(|f| f == "markdown")
                     .unwrap_or(false);
 
-                let workspace_root = self.backend.workspace_folders
+                let workspace_root = self
+                    .backend
+                    .workspace_folders
                     .first()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| ".".to_string());
@@ -3546,7 +3591,10 @@ impl McpServer {
                     .map_err(|e| format!("git diff failed: {}", e))?;
 
                 if !name_output.status.success() {
-                    return Err(format!("git diff failed: {}", String::from_utf8_lossy(&name_output.stderr).trim()));
+                    return Err(format!(
+                        "git diff failed: {}",
+                        String::from_utf8_lossy(&name_output.stderr).trim()
+                    ));
                 }
 
                 let changed_rel: Vec<String> = String::from_utf8_lossy(&name_output.stdout)
@@ -3562,8 +3610,14 @@ impl McpServer {
                     }));
                 }
 
-                let changed_abs: Vec<String> = changed_rel.iter()
-                    .map(|l| std::path::Path::new(&workspace_root).join(l).to_string_lossy().to_string())
+                let changed_abs: Vec<String> = changed_rel
+                    .iter()
+                    .map(|l| {
+                        std::path::Path::new(&workspace_root)
+                            .join(l)
+                            .to_string_lossy()
+                            .to_string()
+                    })
                     .collect();
 
                 // ── Step 2: git diff --stat for line counts ──
@@ -3617,7 +3671,8 @@ impl McpServer {
                                     let range = &after[..end];
                                     let parts: Vec<&str> = range.split(',').collect();
                                     let start: u32 = parts[0].parse().unwrap_or(0);
-                                    let count: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                                    let count: u32 =
+                                        parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                                     file_changed_lines
                                         .entry(f.clone())
                                         .or_default()
@@ -3643,7 +3698,9 @@ impl McpServer {
                         .iter_nodes()
                         .filter(|(_, n)| {
                             n.node_type == codegraph::NodeType::Function
-                                && n.properties.get_string("path").map_or(false, |p| p == file.as_str())
+                                && n.properties
+                                    .get_string("path")
+                                    .map_or(false, |p| p == file.as_str())
                         })
                         .map(|(id, n)| {
                             let name = crate::domain::node_props::name(n).to_string();
@@ -3659,12 +3716,12 @@ impl McpServer {
                     for (node_id, func_name, line_start, line_end) in &file_nodes {
                         // #85: Classify change type based on diff hunks
                         let change_type = if let Some(ranges) = changed_ranges {
-                            let func_touched = ranges.iter().any(|(s, e)| {
-                                *s <= *line_end && *e >= *line_start
-                            });
-                            let sig_line_touched = ranges.iter().any(|(s, e)| {
-                                *s <= *line_start && *e >= *line_start
-                            });
+                            let func_touched = ranges
+                                .iter()
+                                .any(|(s, e)| *s <= *line_end && *e >= *line_start);
+                            let sig_line_touched = ranges
+                                .iter()
+                                .any(|(s, e)| *s <= *line_start && *e >= *line_start);
                             if !func_touched {
                                 "unchanged"
                             } else if sig_line_touched {
@@ -3684,7 +3741,9 @@ impl McpServer {
                         // Collect callers
                         let mut caller_count = 0u32;
                         let mut has_test_caller = false;
-                        if let Ok(neighbors) = graph.get_neighbors(*node_id, codegraph::Direction::Incoming) {
+                        if let Ok(neighbors) =
+                            graph.get_neighbors(*node_id, codegraph::Direction::Incoming)
+                        {
                             for caller_id in neighbors {
                                 if let Ok(caller) = graph.get_node(caller_id) {
                                     let cname = crate::domain::node_props::name(caller);
@@ -3731,9 +3790,14 @@ impl McpServer {
                         }
 
                         // #88: Complexity (current value from graph, if stored)
-                        let complexity = graph.get_node(*node_id).ok()
-                            .and_then(|n| n.properties.get_string("cyclomatic_complexity")
-                                .and_then(|s| s.parse::<u32>().ok()))
+                        let complexity = graph
+                            .get_node(*node_id)
+                            .ok()
+                            .and_then(|n| {
+                                n.properties
+                                    .get_string("cyclomatic_complexity")
+                                    .and_then(|s| s.parse::<u32>().ok())
+                            })
                             .unwrap_or(0);
 
                         if !compact {
@@ -3759,32 +3823,43 @@ impl McpServer {
                 // Dedup tests
                 let unique_tests: Vec<_> = {
                     let mut seen = std::collections::HashSet::new();
-                    all_tests.into_iter().filter(|t| {
-                        seen.insert(t["test"].as_str().unwrap_or("").to_string())
-                    }).collect()
+                    all_tests
+                        .into_iter()
+                        .filter(|t| seen.insert(t["test"].as_str().unwrap_or("").to_string()))
+                        .collect()
                 };
 
                 // Dedup test gaps by (function, file) — incremental indexing
                 // can leave duplicate function nodes in the graph.
                 let untested_functions: Vec<_> = {
                     let mut seen = std::collections::HashSet::new();
-                    untested_functions.into_iter().filter(|f| {
-                        let key = format!(
-                            "{}::{}",
-                            f["function"].as_str().unwrap_or(""),
-                            f["file"].as_str().unwrap_or(""),
-                        );
-                        seen.insert(key)
-                    }).collect()
+                    untested_functions
+                        .into_iter()
+                        .filter(|f| {
+                            let key = format!(
+                                "{}::{}",
+                                f["function"].as_str().unwrap_or(""),
+                                f["file"].as_str().unwrap_or(""),
+                            );
+                            seen.insert(key)
+                        })
+                        .collect()
                 };
 
                 // Affected modules
                 let affected_modules: Vec<String> = {
-                    let mut mods: Vec<String> = all_affected_files.iter()
+                    let mut mods: Vec<String> = all_affected_files
+                        .iter()
                         .filter_map(|f| std::path::Path::new(f).parent())
                         .map(|p| {
                             let s = p.to_string_lossy().to_string();
-                            s.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/")
+                            s.rsplit('/')
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join("/")
                         })
                         .collect::<std::collections::HashSet<_>>()
                         .into_iter()
@@ -3801,7 +3876,8 @@ impl McpServer {
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
                     if !stem.is_empty() {
-                        if let Ok(results) = self.backend.memory_manager.search_docs(&stem, 1).await {
+                        if let Ok(results) = self.backend.memory_manager.search_docs(&stem, 1).await
+                        {
                             for r in results {
                                 if r.score > 0.5 {
                                     stale_doc_warnings.push(serde_json::json!({
@@ -3821,7 +3897,8 @@ impl McpServer {
                 }
 
                 // #90: git blame for reviewer hints
-                let mut blame_authors: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                let mut blame_authors: std::collections::HashMap<String, u32> =
+                    std::collections::HashMap::new();
                 for rel_file in &changed_rel {
                     if let Ok(blame_out) = tokio::process::Command::new("git")
                         .args(["blame", "--porcelain", rel_file])
@@ -3832,7 +3909,8 @@ impl McpServer {
                         if blame_out.status.success() {
                             for line in String::from_utf8_lossy(&blame_out.stdout).lines() {
                                 if let Some(author) = line.strip_prefix("author ") {
-                                    *blame_authors.entry(author.trim().to_string()).or_default() += 1;
+                                    *blame_authors.entry(author.trim().to_string()).or_default() +=
+                                        1;
                                 }
                             }
                         }
@@ -3840,7 +3918,9 @@ impl McpServer {
                 }
                 let mut top_authors: Vec<_> = blame_authors.into_iter().collect();
                 top_authors.sort_by(|a, b| b.1.cmp(&a.1));
-                let reviewer_hints: Vec<_> = top_authors.iter().take(5)
+                let reviewer_hints: Vec<_> = top_authors
+                    .iter()
+                    .take(5)
                     .map(|(name, lines)| serde_json::json!({"author": name, "lines_owned": lines}))
                     .collect();
 
@@ -3856,14 +3936,21 @@ impl McpServer {
                 };
 
                 // #89: Commit-message hint from module locations
-                let primary_module = affected_modules.first()
+                let primary_module = affected_modules
+                    .first()
                     .and_then(|m| m.rsplit('/').next())
                     .unwrap_or("core");
-                let has_new = func_details.iter().any(|f| f["change_type"] == "signature_changed");
+                let has_new = func_details
+                    .iter()
+                    .any(|f| f["change_type"] == "signature_changed");
                 let commit_prefix = if has_new { "feat" } else { "fix" };
-                let commit_hint = format!("{}({}): <describe the change>", commit_prefix, primary_module);
+                let commit_hint = format!(
+                    "{}({}): <describe the change>",
+                    commit_prefix, primary_module
+                );
 
-                let total_functions: u64 = file_impacts.iter()
+                let total_functions: u64 = file_impacts
+                    .iter()
                     .map(|f| f["functions_changed"].as_u64().unwrap_or(0))
                     .sum();
 
@@ -3890,7 +3977,10 @@ impl McpServer {
                 if let Some(obj) = result.as_object_mut() {
                     if !compact {
                         if !func_details.is_empty() {
-                            obj.insert("function_details".to_string(), serde_json::json!(func_details));
+                            obj.insert(
+                                "function_details".to_string(),
+                                serde_json::json!(func_details),
+                            );
                         }
                         if !all_callers.is_empty() {
                             obj.insert("callers".to_string(), serde_json::json!(all_callers));
@@ -3900,13 +3990,22 @@ impl McpServer {
                         }
                     }
                     if !untested_functions.is_empty() {
-                        obj.insert("test_gaps".to_string(), serde_json::json!(untested_functions));
+                        obj.insert(
+                            "test_gaps".to_string(),
+                            serde_json::json!(untested_functions),
+                        );
                     }
                     if !stale_doc_warnings.is_empty() {
-                        obj.insert("stale_docs".to_string(), serde_json::json!(stale_doc_warnings));
+                        obj.insert(
+                            "stale_docs".to_string(),
+                            serde_json::json!(stale_doc_warnings),
+                        );
                     }
                     if !reviewer_hints.is_empty() {
-                        obj.insert("suggested_reviewers".to_string(), serde_json::json!(reviewer_hints));
+                        obj.insert(
+                            "suggested_reviewers".to_string(),
+                            serde_json::json!(reviewer_hints),
+                        );
                     }
                 }
 
@@ -3920,18 +4019,26 @@ impl McpServer {
                     md.push_str("## 🔍 CodeGraph PR Review\n\n");
                     md.push_str(&format!(
                         "**{} files changed** (+{}/−{}, {} functions) · Risk: {} **{}**\n\n",
-                        changed_rel.len(), lines_added, lines_removed, total_functions,
-                        risk_emoji, risk_level,
+                        changed_rel.len(),
+                        lines_added,
+                        lines_removed,
+                        total_functions,
+                        risk_emoji,
+                        risk_level,
                     ));
 
                     if total_direct > 0 {
                         md.push_str(&format!(
                             "### Blast radius\n{} direct caller{} affected",
-                            total_direct, if total_direct == 1 { "" } else { "s" },
+                            total_direct,
+                            if total_direct == 1 { "" } else { "s" },
                         ));
                         if !affected_modules.is_empty() {
-                            let mods: Vec<String> = affected_modules.iter().take(5)
-                                .map(|m| format!("`{}`", m)).collect();
+                            let mods: Vec<String> = affected_modules
+                                .iter()
+                                .take(5)
+                                .map(|m| format!("`{}`", m))
+                                .collect();
                             md.push_str(&format!(" across {}", mods.join(", ")));
                         }
                         md.push_str("\n\n");
@@ -3941,7 +4048,11 @@ impl McpServer {
                         md.push_str(&format!(
                             "### ⚠️ Test gaps ({} function{}, 0 coverage)\n",
                             untested_functions.len(),
-                            if untested_functions.len() == 1 { "" } else { "s" },
+                            if untested_functions.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            },
                         ));
                         for f in untested_functions.iter().take(10) {
                             md.push_str(&format!(
@@ -3952,7 +4063,10 @@ impl McpServer {
                             ));
                         }
                         if untested_functions.len() > 10 {
-                            md.push_str(&format!("- …and {} more\n", untested_functions.len() - 10));
+                            md.push_str(&format!(
+                                "- …and {} more\n",
+                                untested_functions.len() - 10
+                            ));
                         }
                         md.push('\n');
                     }
@@ -3971,19 +4085,23 @@ impl McpServer {
                     }
 
                     if !reviewer_hints.is_empty() {
-                        let revs: Vec<String> = reviewer_hints.iter()
-                            .map(|r| format!(
-                                "{} ({} lines)",
-                                r["author"].as_str().unwrap_or("?"),
-                                r["lines_owned"].as_u64().unwrap_or(0),
-                            ))
+                        let revs: Vec<String> = reviewer_hints
+                            .iter()
+                            .map(|r| {
+                                format!(
+                                    "{} ({} lines)",
+                                    r["author"].as_str().unwrap_or("?"),
+                                    r["lines_owned"].as_u64().unwrap_or(0),
+                                )
+                            })
                             .collect();
                         md.push_str(&format!("### Suggested reviewers\n{}\n\n", revs.join(", ")));
                     }
 
                     md.push_str(&format!(
                         "<sub>Suggested commit: `{}` · {} tests cover the changes</sub>\n",
-                        commit_hint, unique_tests.len(),
+                        commit_hint,
+                        unique_tests.len(),
                     ));
                     md.push_str("<sub>🤖 Generated by [CodeGraph](https://github.com/codegraph-ai/CodeGraph)</sub>\n");
 
@@ -4090,9 +4208,8 @@ impl McpServer {
                     .unwrap_or(5);
 
                 let graph = self.backend.graph.read().await;
-                let result = crate::domain::module_summary::get_module_summary(
-                    &graph, directory, top_n,
-                );
+                let result =
+                    crate::domain::module_summary::get_module_summary(&graph, directory, top_n);
 
                 Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
             }
@@ -4105,27 +4222,18 @@ impl McpServer {
                     .and_then(|uri| tower_lsp::lsp_types::Url::parse(uri).ok())
                     .and_then(|url| url.to_file_path().ok())
                     .map(|p| p.to_string_lossy().to_string());
-                let limit = args
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(100) as usize;
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
 
                 let typed_result = {
                     let graph = self.backend.graph.read().await;
-                    crate::domain::dead_imports::find_dead_imports(
-                        &graph,
-                        file_path.as_deref(),
-                    )
+                    crate::domain::dead_imports::find_dead_imports(&graph, file_path.as_deref())
                 };
 
                 let dead_count = typed_result.dead_count;
                 let total_imports = typed_result.total_imports;
                 let unresolved_count = typed_result.unresolved_imports.len();
-                let dead_imports: Vec<_> = typed_result
-                    .dead_imports
-                    .into_iter()
-                    .take(limit)
-                    .collect();
+                let dead_imports: Vec<_> =
+                    typed_result.dead_imports.into_iter().take(limit).collect();
 
                 Ok(serde_json::json!({
                     "dead_imports": dead_imports,
@@ -4147,10 +4255,7 @@ impl McpServer {
                     }
                 };
 
-                let scope = args
-                    .get("scope")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+                let scope = args.get("scope").and_then(|v| v.as_str()).map(String::from);
 
                 let node_type = args
                     .get("node_type")

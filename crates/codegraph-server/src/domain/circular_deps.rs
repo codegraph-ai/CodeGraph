@@ -45,10 +45,7 @@ pub(crate) struct CircularDepsResult {
 ///
 /// `max_cycle_length` caps the longest reported chain (default 10). Cycles longer
 /// than the limit are omitted to keep output manageable.
-pub(crate) fn find_circular_deps(
-    graph: &CodeGraph,
-    max_cycle_length: usize,
-) -> CircularDepsResult {
+pub(crate) fn find_circular_deps(graph: &CodeGraph, max_cycle_length: usize) -> CircularDepsResult {
     // Collect all CodeFile nodes with their file paths.
     let file_nodes: Vec<(NodeId, String)> = {
         match graph.query().node_type(NodeType::CodeFile).execute() {
@@ -71,8 +68,7 @@ pub(crate) fn find_circular_deps(
     }
 
     // Build an adjacency map: node_id -> [neighbor_ids via Imports edges]
-    let node_to_path: HashMap<NodeId, String> =
-        file_nodes.iter().cloned().collect();
+    let node_to_path: HashMap<NodeId, String> = file_nodes.iter().cloned().collect();
     let file_id_set: HashSet<NodeId> = node_to_path.keys().copied().collect();
 
     let adjacency = build_import_adjacency(graph, &file_id_set);
@@ -190,9 +186,7 @@ fn build_import_adjacency(
                 .any(|&edge_id| {
                     graph
                         .get_edge(edge_id)
-                        .map(|e| {
-                            matches!(e.edge_type, EdgeType::Imports | EdgeType::ImportsFrom)
-                        })
+                        .map(|e| matches!(e.edge_type, EdgeType::Imports | EdgeType::ImportsFrom))
                         .unwrap_or(false)
                 });
             if has_import {
@@ -240,7 +234,14 @@ fn dfs_find_cycle(
         }
 
         visited.push(neighbor);
-        if let Some(cycle) = dfs_find_cycle(neighbor, target, adjacency, scc_set, visited, max_cycle_length) {
+        if let Some(cycle) = dfs_find_cycle(
+            neighbor,
+            target,
+            adjacency,
+            scc_set,
+            visited,
+            max_cycle_length,
+        ) {
             return Some(cycle);
         }
         visited.pop();

@@ -6,10 +6,10 @@
 //! This module implements the Language Server Protocol for CodeGraph.
 
 use crate::ai_query::QueryEngine;
-use crate::embed_queue::{EmbedMode, EmbedQueue};
 use crate::branch_watcher::BranchWatcher;
 use crate::cache::QueryCache;
 use crate::domain::node_props;
+use crate::embed_queue::{EmbedMode, EmbedQueue};
 use crate::error::{LspError, LspResult};
 use crate::index::SymbolIndex;
 use crate::memory::MemoryManager;
@@ -926,9 +926,9 @@ impl LanguageServer for CodeGraphBackend {
                         "jina-code-v2" => {
                             Some(codegraph_memory::CodeGraphEmbeddingModel::JinaCodeV2)
                         }
-                        "granite-97m" | "granite" | "granite-97m-multilingual-r2" => {
-                            Some(codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2)
-                        }
+                        "granite-97m" | "granite" | "granite-97m-multilingual-r2" => Some(
+                            codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2,
+                        ),
                         _ => {
                             tracing::warn!(
                                 "[LSP::initialize] Unknown embedding model: {:?}, using default",
@@ -2250,7 +2250,8 @@ impl LanguageServer for CodeGraphBackend {
                     .iter()
                     .map(|s| {
                         if let Ok(url) = tower_lsp::lsp_types::Url::parse(s) {
-                            url.to_file_path().unwrap_or_else(|_| std::path::PathBuf::from(s))
+                            url.to_file_path()
+                                .unwrap_or_else(|_| std::path::PathBuf::from(s))
                         } else {
                             std::path::PathBuf::from(s)
                         }

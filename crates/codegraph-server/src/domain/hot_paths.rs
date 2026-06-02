@@ -120,9 +120,8 @@ fn score_function(graph: &CodeGraph, func_id: NodeId) -> Option<HotFunction> {
         .filter(|id| !depth1.contains(id) && *id != func_id)
         .collect();
 
-    let score = direct_callers as f64
-        + depth2_new.len() as f64 * 0.5
-        + depth3_new.len() as f64 * 0.25;
+    let score =
+        direct_callers as f64 + depth2_new.len() as f64 * 0.5 + depth3_new.len() as f64 * 0.25;
 
     let name = node_props::name(node).to_string();
     let path = node_props::path(node).to_string();

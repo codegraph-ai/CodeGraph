@@ -92,13 +92,14 @@ pub(crate) fn get_module_summary(
 
                 let language = {
                     let l = node_props::language(node);
-                    if l.is_empty() { "unknown" } else { l }
+                    if l.is_empty() {
+                        "unknown"
+                    } else {
+                        l
+                    }
                 };
 
-                let line_count = node
-                    .properties
-                    .get_int("line_count")
-                    .unwrap_or(0) as usize;
+                let line_count = node.properties.get_int("line_count").unwrap_or(0) as usize;
                 total_lines += line_count;
 
                 let entry = lang_map.entry(language.to_string()).or_insert((0, 0));
@@ -116,15 +117,16 @@ pub(crate) fn get_module_summary(
                 // functions carry the same language as their containing file).
                 let language = {
                     let l = node_props::language(node);
-                    if l.is_empty() { "unknown" } else { l }
+                    if l.is_empty() {
+                        "unknown"
+                    } else {
+                        l
+                    }
                 };
                 lang_map.entry(language.to_string()).or_insert((0, 0)).1 += 1;
 
                 // Collect complexity info.
-                let complexity = node
-                    .properties
-                    .get_int("complexity")
-                    .unwrap_or(0) as u32;
+                let complexity = node.properties.get_int("complexity").unwrap_or(0) as u32;
                 let name = node_props::name(node).to_string();
                 let line_start = node_props::line_start(node) as usize;
 
@@ -150,10 +152,7 @@ pub(crate) fn get_module_summary(
                     .get_string("is_external")
                     .map(|v| v == "true")
                     .unwrap_or(false)
-                    || node
-                        .properties
-                        .get_bool("is_external")
-                        .unwrap_or(false);
+                    || node.properties.get_bool("is_external").unwrap_or(false);
 
                 if is_external {
                     // External deps are workspace-wide, not path-filtered.
@@ -220,8 +219,7 @@ fn path_matches(path: &str, prefix: &str) -> bool {
     }
     // Require that the prefix is followed by a path separator so that
     // e.g. prefix "src/foo" does not match "src/foobar/...".
-    path.starts_with(prefix)
-        && path[prefix.len()..].starts_with('/')
+    path.starts_with(prefix) && path[prefix.len()..].starts_with('/')
 }
 
 // ============================================================

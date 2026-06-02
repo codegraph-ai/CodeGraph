@@ -87,14 +87,16 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
                 | "codegraph_find_related_tests"
                 | "codegraph_pr_context"
         ),
-        Memory => name.starts_with("codegraph_memory_")
-            || name == "codegraph_index_markdown"
-            || name == "codegraph_search_docs"
-            || name == "codegraph_list_doc_sources"
-            || name == "codegraph_remove_doc_source"
-            || name == "codegraph_verify_design"
-            || name == "codegraph_design_gaps"
-            || name == "codegraph_generate_architecture_doc",
+        Memory => {
+            name.starts_with("codegraph_memory_")
+                || name == "codegraph_index_markdown"
+                || name == "codegraph_search_docs"
+                || name == "codegraph_list_doc_sources"
+                || name == "codegraph_remove_doc_source"
+                || name == "codegraph_verify_design"
+                || name == "codegraph_design_gaps"
+                || name == "codegraph_generate_architecture_doc"
+        }
     }
 }
 
@@ -271,7 +273,9 @@ fn get_call_graph_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
         "uri".to_string(),
-        string_prop("The file URI containing the function (e.g. file:///Users/me/project/src/main.rs)"),
+        string_prop(
+            "The file URI containing the function (e.g. file:///Users/me/project/src/main.rs)",
+        ),
     );
     properties.insert(
         "line".to_string(),
@@ -309,7 +313,9 @@ fn analyze_impact_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
         "uri".to_string(),
-        string_prop("The file URI containing the symbol (e.g. file:///Users/me/project/src/main.rs)"),
+        string_prop(
+            "The file URI containing the symbol (e.g. file:///Users/me/project/src/main.rs)",
+        ),
     );
     properties.insert(
         "line".to_string(),
@@ -380,7 +386,9 @@ fn get_edit_context_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
         "uri".to_string(),
-        string_prop("The file URI of the code being edited (e.g. file:///Users/me/project/src/main.rs)"),
+        string_prop(
+            "The file URI of the code being edited (e.g. file:///Users/me/project/src/main.rs)",
+        ),
     );
     properties.insert(
         "line".to_string(),
@@ -473,7 +481,9 @@ fn get_symbol_info_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
         "uri".to_string(),
-        string_prop("The file URI containing the symbol (e.g. file:///Users/me/project/src/main.rs)"),
+        string_prop(
+            "The file URI containing the symbol (e.g. file:///Users/me/project/src/main.rs)",
+        ),
     );
     properties.insert(
         "line".to_string(),
@@ -500,7 +510,10 @@ fn get_symbol_info_tool() -> Tool {
 
 fn analyze_complexity_tool() -> Tool {
     let mut properties = HashMap::new();
-    properties.insert("uri".to_string(), string_prop("The file URI to analyze (e.g. file:///Users/me/project/src/main.rs)"));
+    properties.insert(
+        "uri".to_string(),
+        string_prop("The file URI to analyze (e.g. file:///Users/me/project/src/main.rs)"),
+    );
     properties.insert(
         "line".to_string(),
         number_prop(
@@ -1035,7 +1048,9 @@ fn memory_context_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
         "uri".to_string(),
-        string_prop("File URI to find relevant memories for (e.g. file:///Users/me/project/src/main.rs)"),
+        string_prop(
+            "File URI to find relevant memories for (e.g. file:///Users/me/project/src/main.rs)",
+        ),
     );
     properties.insert(
         "line".to_string(),
@@ -1275,7 +1290,10 @@ fn pr_context_tool() -> Tool {
     );
     properties.insert(
         "compact".to_string(),
-        boolean_prop("Compact output — counts only, skip per-symbol detail", false),
+        boolean_prop(
+            "Compact output — counts only, skip per-symbol detail",
+            false,
+        ),
     );
     properties.insert(
         "format".to_string(),
@@ -1563,7 +1581,10 @@ fn find_dead_imports_tool() -> Tool {
     );
     properties.insert(
         "limit".to_string(),
-        number_prop("Maximum number of dead imports to return (default: 100)", Some(100.0)),
+        number_prop(
+            "Maximum number of dead imports to return (default: 100)",
+            Some(100.0),
+        ),
     );
 
     Tool {
@@ -1631,7 +1652,10 @@ fn search_by_pattern_tool() -> Tool {
     );
     properties.insert(
         "limit".to_string(),
-        number_prop("Maximum number of matches to return (default: 50)", Some(50.0)),
+        number_prop(
+            "Maximum number of matches to return (default: 50)",
+            Some(50.0),
+        ),
     );
 
     Tool {

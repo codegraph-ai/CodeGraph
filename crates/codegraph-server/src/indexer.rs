@@ -59,31 +59,69 @@ impl IndexConfig {
     pub fn default_exclude_dirs() -> Vec<String> {
         [
             // Generic build / artifact dirs
-            "node_modules", "target", "dist", "build", "out",
-            "coverage", "htmlcov", "results", "logs", "tmp",
+            "node_modules",
+            "target",
+            "dist",
+            "build",
+            "out",
+            "coverage",
+            "htmlcov",
+            "results",
+            "logs",
+            "tmp",
             // VCS / SCM metadata
             ".git",
             // Python tooling
-            "__pycache__", "vendor",
-            ".venv", "venv", ".tox", ".pytest_cache", ".mypy_cache",
-            ".ruff_cache", ".eggs",
+            "__pycache__",
+            "vendor",
+            ".venv",
+            "venv",
+            ".tox",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".eggs",
             // Node / JS tooling
-            ".next", ".nuxt", ".svelte-kit", ".parcel-cache",
-            ".npm", ".yarn", ".pnpm-store", ".cache",
+            ".next",
+            ".nuxt",
+            ".svelte-kit",
+            ".parcel-cache",
+            ".npm",
+            ".yarn",
+            ".pnpm-store",
+            ".cache",
             // Rust / Ruby / Java / Gradle
-            ".cargo", ".bundle", ".gradle", ".kotlin",
+            ".cargo",
+            ".bundle",
+            ".gradle",
+            ".kotlin",
             // Apple / iOS
-            "DerivedData", "Pods", "xcuserdata",
+            "DerivedData",
+            "Pods",
+            "xcuserdata",
             // CMake out-of-source build dirs
-            "cmake-build-debug", "cmake-build-release",
+            "cmake-build-debug",
+            "cmake-build-release",
             // Test / benchmark / example / binary-output dirs
-            "benches", "examples", "fixtures", "cases", "bin",
+            "benches",
+            "examples",
+            "fixtures",
+            "cases",
+            "bin",
             // IDE state
-            ".idea", ".vscode-test", ".fleet",
+            ".idea",
+            ".vscode-test",
+            ".fleet",
             // Infrastructure-as-code state
-            ".terraform", ".terragrunt-cache", ".serverless",
+            ".terraform",
+            ".terragrunt-cache",
+            ".serverless",
             // Sensitive credential / config dirs — never code, often secret
-            ".aws", ".ssh", ".gnupg", ".kube", ".docker",
+            ".aws",
+            ".ssh",
+            ".gnupg",
+            ".kube",
+            ".docker",
         ]
         .iter()
         .map(|s| (*s).to_string())
@@ -100,30 +138,76 @@ impl IndexConfig {
     pub fn default_exclude_patterns() -> Vec<String> {
         [
             // Archives / packaged artifacts
-            "**/*.tar.gz", "**/*.tar.bz2", "**/*.tar.xz", "**/*.tgz", "**/*.tbz2",
-            "**/*.zip", "**/*.7z", "**/*.rar",
-            "**/*.deb", "**/*.rpm", "**/*.pkg", "**/*.dmg", "**/*.iso", "**/*.img",
+            "**/*.tar.gz",
+            "**/*.tar.bz2",
+            "**/*.tar.xz",
+            "**/*.tgz",
+            "**/*.tbz2",
+            "**/*.zip",
+            "**/*.7z",
+            "**/*.rar",
+            "**/*.deb",
+            "**/*.rpm",
+            "**/*.pkg",
+            "**/*.dmg",
+            "**/*.iso",
+            "**/*.img",
             // Compiled / native binaries
-            "**/*.exe", "**/*.dll", "**/*.so", "**/*.dylib", "**/*.bin",
-            "**/*.o", "**/*.a", "**/*.lib", "**/*.obj", "**/*.pdb",
+            "**/*.exe",
+            "**/*.dll",
+            "**/*.so",
+            "**/*.dylib",
+            "**/*.bin",
+            "**/*.o",
+            "**/*.a",
+            "**/*.lib",
+            "**/*.obj",
+            "**/*.pdb",
             // Compiled bytecode (already in __pycache__/ etc. but glob covers stragglers)
-            "**/*.pyc", "**/*.pyo", "**/*.class", "**/*.jar", "**/*.war",
+            "**/*.pyc",
+            "**/*.pyo",
+            "**/*.class",
+            "**/*.jar",
+            "**/*.war",
             // Disk images / proof bundles
-            "**/*.qcow2", "**/*.vmdk", "**/*.vdi", "**/*.vhd",
+            "**/*.qcow2",
+            "**/*.vmdk",
+            "**/*.vdi",
+            "**/*.vhd",
             // Office / PDF / media (not code)
-            "**/*.pdf", "**/*.docx", "**/*.xlsx", "**/*.pptx",
-            "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.bmp", "**/*.svg",
-            "**/*.mp3", "**/*.mp4", "**/*.mov", "**/*.avi", "**/*.webm",
+            "**/*.pdf",
+            "**/*.docx",
+            "**/*.xlsx",
+            "**/*.pptx",
+            "**/*.png",
+            "**/*.jpg",
+            "**/*.jpeg",
+            "**/*.gif",
+            "**/*.bmp",
+            "**/*.svg",
+            "**/*.mp3",
+            "**/*.mp4",
+            "**/*.mov",
+            "**/*.avi",
+            "**/*.webm",
             // OS metadata
-            "**/.DS_Store", "**/Thumbs.db",
+            "**/.DS_Store",
+            "**/Thumbs.db",
             // Misc bulky non-source
-            "**/*.sqlite", "**/*.db", "**/*.lock",
+            "**/*.sqlite",
+            "**/*.db",
+            "**/*.lock",
             // Package artifacts
-            "**/*.vsix", "**/*.tgz", "**/*.whl", "**/*.gem", "**/*.nupkg",
+            "**/*.vsix",
+            "**/*.tgz",
+            "**/*.whl",
+            "**/*.gem",
+            "**/*.nupkg",
             // Vendored tree-sitter parser sources (generated C, not user code).
             // Two globs needed: one matches the dir itself so it's skipped
             // during directory walk, the other matches files inside it.
-            "**/tree-sitter-*-src", "**/tree-sitter-*-src/**",
+            "**/tree-sitter-*-src",
+            "**/tree-sitter-*-src/**",
             // Cryptographic material — never code; never want this content
             // either parsed OR embedded into graph.db. Coverage:
             //   - Private keys: PEM / DER / PKCS#12 / PKCS#8 / OpenSSH
@@ -133,17 +217,31 @@ impl IndexConfig {
             //   - Web-auth artifacts (htpasswd, netrc)
             //   - SSH key filenames per OpenSSH convention
             //   - Terraform state (contains secrets after apply)
-            "**/*.pem", "**/*.key", "**/*.priv", "**/*.privkey",
-            "**/*.p12", "**/*.pfx",
-            "**/*.crt", "**/*.cer", "**/*.der",
-            "**/*.gpg", "**/*.asc",
-            "**/*.kdb", "**/*.kdbx",
-            "**/.htpasswd", "**/.netrc",
-            "**/id_rsa", "**/id_rsa.pub",
-            "**/id_ed25519", "**/id_ed25519.pub",
-            "**/id_dsa", "**/id_ecdsa",
-            "**/known_hosts", "**/authorized_keys",
-            "**/*.tfstate", "**/*.tfstate.backup",
+            "**/*.pem",
+            "**/*.key",
+            "**/*.priv",
+            "**/*.privkey",
+            "**/*.p12",
+            "**/*.pfx",
+            "**/*.crt",
+            "**/*.cer",
+            "**/*.der",
+            "**/*.gpg",
+            "**/*.asc",
+            "**/*.kdb",
+            "**/*.kdbx",
+            "**/.htpasswd",
+            "**/.netrc",
+            "**/id_rsa",
+            "**/id_rsa.pub",
+            "**/id_ed25519",
+            "**/id_ed25519.pub",
+            "**/id_dsa",
+            "**/id_ecdsa",
+            "**/known_hosts",
+            "**/authorized_keys",
+            "**/*.tfstate",
+            "**/*.tfstate.backup",
         ]
         .iter()
         .map(|s| (*s).to_string())
@@ -166,11 +264,7 @@ impl IndexConfig {
             Ok(c) => c,
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(
-                        "Failed to read {}: {}",
-                        path.display(),
-                        e
-                    );
+                    tracing::warn!("Failed to read {}: {}", path.display(), e);
                 }
                 return;
             }
@@ -185,11 +279,7 @@ impl IndexConfig {
             added += 1;
         }
         if added > 0 {
-            tracing::info!(
-                "Loaded {} patterns from {}",
-                added,
-                path.display()
-            );
+            tracing::info!("Loaded {} patterns from {}", added, path.display());
         }
     }
 
@@ -589,7 +679,10 @@ mod tests {
         assert!(config.exclude_patterns.iter().any(|p| p == "proof-*-*/"));
         assert!(config.exclude_patterns.iter().any(|p| p == "*.poc.cpp"));
         // Whitespace trimmed.
-        assert!(config.exclude_patterns.iter().any(|p| p == "spaced-pattern.zip"));
+        assert!(config
+            .exclude_patterns
+            .iter()
+            .any(|p| p == "spaced-pattern.zip"));
     }
 
     #[test]

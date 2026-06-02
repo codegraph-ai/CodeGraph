@@ -59,10 +59,7 @@ pub(crate) struct DeadImportsResult {
 /// 3. For each function F in A, check whether any outgoing `Calls` edge reaches
 ///    a node whose path matches module B's name or path.
 /// 4. If no such call exists → dead import.
-pub(crate) fn find_dead_imports(
-    graph: &CodeGraph,
-    file_path: Option<&str>,
-) -> DeadImportsResult {
+pub(crate) fn find_dead_imports(graph: &CodeGraph, file_path: Option<&str>) -> DeadImportsResult {
     let mut dead_imports = Vec::new();
     let mut unresolved_imports = Vec::new();
     let mut total_imports = 0usize;
@@ -162,10 +159,7 @@ pub(crate) fn find_dead_imports(
 
 /// Collect `(module_node_id, module_name, line)` for every outgoing `Imports`
 /// (or `ImportsFrom`) edge from `file_id`.
-fn collect_import_targets(
-    graph: &CodeGraph,
-    file_id: NodeId,
-) -> Vec<(NodeId, String, usize)> {
+fn collect_import_targets(graph: &CodeGraph, file_id: NodeId) -> Vec<(NodeId, String, usize)> {
     let neighbors = match graph.get_neighbors(file_id, Direction::Outgoing) {
         Ok(n) => n,
         Err(_) => return vec![],
@@ -329,7 +323,9 @@ fn file_references_module(
 
     // Collect module children for direct ID matching
     let module_children: std::collections::HashSet<NodeId> =
-        collect_contained_nodes(graph, module_id).into_iter().collect();
+        collect_contained_nodes(graph, module_id)
+            .into_iter()
+            .collect();
 
     const USAGE_EDGES: &[EdgeType] = &[
         EdgeType::References,

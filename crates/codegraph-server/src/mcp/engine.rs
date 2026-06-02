@@ -314,7 +314,10 @@ mod imp {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         match cmd.spawn() {
-            Ok(_) => tracing::info!("Engine auto-spawn: started engine for {}", socket_path.display()),
+            Ok(_) => tracing::info!(
+                "Engine auto-spawn: started engine for {}",
+                socket_path.display()
+            ),
             Err(e) => tracing::warn!("Engine auto-spawn failed: {e}"),
         }
     }

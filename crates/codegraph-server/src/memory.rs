@@ -491,10 +491,7 @@ impl MemoryManager {
             .ok_or_else(|| MemoryError::Other("Vector engine not initialized".to_string()))?;
 
         // Docs DB lives alongside memory DB: ~/.codegraph/projects/<slug>/docs/
-        let docs_dir = data_dir
-            .parent()
-            .unwrap_or(&data_dir)
-            .join("docs");
+        let docs_dir = data_dir.parent().unwrap_or(&data_dir).join("docs");
 
         codegraph_memory::DocStore::new(&docs_dir, engine)
     }

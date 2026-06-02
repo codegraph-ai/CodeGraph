@@ -125,7 +125,11 @@ pub(crate) fn search_by_pattern(
     }
 
     // Sort for stable, useful ordering: path then line_start
-    matches.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line_start.cmp(&b.line_start)));
+    matches.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.line_start.cmp(&b.line_start))
+    });
 
     let total_matches = matches.len();
     matches.truncate(limit);

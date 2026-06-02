@@ -9,8 +9,8 @@ use codegraph_c::CParser;
 use codegraph_clojure::ClojureParser;
 use codegraph_cobol::CobolParser;
 use codegraph_cpp::CppParser;
-use codegraph_css::CssParser;
 use codegraph_csharp::CSharpParser;
+use codegraph_css::CssParser;
 use codegraph_dart::DartParser;
 use codegraph_dockerfile::DockerfileParser;
 use codegraph_elixir::ElixirParser;
@@ -698,12 +698,44 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "bash", "c", "clojure", "cobol", "cpp", "css", "csharp",
-                "dart", "dockerfile", "elixir", "elm", "erlang", "fortran", "go", "groovy",
-                "haskell", "hcl", "java", "julia", "kotlin", "lua", "objc",
-                "ocaml", "perl", "php", "python", "r", "ruby", "rust", "scala",
-                "solidity", "swift", "tcl", "toml", "typescript", "verilog",
-                "yaml", "zig",
+                "bash",
+                "c",
+                "clojure",
+                "cobol",
+                "cpp",
+                "css",
+                "csharp",
+                "dart",
+                "dockerfile",
+                "elixir",
+                "elm",
+                "erlang",
+                "fortran",
+                "go",
+                "groovy",
+                "haskell",
+                "hcl",
+                "java",
+                "julia",
+                "kotlin",
+                "lua",
+                "objc",
+                "ocaml",
+                "perl",
+                "php",
+                "python",
+                "r",
+                "ruby",
+                "rust",
+                "scala",
+                "solidity",
+                "swift",
+                "tcl",
+                "toml",
+                "typescript",
+                "verilog",
+                "yaml",
+                "zig",
             ]
         );
     }

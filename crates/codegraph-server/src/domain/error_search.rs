@@ -78,7 +78,13 @@ const CATCH_PATTERNS: &[&str] = &[
 
 /// General patterns used for broad language-agnostic matching.
 const GENERAL_PATTERNS: &[&str] = &[
-    "error", "Error", "err", "exception", "Exception", "fail", "failure",
+    "error",
+    "Error",
+    "err",
+    "exception",
+    "Exception",
+    "fail",
+    "failure",
 ];
 
 // ============================================================
@@ -108,14 +114,8 @@ pub(crate) fn search_by_error(
                 return None;
             }
 
-            let body = node
-                .properties
-                .get_string("body_prefix")
-                .unwrap_or("");
-            let signature = node
-                .properties
-                .get_string("signature")
-                .unwrap_or("");
+            let body = node.properties.get_string("body_prefix").unwrap_or("");
+            let signature = node.properties.get_string("signature").unwrap_or("");
             let haystack = format!("{}\n{}", signature, body);
 
             // If a specific error type was requested, the haystack must mention it.
