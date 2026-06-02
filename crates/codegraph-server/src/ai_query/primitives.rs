@@ -18,12 +18,15 @@ use serde::{Deserialize, Serialize};
 /// Maximum length for signatures before truncation (default: 500 chars)
 pub const MAX_SIGNATURE_LENGTH: usize = 500;
 
-/// Truncate a string to max_len characters, adding "..." if truncated
+/// Truncate a string to at most `max_len` bytes, adding "..." if truncated.
+/// UTF-8-safe: walks back to the nearest char boundary so a multi-byte char
+/// straddling `max_len` can't panic (the `utf8_parse` crash class).
 pub fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let head = codegraph_parser_api::truncate_at_char_boundary(s, max_len.saturating_sub(3));
+        format!("{head}...")
     }
 }
 
@@ -550,6 +553,25 @@ impl SignaturePattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_string_never_splits_a_multibyte_char() {
+        // Regression for the `utf8_parse` crash class: a raw
+        // `&s[..max_len-3]` panics when that byte lands inside a multi-byte
+        // char. "é" is 2 bytes; place one so the cut point falls mid-char.
+        // 10 ASCII + "é" → cutting at byte 11 (max_len 14 → 14-3=11) used to
+        // panic; the helper must walk back to a boundary instead.
+        let s = format!("{}é tail padding to exceed the limit", "a".repeat(10));
+        let out = truncate_string(&s, 14); // 14 < s.len(), cut at byte 11
+        assert!(out.ends_with("..."));
+        // Whatever prefix it kept must be valid UTF-8 by construction (no panic).
+        assert!(out.len() <= s.len() + 3);
+    }
+
+    #[test]
+    fn truncate_string_passes_short_input_through() {
+        assert_eq!(truncate_string("short", 100), "short");
+    }
 
     #[test]
     fn test_search_options_builder() {

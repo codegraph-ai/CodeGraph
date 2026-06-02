@@ -265,8 +265,33 @@ fn spawn_signal_listeners() {
     });
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Windows gives the main thread a 1 MiB stack and tokio worker/blocking
+    // threads 2 MiB — far below the 8 MiB Linux/macOS default. Deeply nested
+    // source files push recursive tree-sitter / graph traversal past that
+    // ceiling, which showed up in telemetry as a Windows-only crash loop
+    // (STATUS_STACK_OVERFLOW 0xC00000FD plus many ACCESS_VIOLATION 0xC0000005,
+    // dying in <10s). Give every runtime thread a generous 32 MiB stack and run
+    // the root future on a dedicated big-stack thread so the synchronous startup
+    // index can't overflow the OS main thread either.
+    const STACK_SIZE: usize = 32 * 1024 * 1024;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(STACK_SIZE)
+        .build()
+        .expect("Failed to build Tokio runtime");
+
+    std::thread::Builder::new()
+        .name("cg-main".into())
+        .stack_size(STACK_SIZE)
+        .spawn(move || rt.block_on(run()))
+        .expect("Failed to spawn main worker thread")
+        .join()
+        .expect("main worker thread panicked");
+}
+
+async fn run() {
     install_crash_handlers();
     codegraph_server::crash_phase::mark("startup");
 
@@ -298,11 +323,10 @@ async fn main() {
     // when the agent closes stdin or the engine drops the connection.
     if args.connect {
         let sock = args.socket.clone().unwrap_or_else(default_socket_path);
-        let workspace = args
-            .workspace
-            .first()
-            .cloned()
-            .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current directory"));
+        let workspace =
+            args.workspace.first().cloned().unwrap_or_else(|| {
+                std::env::current_dir().expect("Failed to get current directory")
+            });
         if let Err(e) =
             codegraph_server::mcp::engine::connect(&sock, workspace, &args.embedding_model).await
         {
@@ -316,11 +340,10 @@ async fn main() {
     // shutdown (final persist + heartbeat removal), so it runs BEFORE the global
     // process::exit signal hook below — which would otherwise abort mid-flush.
     if args.watch {
-        let workspace = args
-            .workspace
-            .first()
-            .cloned()
-            .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current directory"));
+        let workspace =
+            args.workspace.first().cloned().unwrap_or_else(|| {
+                std::env::current_dir().expect("Failed to get current directory")
+            });
         let config = codegraph_server::daemon::DaemonConfig {
             workspace,
             exclude_patterns: args.exclude.clone(),
@@ -352,8 +375,8 @@ async fn main() {
             }
             _ => codegraph_memory::CodeGraphEmbeddingModel::BgeSmall,
         };
-        let tool_args: serde_json::Value = serde_json::from_str(&args.tool_args)
-            .unwrap_or_else(|e| {
+        let tool_args: serde_json::Value =
+            serde_json::from_str(&args.tool_args).unwrap_or_else(|e| {
                 eprintln!("Invalid --tool-args JSON: {e}");
                 std::process::exit(2);
             });
@@ -374,7 +397,10 @@ async fn main() {
                 if let Some(md) = result.get("markdown").and_then(|v| v.as_str()) {
                     println!("{md}");
                 } else {
-                    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    );
                 }
             }
             Err(e) => {

@@ -114,11 +114,14 @@ impl QueryEngine {
 
         match body_text {
             Some(body) if body.len() > base.len() + 10 => {
-                let truncated = if body.len() > FULL_BODY_MAX_CHARS {
-                    &body[..FULL_BODY_MAX_CHARS]
-                } else {
-                    &body
-                };
+                // UTF-8-safe truncation: a raw `&body[..FULL_BODY_MAX_CHARS]`
+                // panics when byte FULL_BODY_MAX_CHARS lands inside a multi-byte
+                // char (CJK comment, accented identifier, emoji in a literal).
+                // That panic was the `utf8_parse` crash seen in telemetry during
+                // the post-ONNX embedding phase. The helper walks back to the
+                // nearest char boundary.
+                let truncated =
+                    codegraph_parser_api::truncate_at_char_boundary(&body, FULL_BODY_MAX_CHARS);
                 format!("{base}\n{truncated}")
             }
             _ => base, // fallback to signature mode if source unavailable
@@ -133,7 +136,11 @@ impl QueryEngine {
             .filter(|(_, n)| {
                 matches!(
                     n.node_type,
-                    NodeType::Function | NodeType::Class | NodeType::Variable | NodeType::Interface | NodeType::Type
+                    NodeType::Function
+                        | NodeType::Class
+                        | NodeType::Variable
+                        | NodeType::Interface
+                        | NodeType::Type
                 )
             })
             .count()
@@ -434,7 +441,10 @@ impl QueryEngine {
 
         // Write embedding status
         namespaced
-            .put(b"embedding_status", format!("complete:{}", vecs.len()).as_bytes())
+            .put(
+                b"embedding_status",
+                format!("complete:{}", vecs.len()).as_bytes(),
+            )
             .map_err(|e| format!("Failed to write embedding status: {e}"))?;
 
         tracing::info!(
@@ -477,7 +487,11 @@ impl QueryEngine {
 
     /// Check if embeddings are ready (either loaded from persistence or built in background).
     pub fn are_embeddings_ready(&self) -> bool {
-        !self.symbol_vectors.try_read().map(|v| v.is_empty()).unwrap_or(true)
+        !self
+            .symbol_vectors
+            .try_read()
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
     }
 
     /// Load persisted symbol vectors from RocksDB.
@@ -700,7 +714,10 @@ impl QueryEngine {
         drop(vecs);
 
         if removed > 0 {
-            self.symbol_texts.write().await.retain(|id, _| live.contains(id));
+            self.symbol_texts
+                .write()
+                .await
+                .retain(|id, _| live.contains(id));
             tracing::debug!("[QueryEngine] pruned {} orphan vectors", removed);
         }
     }
