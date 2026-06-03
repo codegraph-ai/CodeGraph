@@ -210,10 +210,57 @@ impl McpBackend {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
+        // Poison-pill recovery. A corrupt graph.db (torn SST/MANIFEST left by a
+        // prior hard kill mid-persist) makes RocksDB's C++ open/scan dereference
+        // a bad block → native 0xC0000005, which no Result/catch_unwind can
+        // catch. Telemetry showed ~20 win32 machines stuck reloading the same
+        // poisoned bytes and crash-looping forever. Break the loop across
+        // restarts with a sentinel: write it before the load, remove it after.
+        // If it's still here on entry, the previous load never finished —
+        // quarantine the DB and start fresh instead of reloading the poison.
+        let sentinel = db_path.with_extension("loading");
+        if sentinel.exists() {
+            tracing::warn!(
+                "graph.db load sentinel present — a prior load crashed; quarantining and rebuilding"
+            );
+            Self::quarantine_graph_db(&db_path);
+            let _ = std::fs::remove_file(&sentinel);
+        }
+
+        // Mark WHERE we are (telemetry) and arm the sentinel for the load. The
+        // phase guard resets to `serving` on return; the sentinel only clears
+        // on a completed load (success or graceful error), not on a native AV.
+        let _phase = crate::crash_phase::enter("graph_load");
+        let _ = std::fs::write(&sentinel, b"loading");
+
+        let result = Self::load_persistent_graph_inner(&db_path, slug);
+        let _ = std::fs::remove_file(&sentinel);
+
+        match result {
+            Ok(graph) => Ok(graph),
+            Err(e) => {
+                // RocksDB reported corruption gracefully (didn't AV). Quarantine
+                // and retry once on a now-empty DB so the session still gets a
+                // usable, persistable graph rather than running in-memory-only.
+                tracing::warn!("graph.db load failed ({e}); quarantining and starting fresh");
+                Self::quarantine_graph_db(&db_path);
+                Self::load_persistent_graph_inner(&db_path, slug)
+            }
+        }
+    }
+
+    /// Open RocksDB at `db_path`, load the `slug` namespace into memory, and
+    /// detach storage to release the lock. The fallible core of
+    /// [`open_persistent_graph`], split out so the poison-pill wrapper can
+    /// retry it on a fresh DB after quarantining a corrupt one.
+    fn load_persistent_graph_inner(
+        db_path: &std::path::Path,
+        slug: &str,
+    ) -> Result<CodeGraph, String> {
         // Stale-LOCK recovery: a prior crash can leave LOCK in place. The
         // recovery variant only clobbers it after probing for a live holder —
         // a healthy concurrent process is still respected.
-        let rocks = RocksDBBackend::open_with_stale_lock_recovery(&db_path)
+        let rocks = RocksDBBackend::open_with_stale_lock_recovery(db_path)
             .map_err(|e| format!("Failed to open graph.db: {e}"))?;
         let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
         let mut graph = CodeGraph::with_backend(Box::new(namespaced))
@@ -225,6 +272,25 @@ impl McpBackend {
             .map_err(|e| format!("Failed to detach storage: {e}"))?;
 
         Ok(graph)
+    }
+
+    /// Move a corrupt `graph.db` aside so the next open starts clean. RocksDB
+    /// is a directory; rename is atomic and cheap. A fixed `.corrupt` name is
+    /// reused (the prior quarantine, if any, is removed first) so a pathological
+    /// machine can't fill the disk with copies. The graph is a derived cache —
+    /// re-indexing from source fully rebuilds it.
+    fn quarantine_graph_db(db_path: &std::path::Path) {
+        if !db_path.exists() {
+            return;
+        }
+        let quarantine = db_path.with_extension("db.corrupt");
+        let _ = std::fs::remove_dir_all(&quarantine);
+        if let Err(e) = std::fs::rename(db_path, &quarantine) {
+            tracing::warn!("Failed to rename corrupt graph.db aside ({e}); removing it instead");
+            let _ = std::fs::remove_dir_all(db_path);
+        } else {
+            tracing::warn!("Quarantined corrupt graph.db → {}", quarantine.display());
+        }
     }
 
     /// Persist the current graph state to the shared database.
@@ -630,7 +696,10 @@ impl McpBackend {
         // Rebuild indexes if files were parsed OR graph was loaded from persistence
         let graph_has_data = self.graph.read().await.node_count() > 0;
         if result.files_parsed > 0 || graph_has_data {
-            self.query_engine.build_indexes().await;
+            {
+                let _phase = crate::crash_phase::enter("graph_build");
+                self.query_engine.build_indexes().await;
+            }
 
             // Graph-only mode: skip all embedding work. The ONNX model is
             // never loaded. Structural tools (pr_context, get_callers,
@@ -4523,4 +4592,54 @@ impl McpServer {
 fn parse_node_id(s: &str) -> Option<codegraph::NodeId> {
     // NodeId is u64 in codegraph
     s.parse::<codegraph::NodeId>().ok()
+}
+
+#[cfg(test)]
+mod quarantine_tests {
+    use super::McpBackend;
+
+    #[test]
+    fn quarantine_moves_db_dir_aside_to_fixed_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("graph.db");
+        std::fs::create_dir_all(&db).unwrap();
+        std::fs::write(db.join("CURRENT"), b"poison").unwrap();
+
+        McpBackend::quarantine_graph_db(&db);
+
+        // Original is gone; a fixed-name quarantine copy holds the bytes.
+        assert!(!db.exists(), "corrupt graph.db should be moved aside");
+        let quarantine = tmp.path().join("graph.db.corrupt");
+        assert!(quarantine.exists(), "quarantine dir should exist");
+        assert_eq!(
+            std::fs::read(quarantine.join("CURRENT")).unwrap(),
+            b"poison"
+        );
+    }
+
+    #[test]
+    fn quarantine_reuses_fixed_name_without_accumulating() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("graph.db");
+
+        // Two successive quarantines must leave exactly one `.corrupt` dir.
+        for marker in [b"first", b"secon"] {
+            std::fs::create_dir_all(&db).unwrap();
+            std::fs::write(db.join("CURRENT"), marker).unwrap();
+            McpBackend::quarantine_graph_db(&db);
+        }
+
+        let quarantine = tmp.path().join("graph.db.corrupt");
+        assert!(quarantine.exists());
+        // Holds the most recent corrupt copy, not a pile of timestamped ones.
+        assert_eq!(std::fs::read(quarantine.join("CURRENT")).unwrap(), b"secon");
+    }
+
+    #[test]
+    fn quarantine_on_missing_db_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("graph.db");
+        McpBackend::quarantine_graph_db(&db); // must not panic
+        assert!(!tmp.path().join("graph.db.corrupt").exists());
+    }
 }

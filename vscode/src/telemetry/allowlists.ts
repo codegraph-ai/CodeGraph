@@ -276,6 +276,11 @@ export const CRASH_PHASES = [
     'index_parse',
     'index_persist',
     'index_embed',
+    // Pre-index startup (server >= 0.18.3): loading the persisted graph from
+    // RocksDB (`graph_load` — the native 0xC0000005 suspect) and building the
+    // in-memory indexes from it (`graph_build`).
+    'graph_load',
+    'graph_build',
     'serving',
     'ready',
     'unknown',

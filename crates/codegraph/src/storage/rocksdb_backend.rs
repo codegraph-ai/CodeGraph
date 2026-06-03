@@ -38,6 +38,14 @@ impl RocksDBBackend {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+        // Crash tolerance: a hard kill mid-write (the win32 crash loops, since
+        // fixed) can leave a torn WAL tail. PointInTime recovery truncates the
+        // trailing corrupt record and recovers everything before it, instead
+        // of refusing to open. SST/MANIFEST corruption isn't covered here — the
+        // poison-pill quarantine in `open_persistent_graph` is the backstop for
+        // that, since a corrupt block surfaces as a native 0xC0000005 that no
+        // open-time option can catch.
+        opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::PointInTime);
 
         let db = DB::open(&opts, path.as_ref()).map_err(|e| {
             GraphError::storage(

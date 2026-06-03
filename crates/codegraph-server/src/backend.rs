@@ -1195,6 +1195,7 @@ impl LanguageServer for CodeGraphBackend {
             // vectors are read straight from disk (load_symbol_vectors), so
             // this is only needed after a fresh parse.
             if !loaded_from_persistence {
+                let _phase = crate::crash_phase::enter("graph_build");
                 self.query_engine.build_indexes().await;
                 self.client
                     .log_message(MessageType::INFO, "Semantic search index ready")
@@ -1208,6 +1209,7 @@ impl LanguageServer for CodeGraphBackend {
             // otherwise find_node_at_position returns 0 symbols and hover/goto
             // silently break after every restart until a manual reindex.
             if loaded_from_persistence {
+                let _phase = crate::crash_phase::enter("graph_build");
                 let graph = self.graph.read().await;
                 self.symbol_index.rebuild_from_graph(&graph);
                 tracing::info!(
