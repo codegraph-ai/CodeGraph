@@ -1218,6 +1218,7 @@ impl LanguageServer for CodeGraphBackend {
 
             // Persist graph to RocksDB so next startup loads instantly
             if result.files_parsed > 0 {
+                let _phase = crate::crash_phase::enter("index_persist");
                 if let Some(first) = folders.first() {
                     let slug = crate::memory::project_slug(first);
                     let graph = self.graph.read().await;
@@ -1275,6 +1276,11 @@ impl LanguageServer for CodeGraphBackend {
                                     format!("✓ Loaded {} persisted symbol vectors", loaded),
                                 )
                                 .await;
+                            // No embed task spawns here, so reset the breadcrumb
+                            // off `post_onnx` (the last mark from memory init) —
+                            // otherwise every warm-restart session steady-states
+                            // at `post_onnx` and pollutes that crash bucket.
+                            crate::crash_phase::mark("serving");
                         } else {
                             // Embeddings need building — do it in background
                             let query_engine = Arc::clone(&self.query_engine);
@@ -1288,6 +1294,10 @@ impl LanguageServer for CodeGraphBackend {
                                 )
                                 .await;
                             tokio::spawn(async move {
+                                // Embedding runs native ONNX over symbol bodies —
+                                // the other suspect for the win32 0xC0000005
+                                // crashes. Guard resets to `serving` on finish.
+                                let _phase = crate::crash_phase::enter("index_embed");
                                 if had_vectors {
                                     query_engine.embed_missing_symbols().await;
                                 } else {

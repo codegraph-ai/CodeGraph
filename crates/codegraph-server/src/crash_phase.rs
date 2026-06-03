@@ -40,3 +40,27 @@ pub fn clear() {
         let _ = std::fs::remove_file(dir.join(format!("last-phase.{}.json", std::process::id())));
     }
 }
+
+/// RAII phase marker. Stamps `phase` on creation and resets to `serving` when
+/// dropped — i.e. on normal completion or unwind. A native crash (SIGSEGV /
+/// 0xC0000005 access violation) never runs the drop, so the phase stays
+/// stamped and the next start attributes the crash to it.
+///
+/// Phases are sequential, not nested: the initial index runs
+/// `index_parse → index_persist → index_embed`, each guarded in its own scope
+/// so they don't overlap. Resetting to `serving` between/after them is the
+/// intended steady state — the process is back to serving requests.
+#[must_use = "the phase resets to `serving` as soon as the guard is dropped"]
+pub struct PhaseGuard(());
+
+/// Enter a crash phase; the returned guard resets to `serving` on drop.
+pub fn enter(phase: &str) -> PhaseGuard {
+    mark(phase);
+    PhaseGuard(())
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        mark("serving");
+    }
+}

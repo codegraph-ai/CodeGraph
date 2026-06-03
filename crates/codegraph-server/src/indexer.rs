@@ -359,6 +359,11 @@ impl Indexer {
         folders: &[PathBuf],
         config: &IndexConfig,
     ) -> IndexResult {
+        // Crash-phase breadcrumb: parsing runs native tree-sitter grammars over
+        // arbitrary source — the leading suspect for the remaining win32
+        // 0xC0000005 startup crashes. Shared by the MCP and LSP backends, so
+        // this one guard tags every parse pass. Resets to `serving` on return.
+        let _phase = crate::crash_phase::enter("index_parse");
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut result = IndexResult::default();
 

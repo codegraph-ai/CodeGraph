@@ -270,6 +270,12 @@ export const CRASH_PHASES = [
     'post_onnx',
     'onnx_skipped_lowmem',
     'indexing',
+    // Fine-grained index sub-phases (server >= 0.18.2) — split the old coarse
+    // `serving`/`indexing` window so a startup crash localizes to parsing
+    // (native tree-sitter), persistence (RocksDB), or embedding (native ONNX).
+    'index_parse',
+    'index_persist',
+    'index_embed',
     'serving',
     'ready',
     'unknown',

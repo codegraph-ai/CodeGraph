@@ -620,6 +620,7 @@ impl McpBackend {
 
         // Persist graph to shared database
         {
+            let _phase = crate::crash_phase::enter("index_persist");
             let graph = self.graph.read().await;
             if let Err(e) = self.persist_graph(&graph) {
                 tracing::warn!("Failed to persist graph: {}", e);
@@ -671,6 +672,10 @@ impl McpBackend {
                         self.query_engine.symbol_count().await
                     );
                     tokio::spawn(async move {
+                        // Embedding runs native ONNX over symbol bodies — the
+                        // other suspect for the win32 0xC0000005 crashes. Guard
+                        // resets to `serving` when the background task finishes.
+                        let _phase = crate::crash_phase::enter("index_embed");
                         if loaded > 0 && files_changed > 0 {
                             // Have persisted vectors + some files changed
                             query_engine.embed_missing_symbols().await;
