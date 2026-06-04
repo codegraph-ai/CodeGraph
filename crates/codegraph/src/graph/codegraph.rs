@@ -935,9 +935,9 @@ impl CodeGraph {
 
 #[cfg(test)]
 mod persist_tests {
-    use super::CodeGraph;
     use super::super::property::PropertyMap;
     use super::super::types::NodeType;
+    use super::CodeGraph;
     use crate::storage::{MemoryBackend, StorageBackend};
 
     /// persist_to must write a full snapshot, not append: nodes removed in memory
