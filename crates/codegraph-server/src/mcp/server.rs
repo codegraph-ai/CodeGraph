@@ -202,49 +202,158 @@ impl McpBackend {
     /// loads all data into in-memory caches, then detaches storage to release
     /// the database lock. Used for cross-project graph access (T1-4).
     pub fn open_persistent_graph(slug: &str) -> Result<CodeGraph, String> {
-        let db_path = memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
+        let mut db_path = memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
 
         // Ensure parent directory exists
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
+        if let Some(parent) = db_path.parent().map(std::path::Path::to_path_buf) {
+            std::fs::create_dir_all(&parent)
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
+
+            // Poison recovery, take 2. A corrupt graph DB (torn SST/MANIFEST
+            // from a hard kill mid-persist) makes RocksDB's C++ open/scan
+            // deref a bad block → native 0xC0000005 that no Result/
+            // catch_unwind can catch, so detection has to span restarts.
+            //
+            // 0.18.3 used a single sentinel + rename-quarantine. Telemetry
+            // showed 26/28 machines still looping: on Windows the rename/
+            // remove of the DB directory loses to lingering handles (the
+            // just-crashed process, AV scanners, sibling sessions reopening
+            // the shared DB), and a single sentinel misreads a healthy
+            // concurrent load as a crashed one.
+            //
+            // Now: per-PID sentinels (`graph.loading.<pid>`) judged by a
+            // liveness probe — only a DEAD owner's sentinel is poison — and
+            // recovery REDIRECTS instead of renaming: bump the generation
+            // pointer so every call site resolves a fresh `graph.db.N`.
+            // Redirecting always succeeds; removing the poisoned directory
+            // becomes best-effort cleanup that retries on later startups via
+            // the sweep below.
+            if !Self::dead_load_sentinels(&parent).is_empty() {
+                match memory::bump_graph_generation() {
+                    Ok(fresh) => {
+                        tracing::warn!(
+                            "dead graph-load sentinel found — prior load crashed on a poisoned DB; \
+                             redirected to {}",
+                            fresh.display()
+                        );
+                        db_path = fresh;
+                    }
+                    Err(e) => tracing::warn!("failed to bump graph generation: {e}"),
+                }
+                Self::clear_dead_load_sentinels(&parent);
+            }
+
+            // Best-effort sweep of older-generation / poisoned DB dirs. Runs
+            // every startup so directories whose handles were held at
+            // redirect time still get cleaned up eventually. No-op when only
+            // the current DB exists.
+            Self::sweep_stale_graph_dbs(&parent, &db_path);
         }
 
-        // Poison-pill recovery. A corrupt graph.db (torn SST/MANIFEST left by a
-        // prior hard kill mid-persist) makes RocksDB's C++ open/scan dereference
-        // a bad block → native 0xC0000005, which no Result/catch_unwind can
-        // catch. Telemetry showed ~20 win32 machines stuck reloading the same
-        // poisoned bytes and crash-looping forever. Break the loop across
-        // restarts with a sentinel: write it before the load, remove it after.
-        // If it's still here on entry, the previous load never finished —
-        // quarantine the DB and start fresh instead of reloading the poison.
-        let sentinel = db_path.with_extension("loading");
-        if sentinel.exists() {
-            tracing::warn!(
-                "graph.db load sentinel present — a prior load crashed; quarantining and rebuilding"
-            );
-            Self::quarantine_graph_db(&db_path);
-            let _ = std::fs::remove_file(&sentinel);
-        }
-
-        // Mark WHERE we are (telemetry) and arm the sentinel for the load. The
-        // phase guard resets to `serving` on return; the sentinel only clears
-        // on a completed load (success or graceful error), not on a native AV.
+        // Mark WHERE we are (telemetry) and arm this process's sentinel for
+        // the load. The phase guard resets to `serving` on return; the
+        // sentinel only clears on a completed load (success or graceful
+        // error), not on a native AV.
         let _phase = crate::crash_phase::enter("graph_load");
-        let _ = std::fs::write(&sentinel, b"loading");
+        let sentinel = db_path
+            .parent()
+            .map(|p| p.join(format!("graph.loading.{}", std::process::id())));
+        if let Some(s) = &sentinel {
+            let _ = std::fs::write(s, b"loading");
+        }
 
         let result = Self::load_persistent_graph_inner(&db_path, slug);
-        let _ = std::fs::remove_file(&sentinel);
+        if let Some(s) = &sentinel {
+            let _ = std::fs::remove_file(s);
+        }
 
         match result {
             Ok(graph) => Ok(graph),
             Err(e) => {
-                // RocksDB reported corruption gracefully (didn't AV). Quarantine
-                // and retry once on a now-empty DB so the session still gets a
-                // usable, persistable graph rather than running in-memory-only.
-                tracing::warn!("graph.db load failed ({e}); quarantining and starting fresh");
-                Self::quarantine_graph_db(&db_path);
-                Self::load_persistent_graph_inner(&db_path, slug)
+                // RocksDB reported corruption gracefully (didn't AV).
+                // Redirect to a fresh generation and retry once so the
+                // session still gets a usable, persistable graph rather than
+                // running in-memory-only.
+                tracing::warn!("graph DB load failed ({e}); redirecting to a fresh generation");
+                let fresh = memory::bump_graph_generation().map_err(|e| format!("{e}"))?;
+                if let Some(parent) = fresh.parent() {
+                    Self::sweep_stale_graph_dbs(parent, &fresh);
+                }
+                Self::load_persistent_graph_inner(&fresh, slug)
+            }
+        }
+    }
+
+    /// Load sentinels (`graph.loading.<pid>`) in `dir` whose owning process is
+    /// dead, or whose file is older than 10 minutes (a real load takes
+    /// seconds; the age cap defuses PID reuse, where a recycled PID would
+    /// otherwise make a dead loader's sentinel look alive forever).
+    fn dead_load_sentinels(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        const STALE_SECS: u64 = 600;
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let path = e.path();
+                let name = path.file_name()?.to_str()?.to_string();
+                let pid: u32 = name.strip_prefix("graph.loading.")?.parse().ok()?;
+                if pid == std::process::id() {
+                    return None; // our own (shouldn't exist yet, but never self-trigger)
+                }
+                let stale = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() > STALE_SECS);
+                if stale || !Self::pid_is_alive(pid) {
+                    Some(path)
+                } else {
+                    None // healthy concurrent load — not poison
+                }
+            })
+            .collect()
+    }
+
+    /// Remove handled dead sentinels so one death triggers at most one redirect.
+    fn clear_dead_load_sentinels(dir: &std::path::Path) {
+        for path in Self::dead_load_sentinels(dir) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Liveness probe for a sentinel owner (same spirit as the stale-LOCK
+    /// recovery probe).
+    fn pid_is_alive(pid: u32) -> bool {
+        use sysinfo::{Pid, System};
+        let mut sys = System::new();
+        let p = Pid::from_u32(pid);
+        sys.refresh_process(p);
+        sys.process(p).is_some()
+    }
+
+    /// Best-effort cleanup of graph DB directories that are not the current
+    /// generation (`graph.db` / `graph.db.<n>` left behind by a redirect).
+    /// Failures are expected while handles linger — a later startup retries.
+    fn sweep_stale_graph_dbs(dir: &std::path::Path, current: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path == *current || !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let is_db_dir = name == "graph.db"
+                || name.strip_prefix("graph.db.").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+                });
+            if is_db_dir {
+                Self::quarantine_graph_db(&path);
             }
         }
     }
@@ -4641,5 +4750,51 @@ mod quarantine_tests {
         let db = tmp.path().join("graph.db");
         McpBackend::quarantine_graph_db(&db); // must not panic
         assert!(!tmp.path().join("graph.db.corrupt").exists());
+    }
+
+    #[test]
+    fn dead_sentinel_is_detected_and_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 99,999,999 fits pid_t but is far above any real OS pid ceiling.
+        std::fs::write(tmp.path().join("graph.loading.99999999"), b"").unwrap();
+        assert_eq!(McpBackend::dead_load_sentinels(tmp.path()).len(), 1);
+        McpBackend::clear_dead_load_sentinels(tmp.path());
+        assert!(McpBackend::dead_load_sentinels(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn own_pid_and_malformed_sentinels_are_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path()
+                .join(format!("graph.loading.{}", std::process::id())),
+            b"",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("graph.loading.notapid"), b"").unwrap();
+        assert!(McpBackend::dead_load_sentinels(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn sweep_removes_old_generations_keeps_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["graph.db", "graph.db.1", "graph.db.2"] {
+            let d = tmp.path().join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("CURRENT"), b"x").unwrap();
+        }
+        // Non-generation names must be untouched.
+        std::fs::create_dir_all(tmp.path().join("graph.db.notagen")).unwrap();
+
+        let current = tmp.path().join("graph.db.2");
+        McpBackend::sweep_stale_graph_dbs(tmp.path(), &current);
+
+        assert!(!tmp.path().join("graph.db").exists());
+        assert!(!tmp.path().join("graph.db.1").exists());
+        assert!(
+            current.exists(),
+            "current generation must survive the sweep"
+        );
+        assert!(tmp.path().join("graph.db.notagen").exists());
     }
 }

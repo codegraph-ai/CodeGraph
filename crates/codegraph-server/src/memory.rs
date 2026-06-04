@@ -59,16 +59,66 @@ pub(crate) fn project_slug(workspace_path: &Path) -> String {
     format!("{slug_base}-{short_hash}")
 }
 
-/// Path to the shared graph database.
-///
-/// All projects share a single RocksDB at `~/.codegraph/graph.db`,
-/// with per-project key namespacing via [`codegraph::NamespacedBackend`].
-pub(crate) fn shared_graph_db_path() -> Result<PathBuf, MemoryError> {
+/// `~/.codegraph` — the shared state directory.
+pub(crate) fn codegraph_home_dir() -> Result<PathBuf, MemoryError> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .ok_or_else(|| MemoryError::Other("Cannot determine home directory".to_string()))?;
+    Ok(PathBuf::from(home).join(".codegraph"))
+}
 
-    Ok(PathBuf::from(home).join(".codegraph").join("graph.db"))
+/// Current graph-DB generation, from `~/.codegraph/graph.generation`.
+/// Missing/unreadable/unparseable all map to 0 — the historical layout —
+/// so existing installs keep their data and a torn pointer write degrades
+/// to pre-generation behavior instead of an error.
+pub(crate) fn graph_db_generation() -> u64 {
+    let Ok(dir) = codegraph_home_dir() else {
+        return 0;
+    };
+    std::fs::read_to_string(dir.join("graph.generation"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Map a generation to its DB directory: 0 → `graph.db` (historical),
+/// N>0 → `graph.db.N`.
+pub(crate) fn graph_db_path_for_generation(codegraph_dir: &Path, generation: u64) -> PathBuf {
+    if generation == 0 {
+        codegraph_dir.join("graph.db")
+    } else {
+        codegraph_dir.join(format!("graph.db.{generation}"))
+    }
+}
+
+/// Path to the shared graph database.
+///
+/// All projects share a single RocksDB, with per-project key namespacing via
+/// [`codegraph::NamespacedBackend`]. The path is `~/.codegraph/graph.db`
+/// redirected by the generation pointer: when a poisoned DB can't be renamed
+/// or removed in place (Windows keeps handles on it — crashed siblings, AV
+/// scanners), [`bump_graph_generation`] points every open/persist call site
+/// at a fresh `graph.db.N` instead. Resolved fresh on each call so running
+/// sessions pick up a redirect on their next persist.
+pub(crate) fn shared_graph_db_path() -> Result<PathBuf, MemoryError> {
+    let dir = codegraph_home_dir()?;
+    Ok(graph_db_path_for_generation(&dir, graph_db_generation()))
+}
+
+/// Redirect the shared graph DB to a brand-new directory by bumping the
+/// generation pointer; returns the new path. The poisoned old directory is
+/// NOT touched here — renaming/deleting it is best-effort cleanup that can
+/// happen whenever its handles finally free up (see the sweep in
+/// `open_persistent_graph`), which is exactly why redirecting beats renaming
+/// as the recovery primitive.
+pub(crate) fn bump_graph_generation() -> Result<PathBuf, MemoryError> {
+    let dir = codegraph_home_dir()?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| MemoryError::Other(format!("Failed to create ~/.codegraph: {e}")))?;
+    let next = graph_db_generation() + 1;
+    std::fs::write(dir.join("graph.generation"), next.to_string())
+        .map_err(|e| MemoryError::Other(format!("Failed to write graph.generation: {e}")))?;
+    Ok(graph_db_path_for_generation(&dir, next))
 }
 
 /// True for workspaces that should NOT pollute the persistent
@@ -558,6 +608,26 @@ pub use codegraph_memory::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_zero_maps_to_historical_path() {
+        let dir = Path::new("/home/u/.codegraph");
+        assert_eq!(
+            graph_db_path_for_generation(dir, 0),
+            dir.join("graph.db"),
+            "gen 0 must keep the pre-0.18.4 layout so existing installs retain their data"
+        );
+    }
+
+    #[test]
+    fn nonzero_generations_get_suffixed_dirs() {
+        let dir = Path::new("/home/u/.codegraph");
+        assert_eq!(graph_db_path_for_generation(dir, 1), dir.join("graph.db.1"));
+        assert_eq!(
+            graph_db_path_for_generation(dir, 42),
+            dir.join("graph.db.42")
+        );
+    }
 
     #[test]
     fn test_project_data_dir_format() {
