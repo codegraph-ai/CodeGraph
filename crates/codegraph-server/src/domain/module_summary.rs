@@ -214,12 +214,21 @@ fn path_matches(path: &str, prefix: &str) -> bool {
     if prefix.is_empty() {
         return true;
     }
+    // Normalise Windows separators on both sides (issue #5): the graph stores
+    // paths via `Path::display()`, which keeps `\` on Windows, so the old
+    // `/`-only check rejected every node there — module summaries came back
+    // all-zero and external_deps fell through to the whole workspace. Also
+    // tolerate a trailing separator on the user-supplied prefix.
+    let path = path.replace('\\', "/");
+    let prefix = prefix.replace('\\', "/");
+    let prefix = prefix.trim_end_matches('/');
     if path == prefix {
         return true;
     }
     // Require that the prefix is followed by a path separator so that
     // e.g. prefix "src/foo" does not match "src/foobar/...".
-    path.starts_with(prefix) && path[prefix.len()..].starts_with('/')
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 // ============================================================
@@ -254,5 +263,27 @@ mod tests {
     #[test]
     fn test_path_no_match() {
         assert!(!path_matches("/other/path.rs", "/src"));
+    }
+
+    #[test]
+    fn test_path_matches_windows_separators() {
+        // Issue #5: graph paths carry `\` on Windows; the prefix may use
+        // either separator. All-zero module summaries until this matched.
+        assert!(path_matches(
+            r"C:\Users\u\proj\agent\prompt_builder.py",
+            r"C:\Users\u\proj\agent"
+        ));
+        assert!(path_matches(
+            r"C:\Users\u\proj\agent\prompt_builder.py",
+            "C:/Users/u/proj/agent"
+        ));
+        // Partial-dir guard must survive normalisation.
+        assert!(!path_matches(r"C:\proj\agentx\f.py", r"C:\proj\agent"));
+    }
+
+    #[test]
+    fn test_path_matches_trailing_separator_prefix() {
+        assert!(path_matches("/a/b/c.rs", "/a/b/"));
+        assert!(path_matches(r"C:\a\b\c.rs", r"C:\a\b\"));
     }
 }
