@@ -129,6 +129,8 @@ export interface Reporter {
     engagementSettingsSnapshot(): void;
 
     serverCrash(props: { uptimeSeconds: number; lastToolName?: string; restartCount: number; crashCause?: string; crashPhase?: string; exitCode?: number; exitSignal?: string }): void;
+    /** Poison-recovery decision breadcrumb from the server (counts + enums only). */
+    serverRecovery(props: { found: number; alive: number; dead: number; legacy: boolean; bump: string; generation: number; sweptOk: number; sweptFail: number }): void;
     serverRestart(reason: ServerRestartReason): void;
     serverRpcTimeout(props: { command: string; attemptCount: number }): void;
 
@@ -413,6 +415,25 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
                           ? 'other'
                           : undefined,
                     restartCount: Math.min(props.restartCount, 20),
+                },
+                true,
+            );
+        },
+        serverRecovery(props) {
+            // Every value is a clamped count, a bool, or a 3-value enum — the
+            // instrument that shows WHY the graph-DB poison recovery did or
+            // didn't fire on the crash-looping cohort.
+            send(
+                'server.recovery',
+                {
+                    sentinelsFound: Math.min(props.found, 100),
+                    sentinelsAlive: Math.min(props.alive, 100),
+                    sentinelsDead: Math.min(props.dead, 100),
+                    legacySentinel: props.legacy,
+                    bumpResult: props.bump === 'ok' || props.bump === 'err' ? props.bump : 'none',
+                    generation: Math.min(props.generation, 1000),
+                    sweptOk: Math.min(props.sweptOk, 100),
+                    sweptFail: Math.min(props.sweptFail, 100),
                 },
                 true,
             );

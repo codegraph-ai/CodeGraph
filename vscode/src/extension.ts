@@ -109,6 +109,64 @@ function readAndClassifyCrash(): { cause: string; phase?: string } {
     }
 }
 
+/**
+ * Read + report the server's poison-recovery breadcrumb
+ * (`~/.codegraph/last-recovery.<pid>.json`, written whenever the startup
+ * load found sentinel evidence). Unlike crash markers there is no freshness
+ * window: the newest breadcrumb is reported once and ALL of them deleted,
+ * so the cohort whose recovery never fires finally shows us why. Counts,
+ * bools and a 3-value enum only. Best-effort; never throws.
+ */
+function reportRecoveryBreadcrumb(): void {
+    try {
+        const dir = path.join(os.homedir(), '.codegraph');
+        let files: string[];
+        try {
+            files = fs.readdirSync(dir);
+        } catch {
+            return;
+        }
+        const matches = files.filter((f) => /^last-recovery\..*\.json$/.test(f));
+        if (matches.length === 0) return;
+
+        let best: { file: string; mtime: number } | undefined;
+        for (const f of matches) {
+            try {
+                const m = fs.statSync(path.join(dir, f)).mtimeMs;
+                if (!best || m > best.mtime) best = { file: f, mtime: m };
+            } catch {
+                /* ignore unreadable entry */
+            }
+        }
+        if (best) {
+            try {
+                const crumb = JSON.parse(fs.readFileSync(path.join(dir, best.file), 'utf8'));
+                reporter.serverRecovery({
+                    found: typeof crumb.found === 'number' ? crumb.found : 0,
+                    alive: typeof crumb.alive === 'number' ? crumb.alive : 0,
+                    dead: typeof crumb.dead === 'number' ? crumb.dead : 0,
+                    legacy: crumb.legacy === true,
+                    bump: typeof crumb.bump === 'string' ? crumb.bump : 'none',
+                    generation: typeof crumb.generation === 'number' ? crumb.generation : 0,
+                    sweptOk: typeof crumb.sweptOk === 'number' ? crumb.sweptOk : 0,
+                    sweptFail: typeof crumb.sweptFail === 'number' ? crumb.sweptFail : 0,
+                });
+            } catch {
+                /* malformed breadcrumb — skip */
+            }
+        }
+        for (const f of matches) {
+            try {
+                fs.unlinkSync(path.join(dir, f));
+            } catch {
+                /* ignore */
+            }
+        }
+    } catch {
+        /* never block activation on telemetry */
+    }
+}
+
 // Idempotency guard. VS Code calls activate() once per host, but a stale
 // client surviving a host reload can re-run server-command registration and
 // throw `command 'codegraph.getDependencyGraph' already exists` (seen in
@@ -161,6 +219,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         workspaceFolders: vscode.workspace.workspaceFolders?.length ?? 0,
         hasMultiRoot: (vscode.workspace.workspaceFolders?.length ?? 0) > 1,
     });
+    reportRecoveryBreadcrumb();
 
     if (!config.get<boolean>('enabled', true)) {
         return;
