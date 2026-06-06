@@ -53,6 +53,26 @@ pub struct QueryEngine {
 /// ~512 tokens ≈ first 40-50 lines of code.
 const FULL_BODY_MAX_CHARS: usize = 2048;
 
+/// Persist accumulated vectors at least every this many symbols during a
+/// checkpointed embed run, so an OOM-kill mid-marathon (telemetry: linux
+/// SIGKILL ~25 min into a big first index) loses minutes, not the run.
+const EMBED_CHECKPOINT_SYMBOLS: usize = 20_000;
+
+/// Available-RAM floor (MB). Below it the embed loop halves the ONNX batch
+/// and forces a checkpoint — degrade to slow instead of being OOM-killed.
+const EMBED_LOW_MEM_MB: u64 = 1_536;
+
+/// How often (in chunks) the embed loop polls available memory.
+const EMBED_MEM_CHECK_CHUNKS: usize = 25;
+
+/// Available system memory in MB, for the embed loop's backpressure check.
+fn available_memory_mb() -> u64 {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sys.available_memory() / (1024 * 1024)
+}
+
 impl QueryEngine {
     /// Create a new query engine with the given graph.
     pub fn new(graph: Arc<RwLock<CodeGraph>>) -> Self {
@@ -216,6 +236,20 @@ impl QueryEngine {
     /// Requires vector_engine to be set first. Embeds name + signature + docstring
     /// for each symbol in batch for efficiency.
     pub async fn build_symbol_vectors(&self) {
+        self.build_symbol_vectors_checkpointed(None).await;
+    }
+
+    /// Like [`Self::build_symbol_vectors`], with crash resilience for marathon
+    /// first-index runs (telemetry: linux OOM-kills ~25 min into embedding,
+    /// losing the whole run because the only save happened at the very end):
+    /// - with a `slug`, persists accumulated vectors every
+    ///   [`EMBED_CHECKPOINT_SYMBOLS`] symbols (status `partial:N`), so a kill
+    ///   loses minutes and the next start resumes via
+    ///   [`Self::embed_missing_symbols`];
+    /// - polls available RAM every [`EMBED_MEM_CHECK_CHUNKS`] chunks; under
+    ///   [`EMBED_LOW_MEM_MB`] it halves the ONNX batch and forces a
+    ///   checkpoint — degrade to slow instead of being OOM-killed.
+    pub async fn build_symbol_vectors_checkpointed(&self, slug: Option<&str>) {
         let engine = match self.vector_engine.read().await.clone() {
             Some(e) => e,
             None => {
@@ -227,10 +261,12 @@ impl QueryEngine {
         let start = Instant::now();
         let graph = self.graph.read().await;
 
-        // Collect symbol texts for embedding
+        // Collect symbol texts for embedding. Texts are stored ONCE here and
+        // moved into symbol_texts at the end — the previous version kept a
+        // second cloned copy alive for the whole run, doubling text RAM on
+        // exactly the huge-corpus runs that already flirt with OOM.
         let mut node_ids = Vec::new();
         let mut texts = Vec::new();
-        let mut text_map = HashMap::new();
 
         for (node_id, node) in graph.iter_nodes() {
             // Only embed meaningful symbol types
@@ -261,8 +297,7 @@ impl QueryEngine {
             );
 
             node_ids.push(node_id);
-            texts.push(embed_text.clone());
-            text_map.insert(node_id, embed_text);
+            texts.push(embed_text);
         }
 
         drop(graph); // Release graph lock before embedding
@@ -285,45 +320,75 @@ impl QueryEngine {
         let is_full_body = self
             .full_body_embedding
             .load(std::sync::atomic::Ordering::Relaxed);
-        let chunk_size: usize = if is_full_body { 16 } else { 64 };
+        let mut chunk_size: usize = if is_full_body { 16 } else { 64 };
         let mut symbol_vecs = HashMap::with_capacity(texts.len());
-        let total_chunks = texts.len().div_ceil(chunk_size);
 
-        for (chunk_idx, chunk_start) in (0..texts.len()).step_by(chunk_size).enumerate() {
-            let chunk_end = (chunk_start + chunk_size).min(texts.len());
-            let chunk_refs: Vec<&str> = texts[chunk_start..chunk_end]
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
+        let total = texts.len();
+        let mut pos = 0usize;
+        let mut chunks_done = 0usize;
+        let mut since_checkpoint = 0usize;
+
+        while pos < total {
+            let end = (pos + chunk_size).min(total);
+            let chunk_refs: Vec<&str> = texts[pos..end].iter().map(|s| s.as_str()).collect();
 
             match engine.embed_batch(&chunk_refs) {
                 Ok(vectors) => {
                     for (i, vec) in vectors.into_iter().enumerate() {
-                        symbol_vecs.insert(node_ids[chunk_start + i], vec);
-                    }
-                    if total_chunks > 1 && (chunk_idx + 1) % 10 == 0 {
-                        tracing::info!(
-                            "[QueryEngine] Embedded chunk {}/{} ({} symbols so far)",
-                            chunk_idx + 1,
-                            total_chunks,
-                            symbol_vecs.len()
-                        );
+                        symbol_vecs.insert(node_ids[pos + i], vec);
                     }
                 }
                 Err(e) => {
                     tracing::error!(
-                        "[QueryEngine] Failed to embed chunk {}/{}: {:?}",
-                        chunk_idx + 1,
-                        total_chunks,
+                        "[QueryEngine] Failed to embed chunk at {}/{}: {:?}",
+                        pos,
+                        total,
                         e
                     );
+                }
+            }
+
+            since_checkpoint += end - pos;
+            pos = end;
+            chunks_done += 1;
+
+            if chunks_done % 10 == 0 && pos < total {
+                tracing::info!("[QueryEngine] Embedded {}/{} symbols", pos, total);
+            }
+
+            // RAM backpressure: shed batch size under memory pressure.
+            let pressured = chunks_done % EMBED_MEM_CHECK_CHUNKS == 0
+                && available_memory_mb() < EMBED_LOW_MEM_MB;
+            if pressured && chunk_size > 4 {
+                chunk_size = (chunk_size / 2).max(4);
+                tracing::warn!(
+                    "[QueryEngine] Low memory — reducing embed batch size to {}",
+                    chunk_size
+                );
+            }
+
+            // Crash-resilience checkpoint.
+            if let Some(slug) = slug {
+                if since_checkpoint >= EMBED_CHECKPOINT_SYMBOLS
+                    || (pressured && since_checkpoint > 0)
+                {
+                    match Self::save_vectors_map(slug, &symbol_vecs, false) {
+                        Ok(()) => tracing::info!(
+                            "[QueryEngine] Checkpointed {} vectors ({}/{} embedded)",
+                            symbol_vecs.len(),
+                            pos,
+                            total
+                        ),
+                        Err(e) => tracing::warn!("[QueryEngine] Vector checkpoint failed: {e}"),
+                    }
+                    since_checkpoint = 0;
                 }
             }
         }
 
         let count = symbol_vecs.len();
         *self.symbol_vectors.write().await = symbol_vecs;
-        *self.symbol_texts.write().await = text_map;
+        *self.symbol_texts.write().await = node_ids.into_iter().zip(texts).collect();
         tracing::info!(
             "[QueryEngine] Built {} symbol vectors in {:?}",
             count,
@@ -334,6 +399,15 @@ impl QueryEngine {
     /// Embed only symbols that don't have vectors yet (after loading persisted vectors).
     /// Much faster than full rebuild when only a few files changed.
     pub async fn embed_missing_symbols(&self) {
+        self.embed_missing_symbols_checkpointed(None).await;
+    }
+
+    /// [`Self::embed_missing_symbols`] with chunking, RAM backpressure and
+    /// (with a `slug`) periodic vector checkpoints — see
+    /// [`Self::build_symbol_vectors_checkpointed`]. This is also the resume
+    /// path after a crash-interrupted embed run: persisted checkpoint vectors
+    /// load on startup and this fills in only the remainder.
+    pub async fn embed_missing_symbols_checkpointed(&self, slug: Option<&str>) {
         let engine = match self.vector_engine.read().await.clone() {
             Some(e) => e,
             None => return,
@@ -389,23 +463,81 @@ impl QueryEngine {
             texts.len()
         );
 
-        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        match engine.embed_batch(&text_refs) {
-            Ok(vectors) => {
-                let mut symbol_vecs = self.symbol_vectors.write().await;
-                for (i, vec) in vectors.into_iter().enumerate() {
-                    symbol_vecs.insert(node_ids[i], vec);
+        // Chunked like build_symbol_vectors. This used to push ALL missing
+        // symbols through ONE embed_batch call — harmless for a few changed
+        // files, but on the post-crash resume path "missing" can be most of
+        // the corpus, making the single batch its own OOM. Same backpressure
+        // and (with a slug) the same crash-resilience checkpoints.
+        let is_full_body = self
+            .full_body_embedding
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut chunk_size: usize = if is_full_body { 16 } else { 64 };
+        let total = texts.len();
+        let mut pos = 0usize;
+        let mut chunks_done = 0usize;
+        let mut since_checkpoint = 0usize;
+        let mut embedded = 0usize;
+
+        while pos < total {
+            let end = (pos + chunk_size).min(total);
+            let chunk_refs: Vec<&str> = texts[pos..end].iter().map(|s| s.as_str()).collect();
+
+            match engine.embed_batch(&chunk_refs) {
+                Ok(vectors) => {
+                    let mut symbol_vecs = self.symbol_vectors.write().await;
+                    for (i, vec) in vectors.into_iter().enumerate() {
+                        symbol_vecs.insert(node_ids[pos + i], vec);
+                    }
+                    embedded += end - pos;
                 }
-                tracing::info!(
-                    "[QueryEngine] Embedded {} new symbols (total: {})",
-                    texts.len(),
-                    symbol_vecs.len()
+                Err(e) => {
+                    tracing::warn!(
+                        "[QueryEngine] Failed to embed chunk at {}/{}: {}",
+                        pos,
+                        total,
+                        e
+                    );
+                }
+            }
+
+            since_checkpoint += end - pos;
+            pos = end;
+            chunks_done += 1;
+
+            let pressured = chunks_done % EMBED_MEM_CHECK_CHUNKS == 0
+                && available_memory_mb() < EMBED_LOW_MEM_MB;
+            if pressured && chunk_size > 4 {
+                chunk_size = (chunk_size / 2).max(4);
+                tracing::warn!(
+                    "[QueryEngine] Low memory — reducing embed batch size to {}",
+                    chunk_size
                 );
             }
-            Err(e) => {
-                tracing::warn!("[QueryEngine] Failed to embed missing symbols: {}", e);
+
+            if let Some(slug) = slug {
+                if since_checkpoint >= EMBED_CHECKPOINT_SYMBOLS
+                    || (pressured && since_checkpoint > 0)
+                {
+                    let vecs = self.symbol_vectors.read().await;
+                    match Self::save_vectors_map(slug, &vecs, false) {
+                        Ok(()) => tracing::info!(
+                            "[QueryEngine] Checkpointed {} vectors ({}/{} resumed)",
+                            vecs.len(),
+                            pos,
+                            total
+                        ),
+                        Err(e) => tracing::warn!("[QueryEngine] Vector checkpoint failed: {e}"),
+                    }
+                    since_checkpoint = 0;
+                }
             }
         }
+
+        tracing::info!(
+            "[QueryEngine] Embedded {} new symbols (total: {})",
+            embedded,
+            self.symbol_vectors.read().await.len()
+        );
     }
 
     /// Persist symbol vectors to RocksDB alongside the graph.
@@ -413,9 +545,23 @@ impl QueryEngine {
     /// Each vector is stored as key `vec:{node_id}` → binary `[f32]` (little-endian).
     /// Uses the namespaced backend so vectors are scoped per project.
     pub async fn save_symbol_vectors(&self, slug: &str) -> std::result::Result<(), String> {
+        let vecs = self.symbol_vectors.read().await;
+        if vecs.is_empty() {
+            return Ok(());
+        }
+        Self::save_vectors_map(slug, &vecs, true)
+    }
+
+    /// Write a vector map to RocksDB under `slug`. `complete = false` marks a
+    /// mid-run checkpoint (`embedding_status = partial:N`) so status readers
+    /// never mistake a crash-interrupted run for a finished one.
+    fn save_vectors_map(
+        slug: &str,
+        vecs: &HashMap<NodeId, Vec<f32>>,
+        complete: bool,
+    ) -> std::result::Result<(), String> {
         use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
 
-        let vecs = self.symbol_vectors.read().await;
         if vecs.is_empty() {
             return Ok(());
         }
@@ -440,17 +586,20 @@ impl QueryEngine {
         }
 
         // Write embedding status
+        let status = if complete {
+            format!("complete:{}", vecs.len())
+        } else {
+            format!("partial:{}", vecs.len())
+        };
         namespaced
-            .put(
-                b"embedding_status",
-                format!("complete:{}", vecs.len()).as_bytes(),
-            )
+            .put(b"embedding_status", status.as_bytes())
             .map_err(|e| format!("Failed to write embedding status: {e}"))?;
 
         tracing::info!(
-            "[QueryEngine] Saved {} symbol vectors to graph.db (namespace: {})",
+            "[QueryEngine] Saved {} symbol vectors to graph.db (namespace: {}, {})",
             vecs.len(),
-            slug
+            slug,
+            if complete { "complete" } else { "checkpoint" }
         );
         Ok(())
     }

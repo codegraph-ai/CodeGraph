@@ -103,6 +103,36 @@ pub struct McpBackend {
     pub graph_only: bool,
 }
 
+/// Outcome of the startup poison-detection pass, persisted as
+/// `~/.codegraph/last-recovery.<pid>.json` for the extension to report as
+/// `server.recovery`. Numbers/bools/enums only — no paths, no free text.
+struct RecoveryStats {
+    sentinels_found: usize,
+    sentinels_alive: usize,
+    sentinels_dead: usize,
+    legacy_sentinel: bool,
+    /// "none" | "ok" | "err"
+    bump: &'static str,
+    generation: u64,
+    swept_ok: usize,
+    swept_fail: usize,
+}
+
+impl Default for RecoveryStats {
+    fn default() -> Self {
+        Self {
+            sentinels_found: 0,
+            sentinels_alive: 0,
+            sentinels_dead: 0,
+            legacy_sentinel: false,
+            bump: "none",
+            generation: 0,
+            swept_ok: 0,
+            swept_fail: 0,
+        }
+    }
+}
+
 impl McpBackend {
     /// Create a new MCP backend for the given workspace.
     ///
@@ -228,7 +258,14 @@ impl McpBackend {
             // Redirecting always succeeds; removing the poisoned directory
             // becomes best-effort cleanup that retries on later startups via
             // the sweep below.
-            if !Self::dead_load_sentinels(&parent).is_empty() {
+            let mut stats = RecoveryStats::default();
+            let (dead, alive, legacy) = Self::classify_load_sentinels(&parent);
+            stats.sentinels_found = dead.len() + alive;
+            stats.sentinels_alive = alive;
+            stats.sentinels_dead = dead.len();
+            stats.legacy_sentinel = legacy;
+
+            if !dead.is_empty() {
                 match memory::bump_graph_generation() {
                     Ok(fresh) => {
                         tracing::warn!(
@@ -236,30 +273,53 @@ impl McpBackend {
                              redirected to {}",
                             fresh.display()
                         );
+                        stats.bump = "ok";
                         db_path = fresh;
                     }
-                    Err(e) => tracing::warn!("failed to bump graph generation: {e}"),
+                    Err(e) => {
+                        tracing::warn!("failed to bump graph generation: {e}");
+                        stats.bump = "err";
+                    }
                 }
-                Self::clear_dead_load_sentinels(&parent);
+                for path in &dead {
+                    let _ = std::fs::remove_file(path);
+                }
             }
 
             // Best-effort sweep of older-generation / poisoned DB dirs. Runs
             // every startup so directories whose handles were held at
             // redirect time still get cleaned up eventually. No-op when only
             // the current DB exists.
-            Self::sweep_stale_graph_dbs(&parent, &db_path);
+            let (swept_ok, swept_fail) = Self::sweep_stale_graph_dbs(&parent, &db_path);
+            stats.swept_ok = swept_ok;
+            stats.swept_fail = swept_fail;
+            stats.generation = memory::graph_db_generation();
+
+            // Persist the recovery breadcrumb whenever there was anything to
+            // decide — the extension reports it as `server.recovery`. Three
+            // releases of recovery logic ran blind on the looper cohort; this
+            // is the instrument that ends the guessing.
+            if stats.sentinels_found > 0 || stats.legacy_sentinel || stats.swept_fail > 0 {
+                Self::write_recovery_breadcrumb(&parent, &stats);
+            }
         }
 
         // Mark WHERE we are (telemetry) and arm this process's sentinel for
         // the load. The phase guard resets to `serving` on return; the
         // sentinel only clears on a completed load (success or graceful
-        // error), not on a native AV.
+        // error), not on a native AV. The sentinel body carries this
+        // process's start time so a recycled PID can't impersonate a live
+        // loader (Windows reuses PIDs aggressively during crash-restart
+        // churn).
         let _phase = crate::crash_phase::enter("graph_load");
         let sentinel = db_path
             .parent()
             .map(|p| p.join(format!("graph.loading.{}", std::process::id())));
         if let Some(s) = &sentinel {
-            let _ = std::fs::write(s, b"loading");
+            let body = Self::own_start_time()
+                .map(|t| t.to_string())
+                .unwrap_or_default();
+            let _ = std::fs::write(s, body);
         }
 
         let result = Self::load_persistent_graph_inner(&db_path, slug);
@@ -284,61 +344,127 @@ impl McpBackend {
         }
     }
 
-    /// Load sentinels (`graph.loading.<pid>`) in `dir` whose owning process is
-    /// dead, or whose file is older than 10 minutes (a real load takes
-    /// seconds; the age cap defuses PID reuse, where a recycled PID would
-    /// otherwise make a dead loader's sentinel look alive forever).
-    fn dead_load_sentinels(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-        const STALE_SECS: u64 = 600;
+    /// Classify load sentinels in `dir` → (dead sentinel paths, live count,
+    /// legacy present).
+    ///
+    /// A sentinel is DEAD (= poison evidence) when any of:
+    /// - its owner PID no longer exists;
+    /// - the PID exists but with a different process start time — a recycled
+    ///   PID (Windows reuses them aggressively during crash-restart churn;
+    ///   on 0.18.4 this masked dead loaders as "alive" indefinitely);
+    /// - the file is older than [`Self::SENTINEL_STALE_SECS`] (a real load
+    ///   takes seconds — was 600s on 0.18.4, long enough for a crash-restart
+    ///   burst to die down before detection could fire);
+    /// - it is the legacy bare `graph.loading` file (only 0.18.3 wrote it,
+    ///   and only a crashed 0.18.3 load leaves it behind).
+    fn classify_load_sentinels(dir: &std::path::Path) -> (Vec<std::path::PathBuf>, usize, bool) {
+        let mut dead = Vec::new();
+        let mut alive = 0usize;
+        let mut legacy = false;
+
         let Ok(entries) = std::fs::read_dir(dir) else {
-            return Vec::new();
+            return (dead, alive, legacy);
         };
-        entries
-            .flatten()
-            .filter_map(|e| {
-                let path = e.path();
-                let name = path.file_name()?.to_str()?.to_string();
-                let pid: u32 = name.strip_prefix("graph.loading.")?.parse().ok()?;
-                if pid == std::process::id() {
-                    return None; // our own (shouldn't exist yet, but never self-trigger)
-                }
-                let stale = std::fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age.as_secs() > STALE_SECS);
-                if stale || !Self::pid_is_alive(pid) {
-                    Some(path)
-                } else {
-                    None // healthy concurrent load — not poison
-                }
-            })
-            .collect()
-    }
-
-    /// Remove handled dead sentinels so one death triggers at most one redirect.
-    fn clear_dead_load_sentinels(dir: &std::path::Path) {
-        for path in Self::dead_load_sentinels(dir) {
-            let _ = std::fs::remove_file(path);
+        for e in entries.flatten() {
+            let path = e.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name == "graph.loading" {
+                // 0.18.3's single sentinel — its presence means a 0.18.3 load
+                // crashed and nothing has recovered since.
+                legacy = true;
+                dead.push(path);
+                continue;
+            }
+            let Some(pid) = name
+                .strip_prefix("graph.loading.")
+                .and_then(|s| s.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == std::process::id() {
+                continue; // our own (shouldn't exist yet, but never self-trigger)
+            }
+            let stale = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > Self::SENTINEL_STALE_SECS);
+            let recorded_start = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            if stale || !Self::pid_is_alive_with_start(pid, recorded_start) {
+                dead.push(path);
+            } else {
+                alive += 1; // healthy concurrent load — not poison
+            }
         }
+        (dead, alive, legacy)
     }
 
-    /// Liveness probe for a sentinel owner (same spirit as the stale-LOCK
-    /// recovery probe).
-    fn pid_is_alive(pid: u32) -> bool {
+    /// A real load takes seconds; anything older than this is dead no matter
+    /// what the PID looks like.
+    const SENTINEL_STALE_SECS: u64 = 90;
+
+    /// Liveness probe for a sentinel owner. When the sentinel recorded the
+    /// owner's process start time, the live process must match it — a PID
+    /// that exists with a DIFFERENT start time is a recycled PID, i.e. the
+    /// real owner is dead.
+    fn pid_is_alive_with_start(pid: u32, recorded_start: Option<u64>) -> bool {
         use sysinfo::{Pid, System};
         let mut sys = System::new();
         let p = Pid::from_u32(pid);
         sys.refresh_process(p);
-        sys.process(p).is_some()
+        match (sys.process(p), recorded_start) {
+            (None, _) => false,
+            (Some(proc_), Some(start)) => proc_.start_time() == start,
+            (Some(_), None) => true, // old-format sentinel — PID existence is all we have
+        }
+    }
+
+    /// This process's start time (same clock sysinfo reports for liveness).
+    fn own_start_time() -> Option<u64> {
+        use sysinfo::{Pid, System};
+        let mut sys = System::new();
+        let p = Pid::from_u32(std::process::id());
+        sys.refresh_process(p);
+        sys.process(p).map(|proc_| proc_.start_time())
+    }
+
+    /// Persist the recovery decision as a breadcrumb the extension reports as
+    /// `server.recovery`. Every field is a number/bool/enum — no paths, no
+    /// free text. Best-effort, never panics.
+    fn write_recovery_breadcrumb(dir: &std::path::Path, stats: &RecoveryStats) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let json = format!(
+            "{{\"schema\":1,\"ts\":{ts},\"pid\":{pid},\"found\":{},\"alive\":{},\"dead\":{},\
+             \"legacy\":{},\"bump\":\"{}\",\"generation\":{},\"sweptOk\":{},\"sweptFail\":{}}}",
+            stats.sentinels_found,
+            stats.sentinels_alive,
+            stats.sentinels_dead,
+            stats.legacy_sentinel,
+            stats.bump,
+            stats.generation,
+            stats.swept_ok,
+            stats.swept_fail,
+        );
+        let _ = std::fs::write(dir.join(format!("last-recovery.{pid}.json")), json);
     }
 
     /// Best-effort cleanup of graph DB directories that are not the current
     /// generation (`graph.db` / `graph.db.<n>` left behind by a redirect).
     /// Failures are expected while handles linger — a later startup retries.
-    fn sweep_stale_graph_dbs(dir: &std::path::Path, current: &std::path::Path) {
+    /// Returns (cleaned, failed) counts for the recovery breadcrumb.
+    fn sweep_stale_graph_dbs(dir: &std::path::Path, current: &std::path::Path) -> (usize, usize) {
+        let mut ok = 0usize;
+        let mut fail = 0usize;
         let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+            return (ok, fail);
         };
         for e in entries.flatten() {
             let path = e.path();
@@ -353,9 +479,14 @@ impl McpBackend {
                     !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
                 });
             if is_db_dir {
-                Self::quarantine_graph_db(&path);
+                if Self::quarantine_graph_db(&path) {
+                    ok += 1;
+                } else {
+                    fail += 1;
+                }
             }
         }
+        (ok, fail)
     }
 
     /// Open RocksDB at `db_path`, load the `slug` namespace into memory, and
@@ -388,9 +519,11 @@ impl McpBackend {
     /// reused (the prior quarantine, if any, is removed first) so a pathological
     /// machine can't fill the disk with copies. The graph is a derived cache —
     /// re-indexing from source fully rebuilds it.
-    fn quarantine_graph_db(db_path: &std::path::Path) {
+    /// Returns true when the directory is gone afterwards (renamed or
+    /// removed); false when handles still pin it in place.
+    fn quarantine_graph_db(db_path: &std::path::Path) -> bool {
         if !db_path.exists() {
-            return;
+            return true;
         }
         let quarantine = db_path.with_extension("db.corrupt");
         let _ = std::fs::remove_dir_all(&quarantine);
@@ -400,6 +533,7 @@ impl McpBackend {
         } else {
             tracing::warn!("Quarantined corrupt graph.db → {}", quarantine.display());
         }
+        !db_path.exists()
     }
 
     /// Persist the current graph state to the shared database.
@@ -829,13 +963,23 @@ impl McpBackend {
                         "Loaded {} persisted symbol vectors — semantic search ready",
                         loaded
                     );
-                    // No embedding work needed: persisted vectors are
-                    // fully aligned with the graph (which itself was
-                    // loaded from persistence — files_parsed == 0).
-                    // Skip the embed task entirely. Prior behaviour
-                    // re-embedded every symbol on every restart, which
-                    // is `O(symbols)` of wasted ONNX work for the
-                    // common steady-state restart.
+                    // Steady-state restart: persisted vectors loaded, files
+                    // unchanged. Still run a background verify-and-fill —
+                    // a crash-interrupted embed run leaves a `partial:`
+                    // checkpoint that loads fine here but is missing the
+                    // tail; embed_missing_symbols no-ops (one graph scan, no
+                    // ONNX work) when the set is actually complete.
+                    let query_engine = Arc::clone(&self.query_engine);
+                    let slug = self.project_slug.clone();
+                    tokio::spawn(async move {
+                        let _phase = crate::crash_phase::enter("index_embed");
+                        query_engine
+                            .embed_missing_symbols_checkpointed(Some(&slug))
+                            .await;
+                        if let Err(e) = query_engine.save_symbol_vectors(&slug).await {
+                            tracing::warn!("Failed to persist symbol vectors: {}", e);
+                        }
+                    });
                 } else {
                     // Embeddings need building — do it in background so server can
                     // start handling requests immediately. Graph-based tools (34 of 37)
@@ -853,13 +997,19 @@ impl McpBackend {
                         // Embedding runs native ONNX over symbol bodies — the
                         // other suspect for the win32 0xC0000005 crashes. Guard
                         // resets to `serving` when the background task finishes.
+                        // Checkpointed: periodic vector saves + RAM backpressure
+                        // so an OOM-kill mid-marathon loses minutes, not the run.
                         let _phase = crate::crash_phase::enter("index_embed");
                         if loaded > 0 && files_changed > 0 {
                             // Have persisted vectors + some files changed
-                            query_engine.embed_missing_symbols().await;
+                            query_engine
+                                .embed_missing_symbols_checkpointed(Some(&slug))
+                                .await;
                         } else {
                             // No persisted vectors — full build
-                            query_engine.build_symbol_vectors().await;
+                            query_engine
+                                .build_symbol_vectors_checkpointed(Some(&slug))
+                                .await;
                         }
                         if let Err(e) = query_engine.save_symbol_vectors(&slug).await {
                             tracing::warn!("Failed to persist symbol vectors: {}", e);
@@ -4753,13 +4903,14 @@ mod quarantine_tests {
     }
 
     #[test]
-    fn dead_sentinel_is_detected_and_cleared() {
+    fn dead_pid_sentinel_is_classified_dead() {
         let tmp = tempfile::tempdir().unwrap();
         // 99,999,999 fits pid_t but is far above any real OS pid ceiling.
         std::fs::write(tmp.path().join("graph.loading.99999999"), b"").unwrap();
-        assert_eq!(McpBackend::dead_load_sentinels(tmp.path()).len(), 1);
-        McpBackend::clear_dead_load_sentinels(tmp.path());
-        assert!(McpBackend::dead_load_sentinels(tmp.path()).is_empty());
+        let (dead, alive, legacy) = McpBackend::classify_load_sentinels(tmp.path());
+        assert_eq!(dead.len(), 1);
+        assert_eq!(alive, 0);
+        assert!(!legacy);
     }
 
     #[test]
@@ -4772,7 +4923,38 @@ mod quarantine_tests {
         )
         .unwrap();
         std::fs::write(tmp.path().join("graph.loading.notapid"), b"").unwrap();
-        assert!(McpBackend::dead_load_sentinels(tmp.path()).is_empty());
+        let (dead, alive, legacy) = McpBackend::classify_load_sentinels(tmp.path());
+        assert!(dead.is_empty());
+        assert_eq!(alive, 0);
+        assert!(!legacy);
+    }
+
+    #[test]
+    fn legacy_bare_sentinel_is_poison_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Only 0.18.3 wrote the bare `graph.loading`; a leftover means that
+        // load crashed and nothing recovered since.
+        std::fs::write(tmp.path().join("graph.loading"), b"loading").unwrap();
+        let (dead, _alive, legacy) = McpBackend::classify_load_sentinels(tmp.path());
+        assert!(legacy);
+        assert_eq!(dead.len(), 1);
+    }
+
+    #[test]
+    fn recycled_pid_with_wrong_start_time_is_dead() {
+        // A sentinel naming OUR OWN pid is skipped, so use the liveness probe
+        // directly: our pid exists, but a recorded start time that can't match
+        // (0) must classify as a recycled pid → dead.
+        assert!(!McpBackend::pid_is_alive_with_start(
+            std::process::id(),
+            Some(0)
+        ));
+        // And the real start time matches → alive.
+        let own = McpBackend::own_start_time().expect("own start time");
+        assert!(McpBackend::pid_is_alive_with_start(
+            std::process::id(),
+            Some(own)
+        ));
     }
 
     #[test]

@@ -1278,13 +1278,30 @@ impl LanguageServer for CodeGraphBackend {
                                     format!("✓ Loaded {} persisted symbol vectors", loaded),
                                 )
                                 .await;
-                            // No embed task spawns here, so reset the breadcrumb
-                            // off `post_onnx` (the last mark from memory init) —
-                            // otherwise every warm-restart session steady-states
-                            // at `post_onnx` and pollutes that crash bucket.
-                            crate::crash_phase::mark("serving");
+                            // Warm restart: still run a background verify-and-
+                            // fill — a crash-interrupted embed run leaves a
+                            // `partial:` checkpoint that loads fine here but is
+                            // missing the tail; embed_missing_symbols no-ops
+                            // (one graph scan, no ONNX work) when complete. The
+                            // guard also resets the breadcrumb off `post_onnx`
+                            // so warm-restart sessions steady-state at `serving`.
+                            let query_engine = Arc::clone(&self.query_engine);
+                            let slug_bg = slug.clone();
+                            tokio::spawn(async move {
+                                let _phase = crate::crash_phase::enter("index_embed");
+                                query_engine
+                                    .embed_missing_symbols_checkpointed(Some(&slug_bg))
+                                    .await;
+                                if let Err(e) = query_engine.save_symbol_vectors(&slug_bg).await {
+                                    tracing::warn!("Failed to persist symbol vectors: {}", e);
+                                }
+                            });
                         } else {
-                            // Embeddings need building — do it in background
+                            // Embeddings need building — do it in background.
+                            // Checkpointed: periodic vector saves + RAM
+                            // backpressure so an OOM-kill mid-marathon loses
+                            // minutes, not the run (telemetry: linux SIGKILL
+                            // ~25 min into big first indexes).
                             let query_engine = Arc::clone(&self.query_engine);
                             let slug_bg = slug.clone();
                             let had_vectors = loaded > 0;
@@ -1301,9 +1318,13 @@ impl LanguageServer for CodeGraphBackend {
                                 // crashes. Guard resets to `serving` on finish.
                                 let _phase = crate::crash_phase::enter("index_embed");
                                 if had_vectors {
-                                    query_engine.embed_missing_symbols().await;
+                                    query_engine
+                                        .embed_missing_symbols_checkpointed(Some(&slug_bg))
+                                        .await;
                                 } else {
-                                    query_engine.build_symbol_vectors().await;
+                                    query_engine
+                                        .build_symbol_vectors_checkpointed(Some(&slug_bg))
+                                        .await;
                                 }
                                 if let Err(e) = query_engine.save_symbol_vectors(&slug_bg).await {
                                     tracing::warn!("Failed to persist symbol vectors: {}", e);
