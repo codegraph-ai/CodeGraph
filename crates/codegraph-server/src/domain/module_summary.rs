@@ -60,8 +60,11 @@ pub(crate) fn get_module_summary(
     directory: &str,
     top_n: usize,
 ) -> ModuleSummaryResult {
-    // Normalise: strip trailing slash so prefix matching is consistent.
-    let prefix = directory.trim_end_matches('/');
+    // Normalise: strip trailing separators (either flavour — Windows callers
+    // pass `\`) so prefix matching is consistent. path_matches() re-normalises
+    // separators internally, but anything else that ever consumes `prefix`
+    // directly should see a clean value too.
+    let prefix = directory.trim_end_matches(['/', '\\']);
 
     let mut files: usize = 0;
     let mut total_functions: usize = 0;
