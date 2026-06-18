@@ -119,6 +119,14 @@ pub struct FindEntryPointsParams {
     /// Filter by framework (e.g., "express", "fastapi", "actix")
     #[serde(default)]
     pub framework: Option<String>,
+    /// Maximum number of entry points to return (default 50). `total_found`
+    /// still reports the true count so the caller knows results were capped.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Compact mode: drop per-entry signature/docstring/description for a
+    /// much smaller response (default false).
+    #[serde(default)]
+    pub compact: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -473,15 +481,30 @@ impl CodeGraphBackend {
         let results = self.query_engine.find_entry_points(&entry_types).await;
         let total_found = results.len();
 
+        // Honor the (previously dropped) `limit` and `compact` params that the
+        // tool schema already advertises. Telemetry: 24 of ~42 calls returned
+        // >50k chars because every entry point was emitted with full signature
+        // + docstring; the documented default cap of 50 was never applied.
+        let limit = params.limit.unwrap_or(50);
+        let compact = params.compact.unwrap_or(false);
+
         let entry_points = results
             .into_iter()
-            .map(|ep| EntryPointResponse {
-                node_id: ep.node_id.to_string(),
-                entry_type: format!("{:?}", ep.entry_type).to_lowercase(),
-                route: ep.route,
-                method: ep.method,
-                description: ep.description,
-                symbol: symbol_info_to_response(&ep.symbol),
+            .take(limit)
+            .map(|ep| {
+                let mut symbol = symbol_info_to_response(&ep.symbol);
+                if compact {
+                    symbol.signature = None;
+                    symbol.docstring = None;
+                }
+                EntryPointResponse {
+                    node_id: ep.node_id.to_string(),
+                    entry_type: format!("{:?}", ep.entry_type).to_lowercase(),
+                    route: ep.route,
+                    method: ep.method,
+                    description: if compact { None } else { ep.description },
+                    symbol,
+                }
             })
             .collect();
 
@@ -1154,6 +1177,8 @@ mod tests {
         let params = FindEntryPointsParams {
             entry_type: Some("main".to_string()),
             framework: None,
+            limit: None,
+            compact: None,
         };
 
         let result = backend.handle_find_entry_points(params).await.unwrap();
@@ -1196,6 +1221,8 @@ mod tests {
         let params = FindEntryPointsParams {
             entry_type: Some("http_handler".to_string()),
             framework: None,
+            limit: None,
+            compact: None,
         };
 
         let result = backend.handle_find_entry_points(params).await.unwrap();
@@ -1247,11 +1274,35 @@ mod tests {
         let params = FindEntryPointsParams {
             entry_type: None,
             framework: None,
+            limit: None,
+            compact: None,
         };
 
         let result = backend.handle_find_entry_points(params).await.unwrap();
 
         assert!(result.total_found >= 2);
+
+        // limit caps the returned vec but total_found still reports the truth
+        // (the >50k-output fix). compact drops signature/docstring.
+        let capped = backend
+            .handle_find_entry_points(FindEntryPointsParams {
+                entry_type: None,
+                framework: None,
+                limit: Some(1),
+                compact: Some(true),
+            })
+            .await
+            .unwrap();
+        assert_eq!(capped.entry_points.len(), 1, "limit=1 must cap results");
+        assert!(
+            capped.total_found >= 2,
+            "total_found reports the true count"
+        );
+        assert!(
+            capped.entry_points[0].symbol.signature.is_none()
+                && capped.entry_points[0].symbol.docstring.is_none(),
+            "compact must drop signature + docstring"
+        );
     }
 
     // ==========================================
