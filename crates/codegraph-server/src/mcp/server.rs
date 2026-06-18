@@ -59,6 +59,29 @@ fn safe_tool_name(name: &str) -> &str {
     }
 }
 
+/// Serialize a tool result for the MCP text channel. Defaults to COMPACT JSON
+/// (no pretty-print indentation) — the consumer is an LLM agent that parses
+/// JSON identically either way, while pretty-printing is ~25-40% pure
+/// whitespace on codegraph's nested results. At ~3k installs with
+/// `symbol_search` alone returning thousands of multi-KB results per day, this
+/// is a lossless, zero-schema, fleet-wide token cut.
+///
+/// Set `CODEGRAPH_MCP_PRETTY=1` to restore the indented form for human
+/// inspection. This is phase 1 of MCP output compaction; per-tool structural
+/// compaction (columnar rows, path legends, default caps) layers on top later,
+/// each validated against the `resultSizeBucket` telemetry.
+fn serialize_tool_result(result: &Value) -> String {
+    serialize_tool_result_mode(result, std::env::var_os("CODEGRAPH_MCP_PRETTY").is_some())
+}
+
+fn serialize_tool_result_mode(result: &Value, pretty: bool) -> String {
+    if pretty {
+        serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+    } else {
+        serde_json::to_string(result).unwrap_or_else(|_| result.to_string())
+    }
+}
+
 use super::protocol::*;
 use super::resources::get_all_resources;
 use super::tools::{get_all_tools, tool_in_profile, ToolProfile};
@@ -1638,8 +1661,7 @@ impl McpServer {
                 }));
                 let tool_result = ToolCallResult {
                     content: vec![ToolResultContent::Text {
-                        text: serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|_| result.to_string()),
+                        text: serialize_tool_result(&result),
                     }],
                     is_error: None,
                 };
@@ -4856,6 +4878,33 @@ fn parse_node_id(s: &str) -> Option<codegraph::NodeId> {
 #[cfg(test)]
 mod quarantine_tests {
     use super::McpBackend;
+
+    #[test]
+    fn compact_serialization_drops_whitespace_losslessly() {
+        let v = serde_json::json!({
+            "results": [
+                {"path": "src/a.rs", "name": "foo", "line": 12},
+                {"path": "src/b.rs", "name": "bar", "line": 34}
+            ],
+            "total": 2
+        });
+        let compact = super::serialize_tool_result_mode(&v, false);
+        let pretty = super::serialize_tool_result_mode(&v, true);
+
+        // Compact has no indentation newlines; pretty does.
+        assert!(!compact.contains('\n'), "compact must be single-line");
+        assert!(pretty.contains('\n'), "pretty must be multi-line");
+        assert!(compact.len() < pretty.len(), "compact must be smaller");
+        // Lossless: both parse back to the identical value.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&compact).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&pretty).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&compact).unwrap(),
+            v
+        );
+    }
 
     #[test]
     fn quarantine_moves_db_dir_aside_to_fixed_name() {
