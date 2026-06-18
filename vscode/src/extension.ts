@@ -17,6 +17,7 @@ import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath } from './server';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
+import { detectMachineProfile } from './telemetry/machineProfile';
 
 let client: LanguageClient;
 let aiProvider: CodeGraphAIProvider;
@@ -500,6 +501,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Settings snapshot once per session — observe what defaults users override.
     reporter.engagementSettingsSnapshot();
+
+    // One-time machine fingerprint (bucketed/enum only, no PII) to triage the
+    // graph_load crash cohort — does it skew toward cloud-synced data dirs,
+    // third-party AV, VMs, or low RAM? Detection runs off the activation path
+    // (the Windows AV probe is async) and never blocks startup.
+    void detectMachineProfile()
+        .then((profile) => reporter.engagementMachineProfile(profile))
+        .catch(() => {
+            /* never block on telemetry */
+        });
 
     // Check if workspace is indexed — prompt if not.
     // Delay the check briefly: the server loads the persisted graph and

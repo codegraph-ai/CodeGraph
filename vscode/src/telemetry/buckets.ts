@@ -97,3 +97,14 @@ export function settingNumberBucket(n: number): string {
     if (n <= 100_000) return '10k-100k';
     return '>100k';
 }
+
+/** Total physical RAM in GB → coarse bucket (never the exact size). */
+export function ramBucket(gb: number): string {
+    if (!Number.isFinite(gb) || gb <= 0) return 'unknown';
+    if (gb < 4) return '<4';
+    if (gb < 8) return '4-8';
+    if (gb < 16) return '8-16';
+    if (gb < 32) return '16-32';
+    if (gb < 64) return '32-64';
+    return '>=64';
+}

@@ -42,6 +42,9 @@ import {
     normalizeCrashPhase,
     normalizeExitSignal,
     normalizeLanguage,
+    normalizeDataDirKind,
+    normalizeMachineKind,
+    normalizeAntivirusKind,
     type ServerRestartReason,
     SETTINGS_SNAPSHOT_KEYS,
     type ToolName,
@@ -50,6 +53,7 @@ import {
 import {
     durationBucket,
     fileCountBucket,
+    ramBucket,
     resultSizeBucket,
     settingNumberBucket,
     uptimeBucket,
@@ -127,6 +131,8 @@ export interface Reporter {
     engagementTreeViewOpened(view: TreeView): void;
     engagementGraphPanelOpened(panel: GraphPanel): void;
     engagementSettingsSnapshot(): void;
+    /** One-time machine fingerprint (bucketed/enum only) to triage the graph_load crash cohort. */
+    engagementMachineProfile(profile: { dataDirKind: string; machineKind: string; totalRamGb: number; antivirusKind: string }): void;
 
     serverCrash(props: { uptimeSeconds: number; lastToolName?: string; restartCount: number; crashCause?: string; crashPhase?: string; exitCode?: number; exitSignal?: string }): void;
     /** Poison-recovery decision breadcrumb from the server (counts + enums only). */
@@ -398,6 +404,18 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
                     props[`setting_${key.replace(/\./g, '_')}`] = settingNumberBucket(v);
             }
             send('engagement.settingsSnapshot', props, false);
+        },
+        engagementMachineProfile(profile) {
+            send(
+                'engagement.machineProfile',
+                {
+                    dataDirKind: normalizeDataDirKind(profile.dataDirKind),
+                    machineKind: normalizeMachineKind(profile.machineKind),
+                    ramBucket: ramBucket(profile.totalRamGb),
+                    antivirusKind: normalizeAntivirusKind(profile.antivirusKind),
+                },
+                false,
+            );
         },
 
         serverCrash(props) {

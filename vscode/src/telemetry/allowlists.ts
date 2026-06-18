@@ -310,6 +310,47 @@ export const EXIT_SIGNALS = [
     'SIGHUP',
     'other',
 ] as const;
+/**
+ * Machine-profile enums (engagement.machineProfile) — bucketed, never PII.
+ * Used to fingerprint the graph_load crash cohort: which classes of machine
+ * corrupt their graph.db. The DETECTOR may read a path / MAC / AV name to
+ * classify, but only ever emits the enum here — never the raw value.
+ */
+
+/** Where ~/.codegraph resolves — the top corruption suspect on Windows. */
+export const DATA_DIR_KINDS = [
+    'local',
+    'cloud_onedrive',
+    'cloud_other',
+    'unc_network',
+    'unknown',
+] as const;
+export type DataDirKind = (typeof DATA_DIR_KINDS)[number];
+const DATA_DIR_KIND_SET = new Set<string>(DATA_DIR_KINDS);
+export function normalizeDataDirKind(s: string | undefined): DataDirKind {
+    if (!s) return 'unknown';
+    return (DATA_DIR_KIND_SET.has(s) ? s : 'unknown') as DataDirKind;
+}
+
+/** Physical vs virtualized — affects disk/fsync durability semantics. */
+export const MACHINE_KINDS = ['physical', 'vm', 'wsl', 'container', 'unknown'] as const;
+export type MachineKind = (typeof MACHINE_KINDS)[number];
+const MACHINE_KIND_SET = new Set<string>(MACHINE_KINDS);
+export function normalizeMachineKind(s: string | undefined): MachineKind {
+    if (!s) return 'unknown';
+    return (MACHINE_KIND_SET.has(s) ? s : 'unknown') as MachineKind;
+}
+
+/** AV class (Windows) — third-party AV holding file handles is a corruption
+ * suspect. Coarse class only; never the product name. */
+export const ANTIVIRUS_KINDS = ['defender_only', 'third_party', 'none', 'unknown'] as const;
+export type AntivirusKind = (typeof ANTIVIRUS_KINDS)[number];
+const ANTIVIRUS_KIND_SET = new Set<string>(ANTIVIRUS_KINDS);
+export function normalizeAntivirusKind(s: string | undefined): AntivirusKind {
+    if (!s) return 'unknown';
+    return (ANTIVIRUS_KIND_SET.has(s) ? s : 'unknown') as AntivirusKind;
+}
+
 export type ExitSignal = (typeof EXIT_SIGNALS)[number];
 const EXIT_SIGNAL_SET = new Set<string>(EXIT_SIGNALS);
 export function normalizeExitSignal(s: string | undefined): ExitSignal {
