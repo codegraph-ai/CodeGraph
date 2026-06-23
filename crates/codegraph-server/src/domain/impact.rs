@@ -12,6 +12,7 @@ use codegraph::{
 };
 use serde::Serialize;
 use std::collections::HashSet;
+use std::path::Path;
 use tokio::sync::RwLock;
 
 // ============================================================
@@ -67,6 +68,22 @@ pub(crate) struct CrossProjectImpact {
     pub severity: String,
 }
 
+/// A documentation reference linking to a symbol that DocRel tracks.
+///
+/// Read from `.docrel/mappings.json` when the DocRel sync system is in use.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DocRef {
+    /// Path to the documentation file (relative to project root).
+    pub doc_file: String,
+    /// Section anchor in the documentation file (heading or empty).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub doc_anchor: String,
+    /// Relationship type: "describes", "references", "generates", or "contracts".
+    pub relationship: String,
+    /// Name of the code symbol this doc section links to.
+    pub symbol_name: String,
+}
+
 /// Result of `analyze_impact`.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ImpactResult {
@@ -90,6 +107,10 @@ pub(crate) struct ImpactResult {
     pub used_fallback: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_message: Option<String>,
+    /// DocRel documentation references linking to affected symbols.
+    /// Populated when `.docrel/mappings.json` exists in the project root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_refs: Option<Vec<DocRef>>,
 }
 
 // ============================================================
@@ -111,6 +132,7 @@ pub(crate) async fn analyze_impact(
     used_fallback: bool,
     requested_line: Option<u32>,
     current_project_slug: Option<&str>,
+    project_root: Option<&Path>,
 ) -> ImpactResult {
     let symbol_name = {
         let g = graph.read().await;
@@ -276,6 +298,53 @@ pub(crate) async fn analyze_impact(
 
     let total_impacted = direct_impacted + indirect_impacted.len() + cross_project_impacts.len();
 
+    // ── DocRel integration ──────────────────────────────────────────
+    // When the DocRel sync system is in use, `.docrel/mappings.json`
+    // contains symbol→document references. Read it and attach matching
+    // entries so agents see which docs need updating when a symbol changes.
+    let doc_refs: Option<Vec<DocRef>> = project_root.and_then(|root| {
+        let mappings_path = root.join(".docrel").join("mappings.json");
+        let content = std::fs::read_to_string(&mappings_path).ok()?;
+        let mappings: Vec<serde_json::Value> = serde_json::from_str(&content).ok()?;
+        let affected_names: HashSet<&str> = impacted
+            .iter()
+            .map(|s| s.name.as_str())
+            .chain(std::iter::once(symbol_name.as_str()))
+            .collect();
+
+        let refs: Vec<DocRef> = mappings
+            .iter()
+            .filter_map(|m| {
+                let sym_name = m.get("symbol_name")?.as_str()?;
+                if affected_names.contains(sym_name) {
+                    Some(DocRef {
+                        doc_file: m
+                            .get("doc_file")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        doc_anchor: m
+                            .get("doc_anchor")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        relationship: m
+                            .get("rel_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("describes")
+                            .to_string(),
+                        symbol_name: sym_name.to_string(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if refs.is_empty() { None } else { Some(refs) }
+    });
+    // ────────────────────────────────────────────────────────────────
+
     ImpactResult {
         symbol_id: start_node.to_string(),
         symbol_name,
@@ -291,6 +360,7 @@ pub(crate) async fn analyze_impact(
         warnings,
         used_fallback: used_fallback_field,
         fallback_message,
+        doc_refs,
     }
 }
 

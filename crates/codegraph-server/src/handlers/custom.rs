@@ -470,6 +470,7 @@ impl CodeGraphBackend {
             false,
             None,
             None, // LSP doesn't have project slug
+            None, // LSP doesn't have project root for DocRel mappings
         )
         .await;
 

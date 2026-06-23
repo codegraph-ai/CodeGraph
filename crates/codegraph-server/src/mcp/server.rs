@@ -2562,6 +2562,7 @@ impl McpServer {
                             used_fallback,
                             Some(line),
                             Some(&self.backend.project_slug),
+                            self.backend.workspace_folders.first().map(|p| p.as_path()),
                         )
                         .await;
                         serde_json::to_value(&typed).unwrap_or_default()
