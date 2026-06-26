@@ -42,10 +42,20 @@ and the `fastembed` diamond conflict.
   (1) On a hard, unsaturated task, static is **~65% of BGE R@1 / ~70% MRR** — a
   real gap, not ~95%. (2) The code teacher **ties the generic potion** at 256d —
   plain Jina distillation at 256d is no win.
-- **Caveats / open levers:** this is pure semantic, **no BM25** — the real hybrid
-  (40% BM25 + 60% semantic) lifts both and masks much of the gap (needs the
-  server eval). Untried: **512d** (256d may over-compress), identifier-splitting
-  on the embed text, tokenlearn, a learned pooling head.
+- **Lever sweep — the gap is fundamental, not tunable cheaply:**
+  - **512d: no change** (R@1 0.378) — not a compression problem.
+  - **code teacher vs generic potion: no change** — not a teacher problem.
+  - **identifier-splitting (`CODEGRAPH_SPLIT_IDS`): +6% relative** (static R@1
+    0.379→0.401, MRR 0.480→0.511; also lifts BGE 0.591→0.608) — real but modest;
+    validates the Phase-1.2 lever.
+
+  So static's ~65% of BGE is the **contextualization ceiling** (no attention),
+  not dim/teacher. Only a learned pooling head addresses the root; tokenlearn may
+  help modestly.
+- **The decisive untested measurement:** real search is **hybrid (40% BM25 + 60%
+  semantic)**, which this pure-semantic eval omits. BM25 exact-term matching
+  should recover much of static's gap. The server-side hybrid eval decides
+  whether static is a ~100×-speed win at near-parity, or a fast opt-in only.
 
 ## Why this is worth doing (grounded in history)
 The original static model (`migration.rs` v3) was `potion-base-8M`: a **generic

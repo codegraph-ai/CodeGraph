@@ -31,10 +31,37 @@ struct Scores {
     mrr: f64,
 }
 
+/// Split an identifier into camelCase/snake_case words (lowercased).
+fn split_id(id: &str) -> String {
+    let mut out = String::new();
+    let mut prev_upper = false;
+    for ch in id.chars() {
+        if ch == '_' || ch == '-' {
+            out.push(' ');
+        } else if ch.is_uppercase() && !out.is_empty() && !prev_upper {
+            out.push(' ');
+            out.extend(ch.to_lowercase());
+        } else {
+            out.extend(ch.to_lowercase());
+        }
+        prev_upper = ch.is_uppercase();
+    }
+    out
+}
+
 fn evaluate(engine: &VectorEngine, syms: &[Sym]) -> Scores {
+    // CODEGRAPH_SPLIT_IDS=1 prepends the camelCase/snake_case-split name
+    // (the Phase-1.2 lever) to the symbol text.
+    let split = std::env::var("CODEGRAPH_SPLIT_IDS").is_ok();
     let sym_texts: Vec<String> = syms
         .iter()
-        .map(|s| format!("{}: {}", s.id, s.signature))
+        .map(|s| {
+            if split {
+                format!("{} {}: {}", split_id(&s.id), s.id, s.signature)
+            } else {
+                format!("{}: {}", s.id, s.signature)
+            }
+        })
         .collect();
     let sym_refs: Vec<&str> = sym_texts.iter().map(|s| s.as_str()).collect();
     let sym_vecs = engine.embed_batch(&sym_refs).expect("embed symbols");
