@@ -47,6 +47,9 @@ pub struct QueryEngine {
     symbol_texts: Arc<RwLock<HashMap<NodeId, String>>>,
     /// Embed full function body (true) or just name+signature (false, default)
     full_body_embedding: std::sync::atomic::AtomicBool,
+    /// Prepend split-identifier words to the embed text (helps static
+    /// embedders; off by default to leave the transformer path unchanged).
+    split_identifiers: std::sync::atomic::AtomicBool,
 }
 
 /// Max characters of function body for full-body embedding.
@@ -73,6 +76,17 @@ fn available_memory_mb() -> u64 {
     sys.available_memory() / (1024 * 1024)
 }
 
+/// Split an identifier into camelCase/snake_case words (deduped, lowercased),
+/// reusing the BM25 tokenizer: `getUserById` -> "get user by id".
+fn split_identifier_words(name: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    super::text_index::tokenize(name)
+        .into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl QueryEngine {
     /// Create a new query engine with the given graph.
     pub fn new(graph: Arc<RwLock<CodeGraph>>) -> Self {
@@ -86,12 +100,20 @@ impl QueryEngine {
             symbol_vectors: Arc::new(RwLock::new(HashMap::new())),
             symbol_texts: Arc::new(RwLock::new(HashMap::new())),
             full_body_embedding: std::sync::atomic::AtomicBool::new(true),
+            split_identifiers: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Enable or disable full-body embedding mode.
     pub fn set_full_body_embedding(&self, enabled: bool) {
         self.full_body_embedding
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Enable or disable prepending split-identifier words to the embed text.
+    /// Helps static (lookup-table) embedders; off by default.
+    pub fn set_split_identifiers(&self, enabled: bool) {
+        self.split_identifiers
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -103,6 +125,7 @@ impl QueryEngine {
         node_id: NodeId,
         name: &str,
         full_body: bool,
+        split_identifiers: bool,
         graph: &CodeGraph,
     ) -> String {
         let signature = node.properties.get_string("signature").unwrap_or("");
@@ -117,6 +140,21 @@ impl QueryEngine {
             format!("{name} — {docstring}")
         } else {
             name.to_string()
+        };
+
+        // Prepend the camelCase/snake_case-split form of the name when enabled.
+        // Static (lookup-table) embedders can't subword-recover `authenticateUser`
+        // from one rare token; the split words ("authenticate user") are their
+        // strongest signal, front-loaded so they survive truncation.
+        let base = if split_identifiers {
+            let words = split_identifier_words(name);
+            if words.is_empty() || words == name.to_lowercase() {
+                base
+            } else {
+                format!("{words} {base}")
+            }
+        } else {
+            base
         };
 
         if !full_body {
@@ -293,6 +331,8 @@ impl QueryEngine {
                 name,
                 self.full_body_embedding
                     .load(std::sync::atomic::Ordering::Relaxed),
+                self.split_identifiers
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 &graph,
             );
 
@@ -443,6 +483,8 @@ impl QueryEngine {
                 node_id,
                 name,
                 self.full_body_embedding
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                self.split_identifiers
                     .load(std::sync::atomic::Ordering::Relaxed),
                 &graph,
             );
@@ -805,6 +847,8 @@ impl QueryEngine {
                 node_id,
                 name,
                 self.full_body_embedding
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                self.split_identifiers
                     .load(std::sync::atomic::Ordering::Relaxed),
                 &graph,
             );
@@ -3916,5 +3960,38 @@ mod tests {
 
         // Should find main, test, and public API
         assert!(results.len() >= 3);
+    }
+
+    #[test]
+    fn split_identifier_words_handles_camel_and_snake() {
+        assert_eq!(split_identifier_words("authenticate_user"), "authenticate user");
+        assert_eq!(split_identifier_words("getUserById"), "get user by id");
+        // The existing tokenizer keeps acronym+word runs joined (HTML|Parser is
+        // NOT split) and drops 1-char tokens — known limitations worth revisiting
+        // for static-embedding quality (Phase 3 input refinement).
+        assert_eq!(split_identifier_words("HTMLParser"), "htmlparser");
+        // A single lowercase word splits to itself.
+        assert_eq!(split_identifier_words("foo"), "foo");
+    }
+
+    #[test]
+    fn build_embed_text_prepends_split_name_only_when_enabled() {
+        let graph = CodeGraph::in_memory().unwrap();
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new().with("signature", "fn getUserById(id: u64) -> User"),
+        );
+
+        // Enabled: split name words are front-loaded for the static embedder.
+        let with_split =
+            QueryEngine::build_embed_text(&node, 0, "getUserById", false, true, &graph);
+        assert!(with_split.starts_with("get user by id"), "got: {with_split}");
+
+        // Disabled (default): original transformer-path text is unchanged.
+        let without =
+            QueryEngine::build_embed_text(&node, 0, "getUserById", false, false, &graph);
+        assert!(without.starts_with("getUserById"), "got: {without}");
+        assert!(!without.contains("get user by id"));
     }
 }
