@@ -29,10 +29,23 @@ and the `fastembed` diamond conflict.
   always land the answer in the top 3, so the set **cannot distinguish a code
   teacher from a generic one** — it proves the static path is real, fast, and
   ~95% of BGE, but is too easy to measure the code-teacher delta.
-- **Next (clearly motivated):** the real Phase-0 eval — 150+ realistic queries on
-  an actual indexed repo (+ server-side static selection so `symbol_search` uses
-  the static engine). That is the only thing that can show whether the code
-  teacher actually helps.
+- **Real eval (965-way, pure-semantic) — the micro-eval was misleading.**
+  `scripts/extract_eval_corpus.py` (965 doc-commented symbols) +
+  `examples/embed_eval.rs` (doc→symbol retrieval, recall@k):
+
+  | model | R@1 | R@5 | R@10 | MRR |
+  |---|---|---|---|---|
+  | BGE-small (ONNX) | 0.591 | 0.824 | 0.873 | 0.691 |
+  | potion-base-8M (generic) | 0.378 | 0.616 | 0.696 | 0.488 |
+  | jina-code-static-256 | 0.379 | 0.598 | 0.685 | 0.480 |
+
+  (1) On a hard, unsaturated task, static is **~65% of BGE R@1 / ~70% MRR** — a
+  real gap, not ~95%. (2) The code teacher **ties the generic potion** at 256d —
+  plain Jina distillation at 256d is no win.
+- **Caveats / open levers:** this is pure semantic, **no BM25** — the real hybrid
+  (40% BM25 + 60% semantic) lifts both and masks much of the gap (needs the
+  server eval). Untried: **512d** (256d may over-compress), identifier-splitting
+  on the embed text, tokenlearn, a learned pooling head.
 
 ## Why this is worth doing (grounded in history)
 The original static model (`migration.rs` v3) was `potion-base-8M`: a **generic
@@ -197,16 +210,16 @@ fallback? Record the call.
 ## Scoreboard template (the through-line)
 | config | recall@1 | recall@5 | recall@10 | MRR | embed/s | index-time | RAM | dim | deps |
 |---|---|---|---|---|---|---|---|---|---|
-| BGE-small (baseline) | 1.00 | | | 1.00 | 327 | | | 384 | ort |
+| BGE-small (baseline) | 0.591 | 0.824 | 0.873 | 0.691 | 327 | | | 384 | ort |
 | Jina-Code (baseline) | | | | | | | | 768 | ort |
-| potion-base-8M (floor) | 0.92 | | | 0.958 | 32986 | | | 256 | — |
-| **jina-code-static-256** | 0.92 | | | 0.958 | 23037 | | | 256 | — |
-| jina-code-static-512 +SIF | | | | | | | | 512 | — |
+| potion-base-8M (floor) | 0.378 | 0.616 | 0.696 | 0.488 | 32986 | | | 256 | — |
+| **jina-code-static-256** | 0.379 | 0.598 | 0.685 | 0.480 | 23037 | | | 256 | — |
+| jina-code-static-512 | | | | | | | | 512 | — |
 | + tokenlearn / + head | | | | | | | | | — |
 
-> recall@1 / MRR above are from the **12-query micro-eval** (`embed_quality`),
-> which is **saturated** — both static models tie. They are placeholders until
-> the real Phase-0 eval (150+ queries on an indexed repo) fills recall@{1,5,10}.
+> recall@k from the **965-way pure-semantic eval** (`embed_eval`, doc→symbol).
+> The real hybrid (40% BM25 + 60% semantic) system would score higher for every
+> row — this isolates *embedding* quality, where static lands ~65% of BGE R@1.
 
 ## Safety / rollback
 - fastembed/ONNX stays selectable throughout; nothing is removed until Phase 5.
