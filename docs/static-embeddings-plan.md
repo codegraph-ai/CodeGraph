@@ -18,7 +18,12 @@ and the `fastembed` diamond conflict.
   BGE-small over 512 symbol texts. Debug floor 8.6×; **release 103× — 32,986 vs
   319 texts/sec** (M4, potion-base-8M 256d vs BGE-small 384d). The embedding step
   of indexing drops ~100×.
-- **Next:** quality eval (Phase 0 harness + an indexed repo + server-side static
+- **Quality (first signal)** — `examples/embed_quality.rs`: a 12-query retrieval
+  micro-eval. The *generic* static floor (potion-base-8M) scores **R@1 0.92 /
+  R@3 1.00 / MRR 0.958** vs BGE's **1.00 / 1.00 / 1.000** — ~95% of BGE at the
+  floor, 103× faster. Small/clean set → directional, not the Phase-0 eval; a
+  code-distilled Jina static should close most of the remaining gap.
+- **Next:** the real Phase-0 eval (harness + an indexed repo + server-side static
   selection), then distill Jina-Code (Phase 2).
 
 ## Why this is worth doing (grounded in history)
