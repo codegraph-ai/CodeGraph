@@ -7,6 +7,7 @@
 
 mod engine;
 mod fastembed_embed;
+mod static_embed;
 
 pub use engine::VectorEngine;
 pub use fastembed_embed::CodeGraphEmbeddingModel;

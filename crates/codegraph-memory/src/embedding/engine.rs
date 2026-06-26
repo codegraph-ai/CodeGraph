@@ -45,6 +45,24 @@ impl VectorEngine {
         })
     }
 
+    /// Create a VectorEngine backed by a static (lookup-table) model loaded from
+    /// a model2vec-format directory (`config.json` + `tokenizer.json` +
+    /// `model.safetensors`). No ONNX — the fast indexing path.
+    pub fn with_static_model(model_dir: &Path) -> Result<Self> {
+        let model = super::static_embed::StaticEmbedding::from_pretrained(model_dir)?;
+        let dimension = model.dimension();
+        log::info!(
+            "VectorEngine ready ({}, {}d, static)",
+            model.model_name(),
+            dimension
+        );
+        Ok(Self {
+            model: Arc::new(model),
+            cache: DashMap::new(),
+            dimension,
+        })
+    }
+
     /// Generate embedding with caching
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
         // Check cache first
