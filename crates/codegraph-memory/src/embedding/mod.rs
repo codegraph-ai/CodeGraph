@@ -10,3 +10,15 @@ mod fastembed_embed;
 
 pub use engine::VectorEngine;
 pub use fastembed_embed::CodeGraphEmbeddingModel;
+
+use crate::error::Result;
+
+/// Pluggable embedding backend. The transformer path (fastembed/ONNX) and a
+/// future static (lookup-table) path both implement this; `VectorEngine` holds a
+/// `dyn Embedder` so the backend is swappable without touching callers.
+pub(crate) trait Embedder: Send + Sync {
+    fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+    fn dimension(&self) -> usize;
+    fn model_name(&self) -> &str;
+}

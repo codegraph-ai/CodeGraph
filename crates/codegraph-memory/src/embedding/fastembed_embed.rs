@@ -234,6 +234,22 @@ impl FastembedEmbedding {
     }
 }
 
+impl super::Embedder for FastembedEmbedding {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        // Explicit path → the inherent method (avoids any trait-method ambiguity).
+        FastembedEmbedding::embed(self, text)
+    }
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        FastembedEmbedding::embed_batch(self, texts)
+    }
+    fn dimension(&self) -> usize {
+        FastembedEmbedding::dimension(self)
+    }
+    fn model_name(&self) -> &str {
+        self.model_type().display_name()
+    }
+}
+
 /// Bundle of bytes needed to construct a `UserDefinedEmbeddingModel`.
 struct UserDefinedModelBundle {
     onnx_bytes: Vec<u8>,

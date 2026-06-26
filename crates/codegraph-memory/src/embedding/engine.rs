@@ -6,6 +6,7 @@
 //! High-level API for generating and caching embeddings.
 
 use super::fastembed_embed::{CodeGraphEmbeddingModel, FastembedEmbedding};
+use super::Embedder;
 use crate::error::Result;
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use std::sync::Arc;
 ///
 /// Wraps fastembed with a configurable model and DashMap cache for efficient repeated lookups.
 pub struct VectorEngine {
-    model: Arc<FastembedEmbedding>,
+    model: Arc<dyn Embedder>,
     cache: DashMap<String, Vec<f32>>,
     dimension: usize,
 }
@@ -111,8 +112,8 @@ impl VectorEngine {
     }
 
     /// Get model display name (e.g. "Jina Code V2 (768d)")
-    pub fn model_name(&self) -> &'static str {
-        self.model.model_type().display_name()
+    pub fn model_name(&self) -> &str {
+        self.model.model_name()
     }
 
     /// Get cache size
