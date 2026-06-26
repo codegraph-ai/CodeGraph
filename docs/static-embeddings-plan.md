@@ -7,6 +7,20 @@ quality — and prove the quality at each step rather than hoping. Secondary win
 removing the `ort`/ONNX runtime kills the 1.5 GB RAM gate, the glibc-2.31 shim,
 and the `fastembed` diamond conflict.
 
+## Progress (branch `feat/static-embeddings`)
+- **1.1 ✓** `Embedder` trait; `VectorEngine` holds `Arc<dyn Embedder>` (`eb60736`).
+- **1.1 ✓** `StaticEmbedding` backend — model2vec format (`tokenizer.json` +
+  `safetensors`), `tokenize → gather → mean-pool → L2-norm`; validated against
+  the real `potion-base-8M` (`a30df5e`).
+- **1.2 ✓** gated identifier-splitting in `build_embed_text`, default-off
+  (`de3e45d`).
+- **Speed proven** — `examples/embed_throughput.rs` (`1da5309`): static vs ONNX
+  BGE-small over 512 symbol texts. Debug floor 8.6×; **release 103× — 32,986 vs
+  319 texts/sec** (M4, potion-base-8M 256d vs BGE-small 384d). The embedding step
+  of indexing drops ~100×.
+- **Next:** quality eval (Phase 0 harness + an indexed repo + server-side static
+  selection), then distill Jina-Code (Phase 2).
+
 ## Why this is worth doing (grounded in history)
 The original static model (`migration.rs` v3) was `potion-base-8M`: a **generic
 256d** static model, fed **raw identifiers**, via stock `encode()`. It lost to
@@ -170,9 +184,9 @@ fallback? Record the call.
 ## Scoreboard template (the through-line)
 | config | recall@1 | recall@5 | recall@10 | MRR | embed/s | index-time | RAM | dim | deps |
 |---|---|---|---|---|---|---|---|---|---|
-| BGE-small (baseline) | | | | | | | | 384 | ort |
+| BGE-small (baseline) | | | | | 319 | | | 384 | ort |
 | Jina-Code (baseline) | | | | | | | | 768 | ort |
-| potion-base-8M (floor) | | | | | | | | 256 | — |
+| potion-base-8M (floor) | | | | | 32986 | | | 256 | — |
 | potion-retrieval-32M +idsplit | | | | | | | | | — |
 | **jina-code-static-256 +idsplit** | | | | | | | | 256 | — |
 | jina-code-static-512 +SIF | | | | | | | | 512 | — |
