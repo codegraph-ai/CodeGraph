@@ -52,10 +52,26 @@ and the `fastembed` diamond conflict.
   So static's ~65% of BGE is the **contextualization ceiling** (no attention),
   not dim/teacher. Only a learned pooling head addresses the root; tokenlearn may
   help modestly.
-- **The decisive untested measurement:** real search is **hybrid (40% BM25 + 60%
-  semantic)**, which this pure-semantic eval omits. BM25 exact-term matching
-  should recover much of static's gap. The server-side hybrid eval decides
-  whether static is a ~100×-speed win at near-parity, or a fast opt-in only.
+- **Hybrid eval (40% BM25 + 60% semantic) — static is viable.** `embed_eval` now
+  scores both; BM25 recovers most of static's semantic gap (lexical matching is
+  strongest exactly where static is weak):
+
+  | config (id-split on) | R@1 sem → hybrid | MRR sem → hybrid |
+  |---|---|---|
+  | jina-code-static-256 | 0.401 → **0.547** | 0.511 → **0.656** |
+  | BGE-small | 0.608 → 0.609 | 0.716 → 0.720 |
+
+  In the **real hybrid system static is ~90% of BGE** (R@1 0.547 vs 0.609 = 90%;
+  MRR = 91%; R@10 0.854 vs 0.909 = 94%) — at ~70–100× indexing speed. BGE barely
+  uses BM25 (already-strong semantics); static leans on it (+36% R@1). Caveat:
+  a faithful *approximation* of `symbol_search`'s blend; the exact server number
+  needs the server-side eval.
+- **Verdict:** static embedding is a **viable default/opt-in** — ~90% of BGE
+  end-to-end quality, ~100× faster indexing, none of the ONNX / 1.5 GB RAM-gate /
+  glibc / fastembed baggage. The code teacher ties the generic potion (no edge,
+  but Apache-clean). Closing the last ~10% would need a learned pooling head;
+  ~90% at 100× is a strong default trade. Next: wire static as a selectable
+  `--embedding-model` + the server-side hybrid eval to confirm the exact number.
 
 ## Why this is worth doing (grounded in history)
 The original static model (`migration.rs` v3) was `potion-base-8M`: a **generic
