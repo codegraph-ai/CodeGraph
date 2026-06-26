@@ -18,13 +18,21 @@ and the `fastembed` diamond conflict.
   BGE-small over 512 symbol texts. Debug floor 8.6×; **release 103× — 32,986 vs
   319 texts/sec** (M4, potion-base-8M 256d vs BGE-small 384d). The embedding step
   of indexing drops ~100×.
-- **Quality (first signal)** — `examples/embed_quality.rs`: a 12-query retrieval
-  micro-eval. The *generic* static floor (potion-base-8M) scores **R@1 0.92 /
-  R@3 1.00 / MRR 0.958** vs BGE's **1.00 / 1.00 / 1.000** — ~95% of BGE at the
-  floor, 103× faster. Small/clean set → directional, not the Phase-0 eval; a
-  code-distilled Jina static should close most of the remaining gap.
-- **Next:** the real Phase-0 eval (harness + an indexed repo + server-side static
-  selection), then distill Jina-Code (Phase 2).
+- **Distillation works (Phase 2.2 ✓)** — `scripts/distill_static_model.py`
+  distilled `jinaai/jina-embeddings-v2-base-code` → 256d in **~32 s on the M4
+  CPU** (Apache-2.0 teacher); loads in Rust (F16 + SIF weights) and embeds at
+  **70× BGE** (23k vs 327 texts/sec — slower than potion's 103× only because
+  jina's vocab is 2× larger).
+- **Quality (micro-eval) — saturated.** On the 12-query NL→symbol set
+  jina-code-static-256 and the generic potion floor **tie exactly: R@1 0.92 /
+  R@3 1.00 / MRR 0.958** vs BGE **1.00 / 1.00 / 1.000** (~95% of BGE). Both
+  always land the answer in the top 3, so the set **cannot distinguish a code
+  teacher from a generic one** — it proves the static path is real, fast, and
+  ~95% of BGE, but is too easy to measure the code-teacher delta.
+- **Next (clearly motivated):** the real Phase-0 eval — 150+ realistic queries on
+  an actual indexed repo (+ server-side static selection so `symbol_search` uses
+  the static engine). That is the only thing that can show whether the code
+  teacher actually helps.
 
 ## Why this is worth doing (grounded in history)
 The original static model (`migration.rs` v3) was `potion-base-8M`: a **generic
@@ -189,13 +197,16 @@ fallback? Record the call.
 ## Scoreboard template (the through-line)
 | config | recall@1 | recall@5 | recall@10 | MRR | embed/s | index-time | RAM | dim | deps |
 |---|---|---|---|---|---|---|---|---|---|
-| BGE-small (baseline) | | | | | 319 | | | 384 | ort |
+| BGE-small (baseline) | 1.00 | | | 1.00 | 327 | | | 384 | ort |
 | Jina-Code (baseline) | | | | | | | | 768 | ort |
-| potion-base-8M (floor) | | | | | 32986 | | | 256 | — |
-| potion-retrieval-32M +idsplit | | | | | | | | | — |
-| **jina-code-static-256 +idsplit** | | | | | | | | 256 | — |
+| potion-base-8M (floor) | 0.92 | | | 0.958 | 32986 | | | 256 | — |
+| **jina-code-static-256** | 0.92 | | | 0.958 | 23037 | | | 256 | — |
 | jina-code-static-512 +SIF | | | | | | | | 512 | — |
 | + tokenlearn / + head | | | | | | | | | — |
+
+> recall@1 / MRR above are from the **12-query micro-eval** (`embed_quality`),
+> which is **saturated** — both static models tie. They are placeholders until
+> the real Phase-0 eval (150+ queries on an indexed repo) fills recall@{1,5,10}.
 
 ## Safety / rollback
 - fastembed/ONNX stays selectable throughout; nothing is removed until Phase 5.
