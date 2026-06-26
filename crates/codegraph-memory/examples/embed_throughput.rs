@@ -64,8 +64,12 @@ fn main() {
     let home = std::env::var("HOME").unwrap_or_default();
     println!("Embedding {n} unique symbol texts (cold, no cache hits).\n");
 
-    let potion = std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M");
-    let static_sps = measure("static", VectorEngine::with_static_model(&potion), &texts);
+    // Static model dir: override with CODEGRAPH_STATIC_MODEL (e.g. a distilled
+    // jina-code-static-256), else the potion-base-8M floor.
+    let static_dir = std::env::var("CODEGRAPH_STATIC_MODEL")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M"));
+    let static_sps = measure("static", VectorEngine::with_static_model(&static_dir), &texts);
 
     let cache = std::path::PathBuf::from(&home).join(".codegraph/fastembed_cache");
     let onnx_sps = measure(

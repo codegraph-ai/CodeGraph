@@ -50,6 +50,7 @@ log = "0.4"
 # token->vector matrix, mean-pooled. No ONNX — the fast indexing path.
 tokenizers = "0.21"
 safetensors = "0.4"
+half = "2"
 
 # Embeddings - fastembed with BGE-Small-EN-v1.5
 # macOS/Linux: static link ONNX Runtime (ort-download-binaries)

@@ -113,8 +113,12 @@ fn main() {
         SYMBOLS.len()
     );
 
-    let potion = std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M");
-    report("static", VectorEngine::with_static_model(&potion));
+    // Static model dir: override with CODEGRAPH_STATIC_MODEL (e.g. a distilled
+    // jina-code-static-256), else the potion-base-8M floor.
+    let static_dir = std::env::var("CODEGRAPH_STATIC_MODEL")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M"));
+    report("static", VectorEngine::with_static_model(&static_dir));
 
     let cache = std::path::PathBuf::from(&home).join(".codegraph/fastembed_cache");
     report("onnx", VectorEngine::with_model(cache, CodeGraphEmbeddingModel::BgeSmall));

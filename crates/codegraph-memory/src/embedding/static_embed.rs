@@ -6,17 +6,20 @@
 //! A static embedder runs no neural network at inference. It loads a
 //! `token -> vector` matrix (distilled offline from a transformer teacher) plus
 //! that teacher's tokenizer, and embeds text as: tokenize -> gather the token
-//! rows -> mean-pool -> L2-normalize. ~100x faster than an ONNX transformer
-//! forward pass, trading away contextualization.
+//! rows -> (optional per-token weight) -> mean-pool -> L2-normalize. ~100x
+//! faster than an ONNX transformer forward pass, trading away contextualization.
 //!
 //! Loads the model2vec on-disk format (`config.json` + `tokenizer.json` +
-//! `model.safetensors` holding an `embeddings` [vocab, dim] F32 tensor), so any
-//! model2vec / distilled static model — including a Jina-Code distillation —
-//! drops in unchanged.
+//! `model.safetensors`), so any model2vec / distilled static model — including a
+//! Jina-Code distillation — drops in unchanged. Matches model2vec's encode
+//! exactly (`model.py`): `emb[ids] * weights[ids]`, then `.mean(axis=0)`, then
+//! `/ norm`. The matrix may be F32 (older potions bake the weighting in) or F16
+//! with a separate F64 `weights` vector (model2vec 0.7's SIF weighting).
 
 use super::Embedder;
 use crate::error::{MemoryError, Result};
-use safetensors::SafeTensors;
+use safetensors::tensor::TensorView;
+use safetensors::{Dtype, SafeTensors};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -37,6 +40,8 @@ pub(crate) struct StaticEmbedding {
     tokenizer: Tokenizer,
     /// Row-major `vocab * dim` token vectors; token `i` is `matrix[i*dim..(i+1)*dim]`.
     matrix: Vec<f32>,
+    /// Optional per-token weight (model2vec SIF). `None` => unweighted mean.
+    weights: Option<Vec<f32>>,
     vocab: usize,
     dim: usize,
     normalize: bool,
@@ -45,7 +50,8 @@ pub(crate) struct StaticEmbedding {
 
 impl StaticEmbedding {
     /// Load a model2vec-format directory: `config.json`, `tokenizer.json`, and
-    /// `model.safetensors` (with an `embeddings` [vocab, dim] F32 tensor).
+    /// `model.safetensors` (an `embeddings` [vocab, dim] tensor, F32 or F16, and
+    /// an optional `weights` [vocab] tensor).
     pub(crate) fn from_pretrained(dir: &Path) -> Result<Self> {
         let cfg: StaticConfig = serde_json::from_slice(
             &std::fs::read(dir.join("config.json"))
@@ -59,28 +65,18 @@ impl StaticEmbedding {
             .map_err(|e| MemoryError::model(format!("read model.safetensors: {e}")))?;
         let st = SafeTensors::deserialize(&bytes)
             .map_err(|e| MemoryError::model(format!("parse safetensors: {e}")))?;
-        let tensor = st
+
+        let emb = st
             .tensor("embeddings")
             .map_err(|e| MemoryError::model(format!("no 'embeddings' tensor: {e}")))?;
-
-        let shape = tensor.shape();
+        let shape = emb.shape();
         if shape.len() != 2 {
             return Err(MemoryError::model(format!(
                 "embeddings must be 2-D [vocab, dim], got {shape:?}"
             )));
         }
         let (vocab, dim) = (shape[0], shape[1]);
-        if tensor.dtype() != safetensors::Dtype::F32 {
-            return Err(MemoryError::model(format!(
-                "embeddings dtype must be F32, got {:?}",
-                tensor.dtype()
-            )));
-        }
-        let matrix: Vec<f32> = tensor
-            .data()
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
+        let matrix = tensor_to_f32(&emb)?;
         if matrix.len() != vocab * dim {
             return Err(MemoryError::model(format!(
                 "embeddings length {} != vocab*dim {}",
@@ -88,6 +84,22 @@ impl StaticEmbedding {
                 vocab * dim
             )));
         }
+
+        // Optional per-token SIF weights (model2vec >= 0.4 stores them separately
+        // instead of baking them into `embeddings`).
+        let weights = match st.tensor("weights") {
+            Ok(w) => {
+                let v = tensor_to_f32(&w)?;
+                if v.len() != vocab {
+                    return Err(MemoryError::model(format!(
+                        "weights length {} != vocab {vocab}",
+                        v.len()
+                    )));
+                }
+                Some(v)
+            }
+            Err(_) => None,
+        };
 
         let name = format!(
             "{} ({}d, static)",
@@ -98,6 +110,7 @@ impl StaticEmbedding {
         Ok(Self {
             tokenizer,
             matrix,
+            weights,
             vocab,
             dim,
             normalize: cfg.normalize,
@@ -112,8 +125,9 @@ impl StaticEmbedding {
             .tokenizer
             .encode(text, false)
             .map_err(|e| MemoryError::embedding(format!("tokenize: {e}")))?;
-        Ok(mean_pool_l2(
+        Ok(weighted_mean_l2(
             &self.matrix,
+            self.weights.as_deref(),
             enc.get_ids(),
             self.dim,
             self.vocab,
@@ -122,9 +136,41 @@ impl StaticEmbedding {
     }
 }
 
-/// Mean-pool the rows for `ids` from a row-major `vocab*dim` matrix, skipping
-/// out-of-vocab ids; optionally L2-normalize. This is the whole hot path.
-fn mean_pool_l2(matrix: &[f32], ids: &[u32], dim: usize, vocab: usize, normalize: bool) -> Vec<f32> {
+/// Decode a safetensors float tensor (F32 / F16 / F64) into `Vec<f32>`.
+fn tensor_to_f32(t: &TensorView) -> Result<Vec<f32>> {
+    let raw = t.data();
+    let v = match t.dtype() {
+        Dtype::F32 => raw
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect(),
+        Dtype::F16 => raw
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes(b.try_into().unwrap()).to_f32())
+            .collect(),
+        Dtype::F64 => raw
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
+        other => {
+            return Err(MemoryError::model(format!(
+                "unsupported tensor dtype {other:?} (want F32/F16/F64)"
+            )))
+        }
+    };
+    Ok(v)
+}
+
+/// model2vec's pooling: each token row times its weight, mean over tokens, then
+/// optional L2-normalize. Out-of-vocab ids are skipped. The whole hot path.
+fn weighted_mean_l2(
+    matrix: &[f32],
+    weights: Option<&[f32]>,
+    ids: &[u32],
+    dim: usize,
+    vocab: usize,
+    normalize: bool,
+) -> Vec<f32> {
     let mut acc = vec![0f32; dim];
     let mut n = 0usize;
     for &id in ids {
@@ -132,9 +178,10 @@ fn mean_pool_l2(matrix: &[f32], ids: &[u32], dim: usize, vocab: usize, normalize
         if i >= vocab {
             continue;
         }
+        let w = weights.map_or(1.0, |ws| ws[i]);
         let row = &matrix[i * dim..(i + 1) * dim];
         for (a, r) in acc.iter_mut().zip(row) {
-            *a += *r;
+            *a += w * *r;
         }
         n += 1;
     }
@@ -176,42 +223,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mean_pool_l2_math() {
+    fn weighted_mean_l2_math() {
         // vocab 2, dim 2: row0 = [3,0], row1 = [0,4].
         let matrix = vec![3.0, 0.0, 0.0, 4.0];
-        // mean of the two rows
-        assert_eq!(mean_pool_l2(&matrix, &[0, 1], 2, 2, false), vec![1.5, 2.0]);
-        // out-of-vocab id (99) is skipped -> only row0 counts
-        assert_eq!(mean_pool_l2(&matrix, &[0, 99], 2, 2, false), vec![3.0, 0.0]);
+        // unweighted: mean of the two rows
+        assert_eq!(weighted_mean_l2(&matrix, None, &[0, 1], 2, 2, false), vec![1.5, 2.0]);
+        // out-of-vocab id (99) skipped -> only row0 counts
+        assert_eq!(weighted_mean_l2(&matrix, None, &[0, 99], 2, 2, false), vec![3.0, 0.0]);
         // all-OOV -> zero vector, no NaN even with normalize
-        assert_eq!(mean_pool_l2(&matrix, &[7], 2, 2, true), vec![0.0, 0.0]);
+        assert_eq!(weighted_mean_l2(&matrix, None, &[7], 2, 2, true), vec![0.0, 0.0]);
         // normalize -> unit length
-        let v = mean_pool_l2(&matrix, &[0, 1], 2, 2, true);
+        let v = weighted_mean_l2(&matrix, None, &[0, 1], 2, 2, true);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-6, "norm={norm}");
+        // weighted: row0*2 + row1*0.5, mean over 2 -> [3.0, 1.0]
+        let w = vec![2.0, 0.5];
+        assert_eq!(
+            weighted_mean_l2(&matrix, Some(&w), &[0, 1], 2, 2, false),
+            vec![3.0, 1.0]
+        );
     }
 
-    fn potion_dir() -> std::path::PathBuf {
+    fn static_dir(name: &str) -> std::path::PathBuf {
         std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".codegraph/static_models/potion-base-8M")
+            .join(".codegraph/static_models")
+            .join(name)
     }
 
-    #[test]
-    fn static_embedding_loads_and_embeds_potion() {
-        let dir = potion_dir();
-        if !dir.join("model.safetensors").exists() {
-            eprintln!("skip: potion-base-8M not present at {}", dir.display());
-            return;
-        }
-        let m = StaticEmbedding::from_pretrained(&dir).expect("load potion-base-8M");
-        assert_eq!(m.dimension(), 256);
-
+    fn assert_semantically_sane(m: &StaticEmbedding, expected_dim: usize) {
+        assert_eq!(m.dimension(), expected_dim);
         let v = m.embed_text("database connection pool").unwrap();
-        assert_eq!(v.len(), 256);
+        assert_eq!(v.len(), expected_dim);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-3, "should be L2-normalized, norm={norm}");
 
-        // Semantic sanity: two related phrases closer than an unrelated one.
         let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
         let a = m.embed_text("open a database connection").unwrap();
         let b = m.embed_text("connect to the postgres database").unwrap();
@@ -222,5 +267,29 @@ mod tests {
             cos(&a, &b),
             cos(&a, &u)
         );
+    }
+
+    #[test]
+    fn loads_potion_f32_no_weights() {
+        let dir = static_dir("potion-base-8M");
+        if !dir.join("model.safetensors").exists() {
+            eprintln!("skip: potion-base-8M not present");
+            return;
+        }
+        let m = StaticEmbedding::from_pretrained(&dir).expect("load potion-base-8M");
+        assert!(m.weights.is_none(), "potion-base-8M bakes weights into embeddings");
+        assert_semantically_sane(&m, 256);
+    }
+
+    #[test]
+    fn loads_jina_code_static_f16_weighted() {
+        let dir = static_dir("jina-code-static-256");
+        if !dir.join("model.safetensors").exists() {
+            eprintln!("skip: jina-code-static-256 not present");
+            return;
+        }
+        let m = StaticEmbedding::from_pretrained(&dir).expect("load jina-code-static-256");
+        assert!(m.weights.is_some(), "model2vec 0.7 stores SIF weights separately");
+        assert_semantically_sane(&m, 256);
     }
 }

@@ -898,6 +898,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "fastembed",
+ "half",
  "hf-hub",
  "instant-distance",
  "log",
