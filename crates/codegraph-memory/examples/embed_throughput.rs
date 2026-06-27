@@ -59,8 +59,21 @@ fn measure(label: &str, engine: Result<VectorEngine, impl std::fmt::Display>, te
 }
 
 fn main() {
-    let n = 512;
-    let texts = sample_texts(n);
+    // Real symbols from CODEGRAPH_THROUGHPUT_CORPUS ([{id,signature}]), else synthetic.
+    let texts: Vec<String> = match std::env::var("CODEGRAPH_THROUGHPUT_CORPUS") {
+        Ok(path) => {
+            #[derive(serde::Deserialize)]
+            struct S {
+                id: String,
+                signature: String,
+            }
+            let v: Vec<S> =
+                serde_json::from_slice(&std::fs::read(&path).expect("read corpus")).expect("json");
+            v.iter().map(|s| format!("{}: {}", s.id, s.signature)).collect()
+        }
+        Err(_) => sample_texts(512),
+    };
+    let n = texts.len();
     let home = std::env::var("HOME").unwrap_or_default();
     println!("Embedding {n} unique symbol texts (cold, no cache hits).\n");
 
