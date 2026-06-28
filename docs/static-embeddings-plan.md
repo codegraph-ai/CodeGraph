@@ -70,8 +70,22 @@ and the `fastembed` diamond conflict.
   end-to-end quality, ~100× faster indexing, none of the ONNX / 1.5 GB RAM-gate /
   glibc / fastembed baggage. The code teacher ties the generic potion (no edge,
   but Apache-clean). Closing the last ~10% would need a learned pooling head;
-  ~90% at 100× is a strong default trade. Next: wire static as a selectable
-  `--embedding-model` + the server-side hybrid eval to confirm the exact number.
+  ~90% at 100× is a strong default trade.
+- **Shipped (Phase 4.1 ✓):** `--embedding-model static` (CLI/MCP) +
+  `codegraph.embeddingModel: static` / `staticModelPath` (VS Code), via a new
+  `EmbeddingBackend { Fastembed | Static }` threaded through the server; READMEs +
+  examples updated.
+- **Server-side eval — real `symbol_search` hybrid, 300 doc→symbol queries:**
+
+  | model | R@1 | R@5 | R@10 | MRR |
+  |---|---|---|---|---|
+  | BGE-small | 0.457 | 0.717 | 0.787 | 0.568 |
+  | static (jina-code-static-256) | 0.430 | 0.680 | 0.777 | 0.536 |
+
+  **Static is ~94% of BGE** end-to-end (R@1 94%, MRR 94%, R@10 99%) through the
+  actual hybrid — confirming the embed_eval approximation, at ~100× indexing
+  speed. The differing numbers prove the semantic side is live (not BM25
+  fallback). Verdict holds: static is a viable default/opt-in.
 
 ## Why this is worth doing (grounded in history)
 The original static model (`migration.rs` v3) was `potion-base-8M`: a **generic
