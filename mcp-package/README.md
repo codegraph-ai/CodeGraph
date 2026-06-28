@@ -48,7 +48,7 @@ Pass flags after `--`:
 |------|---------|-------------|
 | `--workspace <path>` | current dir | Directories to index (repeatable) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
-| `--embedding-model <model>` | `bge-small` | `bge-small`, `jina-code-v2`, or `granite-97m` (32K context, multilingual) |
+| `--embedding-model <model>` | `bge-small` | `bge-small`, `jina-code-v2`, `granite-97m` (32K, multilingual), or `static` (model2vec, ~100× faster indexing, ~90% of BGE quality; needs a local model dir via `CODEGRAPH_STATIC_MODEL`) |
 | `--max-files <n>` | 5000 | Maximum files to index |
 | `--profile <name>` | `all` | Scope tool surface: `core` (8), `graph` (16), `memory` (14), `security` (pro), `all` (42) |
 | `--graph-only` | off | Skip embeddings — graph + structural tools only. No ONNX model load, 10-50× faster indexing. For CI / one-shot graph queries. |

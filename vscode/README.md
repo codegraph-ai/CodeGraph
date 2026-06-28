@@ -45,7 +45,7 @@ The extension starts the server automatically and registers all tools as Languag
 |------|---------|-------------|
 | `--workspace <path>` | current dir | Directories to index (repeatable for multi-project) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
-| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast) or `jina-code-v2` (768d, 6x slower) |
+| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast), `jina-code-v2` (768d, 6x slower), or `static` (model2vec, 256d — ~100× faster indexing, no ONNX, ~90% of BGE quality in hybrid search; set `codegraph.staticModelPath`) |
 | `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
 | `--max-files <n>` | 5000 | Maximum files to index |
 
@@ -56,7 +56,8 @@ The extension starts the server automatically and registers all tools as Languag
   "codegraph.indexOnStartup": true,
   "codegraph.indexPaths": ["/path/to/project-a", "/path/to/project-b"],
   "codegraph.excludePatterns": ["**/cmake-build-debug/**", "**/generated/**"],
-  "codegraph.embeddingModel": "bge-small",
+  "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
+  "codegraph.staticModelPath": "",                // model2vec model dir when embeddingModel is "static"
   "codegraph.maxFileSizeKB": 1024,
   "codegraph.debug": false
 }

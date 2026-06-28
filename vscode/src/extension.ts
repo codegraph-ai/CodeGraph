@@ -292,7 +292,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // space the way `shell:true` + cmd.exe did. stdio defaults to pipes, which
     // vscode-languageclient uses for the LSP transport (stderr → outputChannel).
     const serverOptions: ServerOptions = () => {
-        const child = cp.spawn(serverModule, [], { cwd: context.extensionPath });
+        // When the static (model2vec) embedding model is selected, point the
+        // server at the model dir via CODEGRAPH_STATIC_MODEL — the server
+        // resolves the static path from this env, falling back to
+        // ~/.codegraph/static_models/jina-code-static-256.
+        const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const cfg = vscode.workspace.getConfiguration('codegraph', wsFolder);
+        const spawnEnv = { ...process.env };
+        const staticModelPath = cfg.get<string>('staticModelPath');
+        if (cfg.get<string>('embeddingModel') === 'static' && staticModelPath) {
+            spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
+        }
+        const child = cp.spawn(serverModule, [], { cwd: context.extensionPath, env: spawnEnv });
         child.once('exit', (code, signal) => {
             lastExitCode = code;
             lastExitSignal = signal;
@@ -333,6 +344,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 indexPaths: latestConfig.get<string[]>('indexPaths'),
                 maxFileSizeKB: latestConfig.get<number>('maxFileSizeKB'),
                 embeddingModel: latestConfig.get<string>('embeddingModel'),
+                staticModelPath: latestConfig.get<string>('staticModelPath'),
                 fullBodyEmbedding: latestConfig.get<boolean>('fullBodyEmbedding'),
                 embedOnOpen: latestConfig.get<boolean>('embedOnOpen'),
             };
