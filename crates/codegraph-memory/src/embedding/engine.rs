@@ -6,7 +6,7 @@
 //! High-level API for generating and caching embeddings.
 
 use super::fastembed_embed::{CodeGraphEmbeddingModel, FastembedEmbedding};
-use super::Embedder;
+use super::{Embedder, EmbeddingBackend};
 use crate::error::Result;
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
@@ -61,6 +61,15 @@ impl VectorEngine {
             cache: DashMap::new(),
             dimension,
         })
+    }
+
+    /// Build a VectorEngine from an `EmbeddingBackend` selection — the ONNX
+    /// fastembed path or the static model2vec path.
+    pub fn from_backend(cache_dir: PathBuf, backend: &EmbeddingBackend) -> Result<Self> {
+        match backend {
+            EmbeddingBackend::Fastembed(model) => Self::with_model(cache_dir, *model),
+            EmbeddingBackend::Static(dir) => Self::with_static_model(dir),
+        }
     }
 
     /// Generate embedding with caching

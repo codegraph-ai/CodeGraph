@@ -368,13 +368,7 @@ async fn run() {
         } else {
             args.workspace.clone()
         };
-        let embedding_model = match args.embedding_model.as_str() {
-            "jina-code-v2" => codegraph_memory::CodeGraphEmbeddingModel::JinaCodeV2,
-            "granite-97m" | "granite" | "granite-97m-multilingual-r2" => {
-                codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2
-            }
-            _ => codegraph_memory::CodeGraphEmbeddingModel::BgeSmall,
-        };
+        let embedding_model = codegraph_memory::EmbeddingBackend::parse(&args.embedding_model);
         let tool_args: serde_json::Value =
             serde_json::from_str(&args.tool_args).unwrap_or_else(|e| {
                 eprintln!("Invalid --tool-args JSON: {e}");
@@ -413,13 +407,7 @@ async fn run() {
 
     // Resident socket engine (Model B): one shared model, many thin clients.
     if args.serve {
-        let embedding_model = match args.embedding_model.as_str() {
-            "jina-code-v2" => codegraph_memory::CodeGraphEmbeddingModel::JinaCodeV2,
-            "granite-97m" | "granite" | "granite-97m-multilingual-r2" => {
-                codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2
-            }
-            _ => codegraph_memory::CodeGraphEmbeddingModel::BgeSmall,
-        };
+        let embedding_model = codegraph_memory::EmbeddingBackend::parse(&args.embedding_model);
         let cfg = codegraph_server::mcp::engine::EngineConfig {
             socket_path: args.socket.clone().unwrap_or_else(default_socket_path),
             embedding_model,
@@ -443,13 +431,7 @@ async fn run() {
             args.workspace
         };
 
-        let embedding_model = match args.embedding_model.as_str() {
-            "jina-code-v2" => codegraph_memory::CodeGraphEmbeddingModel::JinaCodeV2,
-            "granite-97m" | "granite" | "granite-97m-multilingual-r2" => {
-                codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2
-            }
-            _ => codegraph_memory::CodeGraphEmbeddingModel::BgeSmall,
-        };
+        let embedding_model = codegraph_memory::EmbeddingBackend::parse(&args.embedding_model);
 
         tracing::info!("Starting CodeGraph MCP server");
         tracing::info!("Workspaces: {:?}", workspaces);

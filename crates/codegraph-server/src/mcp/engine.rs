@@ -18,14 +18,14 @@
 
 use std::path::PathBuf;
 
-use codegraph_memory::CodeGraphEmbeddingModel;
+use codegraph_memory::EmbeddingBackend;
 
 use super::server::McpServer;
 
 /// Configuration for a running engine.
 pub struct EngineConfig {
     pub socket_path: PathBuf,
-    pub embedding_model: CodeGraphEmbeddingModel,
+    pub embedding_model: EmbeddingBackend,
     pub exclude_dirs: Vec<String>,
     pub max_files: usize,
     pub full_body_embedding: bool,
@@ -105,7 +105,7 @@ mod imp {
             vec![ws.clone()],
             engine.cfg.exclude_dirs.clone(),
             engine.cfg.max_files,
-            engine.cfg.embedding_model,
+            engine.cfg.embedding_model.clone(),
             engine.cfg.full_body_embedding,
         );
         if let Some(shared) = &engine.shared_engine {
@@ -223,7 +223,7 @@ mod imp {
                 tracing::warn!("Engine: <1.5 GB free — running graph-only (no shared model)");
                 None
             } else {
-                match VectorEngine::with_model(model_cache_dir(), cfg.embedding_model) {
+                match VectorEngine::from_backend(model_cache_dir(), &cfg.embedding_model) {
                     Ok(e) => {
                         tracing::info!("Engine: shared embedding model loaded");
                         Some(Arc::new(e))

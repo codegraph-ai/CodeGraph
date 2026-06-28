@@ -166,7 +166,7 @@ impl McpBackend {
         workspaces: Vec<PathBuf>,
         exclude_dirs: Vec<String>,
         max_files: usize,
-        embedding_model: codegraph_memory::CodeGraphEmbeddingModel,
+        embedding_model: codegraph_memory::EmbeddingBackend,
         full_body_embedding: bool,
     ) -> Self {
         let primary = workspaces.first().expect("At least one workspace required");
@@ -1228,7 +1228,7 @@ impl McpServer {
         workspaces: Vec<PathBuf>,
         exclude_dirs: Vec<String>,
         max_files: usize,
-        embedding_model: codegraph_memory::CodeGraphEmbeddingModel,
+        embedding_model: codegraph_memory::EmbeddingBackend,
         full_body_embedding: bool,
     ) -> Self {
         Self::with_pro_provider(
@@ -1246,7 +1246,7 @@ impl McpServer {
         workspaces: Vec<PathBuf>,
         exclude_dirs: Vec<String>,
         max_files: usize,
-        embedding_model: codegraph_memory::CodeGraphEmbeddingModel,
+        embedding_model: codegraph_memory::EmbeddingBackend,
         full_body_embedding: bool,
         pro_provider: Arc<dyn super::pro_hooks::ProToolProvider>,
     ) -> Self {
