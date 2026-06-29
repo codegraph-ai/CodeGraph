@@ -208,6 +208,12 @@ impl MemoryManager {
         }
     }
 
+    /// Short telemetry tag for the configured embedding backend
+    /// (`static` / `bge-small` / `jina-code-v2` / `granite-97m`).
+    pub fn embedding_telemetry_id(&self) -> &'static str {
+        self.embedding_model.telemetry_id()
+    }
+
     /// Initialize the memory manager with workspace path
     ///
     /// Resolves the global data directory at `~/.codegraph/projects/<slug>/memory/`,

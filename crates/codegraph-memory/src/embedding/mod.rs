@@ -69,6 +69,16 @@ impl EmbeddingBackend {
             ),
         }
     }
+
+    /// Short, stable tag for telemetry / adoption grouping.
+    pub fn telemetry_id(&self) -> &'static str {
+        match self {
+            Self::Static(_) => "static",
+            Self::Fastembed(CodeGraphEmbeddingModel::BgeSmall) => "bge-small",
+            Self::Fastembed(CodeGraphEmbeddingModel::JinaCodeV2) => "jina-code-v2",
+            Self::Fastembed(CodeGraphEmbeddingModel::Granite97mMultilingualR2) => "granite-97m",
+        }
+    }
 }
 
 /// Resolve the static-model directory: `CODEGRAPH_STATIC_MODEL` env override,

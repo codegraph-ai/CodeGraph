@@ -57,6 +57,30 @@ try {
   console.warn(`  ${err.message}`);
 }
 
+// Fetch the distilled static embedding model (best-effort) from the
+// release-independent `model` GitHub release. Only needed for
+// `--embedding-model static`; skipped if already present or if
+// CODEGRAPH_SKIP_MODEL_FETCH is set. Never fails the install.
+if (!process.env.CODEGRAPH_SKIP_MODEL_FETCH) {
+  const MODEL = "jina-code-static-256";
+  const modelDir = path.join(os.homedir(), ".codegraph", "static_models", MODEL);
+  if (!fs.existsSync(path.join(modelDir, "model.safetensors"))) {
+    try {
+      fs.mkdirSync(modelDir, { recursive: true });
+      const url = `https://github.com/codegraph-ai/CodeGraph/releases/download/model/${MODEL}.tar.gz`;
+      const tgz = path.join(modelDir, "_model.tar.gz");
+      execFileSync("curl", ["-fsSL", url, "-o", tgz], { timeout: 180000 });
+      execFileSync("tar", ["xzf", tgz, "-C", modelDir], { timeout: 60000 });
+      fs.unlinkSync(tgz);
+      console.log(`✓ codegraph-mcp: static embedding model ready (${modelDir})`);
+    } catch {
+      console.warn(
+        `ℹ codegraph-mcp: static model not fetched (optional — only for --embedding-model static)`
+      );
+    }
+  }
+}
+
 // Hint about the optional Claude Code hook. Installation is opt-in to avoid
 // silently modifying the user's ~/.claude/settings.json. Both Unix
 // (bash) and Windows (PowerShell) variants are shipped — the installer

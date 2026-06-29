@@ -1395,6 +1395,7 @@ impl McpServer {
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "version": crate::metadata::VERSION,
+            "embeddingModel": self.backend.memory_manager.embedding_telemetry_id(),
         }));
 
         loop {

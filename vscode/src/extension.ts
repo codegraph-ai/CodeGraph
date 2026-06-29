@@ -299,8 +299,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
         const cfg = vscode.workspace.getConfiguration('codegraph', wsFolder);
         const spawnEnv = { ...process.env };
-        const staticModelPath = cfg.get<string>('staticModelPath');
-        if (cfg.get<string>('embeddingModel') === 'static' && staticModelPath) {
+        if (cfg.get<string>('embeddingModel') === 'static') {
+            // staticModelPath override, else the model bundled next to the binary.
+            const staticModelPath = cfg.get<string>('staticModelPath')
+                || path.join(context.extensionPath, 'bin', 'jina-code-static-256');
             spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
         }
         const child = cp.spawn(serverModule, [], { cwd: context.extensionPath, env: spawnEnv });
