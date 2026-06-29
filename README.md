@@ -329,6 +329,12 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 
 HTTP handler detection: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java (Spring/JAX-RS), Go (stdlib/Gin/Echo/Fiber), C# (ASP.NET), Ruby (Rails), PHP (Laravel/Symfony).
 
+> **Community vs full builds:** COBOL, Fortran, Perl, Dart, Zig, and R are
+> compiled only with `--features extra-languages`. The default community binary
+> omits them — they had zero usage in telemetry and their tree-sitter grammars
+> add ~25 MB (COBOL's parse tables alone are 30 MB). The other 32 languages are
+> always available.
+
 ---
 
 ## Architecture
