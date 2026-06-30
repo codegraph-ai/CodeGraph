@@ -90,11 +90,12 @@ Static (model2vec) embeddings replace the ONNX transformer with a token→vector
 lookup table: indexing is **~100× faster** (this repo's 5,873 symbols embed in
 ~1 s vs ~3.4 min with BGE) and there's **no ONNX runtime or 1.5 GB RAM gate**.
 Retrieval stays **hybrid (BM25 + semantic)**, so end-to-end quality is **~90% of
-BGE**. It needs a local model directory (`config.json` + `tokenizer.json` +
-`model.safetensors`):
+BGE**. The VS Code extension ships the model bundled, so `static` works there
+with no setup. For the CLI/MCP server it needs a local model directory
+(`config.json` + `tokenizer.json` + `model.safetensors`):
 
 - Point at it with `CODEGRAPH_STATIC_MODEL=/path/to/model` (or the VS Code
-  `codegraph.staticModelPath` setting). Default:
+  `codegraph.staticModelPath` setting to override the bundled model). Default:
   `~/.codegraph/static_models/jina-code-static-256`.
 - Distill one from any sentence-transformer (Apache-2.0 Jina-Code by default) in
   ~30 s on CPU: `python scripts/distill_static_model.py`.
