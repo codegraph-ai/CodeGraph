@@ -4104,7 +4104,13 @@ impl McpServer {
                                 if let Ok(caller) = graph.get_node(caller_id) {
                                     let cname = crate::domain::node_props::name(caller);
                                     let cfile = caller.properties.get_string("path").unwrap_or("");
-                                    let is_test = cname.to_lowercase().starts_with("test_")
+                                    // Prefer the structural is_test marker recorded at index time
+                                    // (#[test]/#[cfg(test)], @Test, …); fall back to name/path
+                                    // heuristics only for languages that don't populate it. The
+                                    // heuristics alone miss idiomatic Rust tests with descriptive
+                                    // names inside `#[cfg(test)] mod tests`.
+                                    let is_test = crate::domain::node_props::is_test(caller)
+                                        || cname.to_lowercase().starts_with("test_")
                                         || cname.to_lowercase().contains("_test")
                                         || cfile.contains("/tests/")
                                         || cfile.contains("/test_");
@@ -4132,7 +4138,11 @@ impl McpServer {
                         // #87: Test gap — function has no test callers.
                         // Skip functions that ARE tests (they don't need
                         // their own coverage) and trivial getters/setters.
-                        let fn_is_test = func_name.to_lowercase().starts_with("test_")
+                        let fn_is_test = graph
+                            .get_node(*node_id)
+                            .ok()
+                            .is_some_and(|n| crate::domain::node_props::is_test(n))
+                            || func_name.to_lowercase().starts_with("test_")
                             || func_name.to_lowercase().contains("_test")
                             || changed_rel[idx].contains("/tests/")
                             || changed_rel[idx].contains("_test.");
