@@ -1321,6 +1321,33 @@ fn test_something() {}
     }
 
     #[test]
+    fn test_visitor_test_fn_inside_cfg_test_mod() {
+        // The idiomatic Rust unit-test shape: a #[test] fn with a descriptive
+        // (non-`test_`) name inside `#[cfg(test)] mod tests`. This is what the
+        // PR-review coverage analysis was missing.
+        let source = r#"
+fn weighted_mean_l2() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weighted_mean_l2_math() {
+        weighted_mean_l2();
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let t = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "weighted_mean_l2_math")
+            .expect("nested test fn should be visited");
+        assert!(t.is_test, "#[test] fn inside `mod tests` must set is_test");
+    }
+
+    #[test]
     fn test_visitor_visibility_modifiers() {
         let source = r#"
 pub fn public_fn() {}
