@@ -134,6 +134,7 @@ async fn get_index_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph::{NodeType, PropertyMap};
 
     #[test]
     fn test_get_all_resources() {
@@ -146,5 +147,92 @@ mod tests {
         assert!(resources
             .iter()
             .any(|r| r.uri == "codegraph://index/status"));
+    }
+
+    /// Build an in-memory graph with one Function and one Class node.
+    fn graph_with_nodes() -> Arc<RwLock<CodeGraph>> {
+        let mut g = CodeGraph::in_memory().unwrap();
+        let mut f = PropertyMap::new();
+        f.insert("name", "foo");
+        g.add_node(NodeType::Function, f).unwrap();
+        let mut c = PropertyMap::new();
+        c.insert("name", "Bar");
+        g.add_node(NodeType::Class, c).unwrap();
+        Arc::new(RwLock::new(g))
+    }
+
+    #[tokio::test]
+    async fn test_get_graph_stats_counts_nodes_by_type() {
+        let stats = get_graph_stats(graph_with_nodes()).await;
+        assert_eq!(stats["totalNodes"], 2);
+        assert_eq!(stats["nodesByType"]["Function"], 1);
+        assert_eq!(stats["nodesByType"]["Class"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_graph_stats_empty_graph() {
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().unwrap()));
+        let stats = get_graph_stats(graph).await;
+        assert_eq!(stats["totalNodes"], 0);
+        assert!(stats["nodesByType"].as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_index_status_reports_symbols_and_folders() {
+        let folders = vec![std::path::PathBuf::from("/tmp/workspace-a")];
+        let status = get_index_status(graph_with_nodes(), &folders).await;
+        assert_eq!(status["indexed"], true);
+        assert_eq!(status["totalSymbols"], 2);
+        assert_eq!(status["workspaceFolders"][0], "/tmp/workspace-a");
+    }
+
+    #[tokio::test]
+    async fn test_read_resource_graph_stats_branch() {
+        let mm = crate::memory::MemoryManager::new(None);
+        let result = read_resource("codegraph://graph/stats", graph_with_nodes(), &mm, &[])
+            .await
+            .expect("graph/stats should return Some");
+        let content = &result.contents[0];
+        assert_eq!(content.uri, "codegraph://graph/stats");
+        assert_eq!(content.mime_type.as_deref(), Some("application/json"));
+        let text = content.text.as_ref().unwrap();
+        assert!(text.contains("totalNodes"));
+    }
+
+    #[tokio::test]
+    async fn test_read_resource_index_status_branch() {
+        let mm = crate::memory::MemoryManager::new(None);
+        let folders = vec![std::path::PathBuf::from("/tmp/ws")];
+        let result = read_resource(
+            "codegraph://index/status",
+            graph_with_nodes(),
+            &mm,
+            &folders,
+        )
+        .await
+        .expect("index/status should return Some");
+        let text = result.contents[0].text.as_ref().unwrap();
+        assert!(text.contains("totalSymbols"));
+        assert!(text.contains("/tmp/ws"));
+    }
+
+    #[tokio::test]
+    async fn test_read_resource_memory_stats_branch_returns_some() {
+        // An uninitialized MemoryManager cannot open a store, so get_memory_stats
+        // surfaces an error object - but the branch still returns Some.
+        let mm = crate::memory::MemoryManager::new(None);
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().unwrap()));
+        let result = read_resource("codegraph://memory/stats", graph, &mm, &[]).await;
+        assert!(result.is_some());
+        let content = result.unwrap().contents.into_iter().next().unwrap();
+        assert_eq!(content.uri, "codegraph://memory/stats");
+    }
+
+    #[tokio::test]
+    async fn test_read_resource_unknown_uri_returns_none() {
+        let mm = crate::memory::MemoryManager::new(None);
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().unwrap()));
+        let result = read_resource("codegraph://does/not/exist", graph, &mm, &[]).await;
+        assert!(result.is_none());
     }
 }
