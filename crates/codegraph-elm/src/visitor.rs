@@ -759,4 +759,168 @@ mod tests {
         assert!(visitor.classes.iter().all(|c| !c.is_abstract));
         assert!(visitor.classes.iter().all(|c| !c.is_interface));
     }
+
+    #[test]
+    fn test_import_without_exposing() {
+        // A plain `import Browser` has no exposing list, no alias, no symbols.
+        let source = b"module Main exposing (..)\n\nimport Browser\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "Browser")
+            .expect("import not found");
+        assert!(imp.symbols.is_empty());
+        assert!(!imp.is_wildcard);
+        assert_eq!(imp.alias, None);
+    }
+
+    #[test]
+    fn test_import_alias_and_exposing_combined() {
+        // `import Foo as F exposing (bar)` carries both an alias and symbols.
+        let source =
+            b"module Main exposing (..)\n\nimport Html.Attributes as Attr exposing (class, id)\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "Html.Attributes")
+            .expect("import not found");
+        assert_eq!(imp.alias.as_deref(), Some("Attr"));
+        assert!(imp.symbols.iter().any(|s| s == "class"));
+        assert!(imp.symbols.iter().any(|s| s == "id"));
+        assert!(!imp.is_wildcard);
+    }
+
+    #[test]
+    fn test_function_line_numbers_are_one_indexed() {
+        // `main` starts on physical line 3 (1-indexed) and spans to line 4.
+        let source = b"module Main exposing (..)\n\nmain =\n    1\n";
+        let visitor = parse_and_visit(source);
+
+        let main = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main not found");
+        assert_eq!(main.line_start, 3);
+        assert_eq!(main.line_end, 4);
+    }
+
+    #[test]
+    fn test_type_declaration_line_numbers_are_one_indexed() {
+        let source = b"module Main exposing (..)\n\ntype Msg\n    = Inc\n    | Dec\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let msg = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Msg")
+            .expect("Msg not found");
+        assert_eq!(msg.line_start, 3);
+        assert!(msg.line_end >= msg.line_start);
+    }
+
+    #[test]
+    fn test_function_doc_comment_block() {
+        // A `{-| .. -}` block comment immediately preceding a declaration is
+        // captured as the doc comment.
+        let source =
+            b"module Main exposing (..)\n\n{-| Greets the world. -}\ngreeting =\n    \"hi\"\n";
+        let visitor = parse_and_visit(source);
+
+        let greeting = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greeting")
+            .expect("greeting not found");
+        let doc = greeting.doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("Greets the world"), "doc_comment was: {doc:?}");
+    }
+
+    #[test]
+    fn test_function_without_doc_comment_is_none() {
+        let source = b"module Main exposing (..)\n\ngreeting =\n    \"hi\"\n";
+        let visitor = parse_and_visit(source);
+
+        let greeting = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greeting")
+            .expect("greeting not found");
+        assert_eq!(greeting.doc_comment, None);
+    }
+
+    #[test]
+    fn test_if_else_raises_complexity() {
+        let source = b"module Main exposing (..)\n\npick n =\n    if n > 0 then\n        \"pos\"\n    else\n        \"neg\"\n";
+        let visitor = parse_and_visit(source);
+
+        let pick = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "pick")
+            .expect("pick not found");
+        let cx = pick.complexity.as_ref().expect("complexity missing");
+        assert!(
+            cx.cyclomatic_complexity > 1,
+            "expected if-else to raise complexity, got {}",
+            cx.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_logical_operator_raises_complexity() {
+        let source = b"module Main exposing (..)\n\nboth a b =\n    a && b\n";
+        let visitor = parse_and_visit(source);
+
+        let both = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "both")
+            .expect("both not found");
+        let cx = both.complexity.as_ref().expect("complexity missing");
+        assert!(
+            cx.cyclomatic_complexity > 1,
+            "expected && to raise complexity, got {}",
+            cx.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_multi_arrow_return_type_is_last_segment() {
+        // For `add : Int -> Int -> Int` the return type is the final segment.
+        let source = b"module Main exposing (..)\n\nadd : Int -> Int -> Int\nadd a b =\n    a\n";
+        let visitor = parse_and_visit(source);
+
+        let add = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "add")
+            .expect("add not found");
+        assert_eq!(add.return_type.as_deref(), Some("Int"));
+        assert_eq!(add.parameters.len(), 2);
+    }
+
+    #[test]
+    fn test_value_declaration_default_flags() {
+        // A plain value declaration is public, non-async, non-test, non-static.
+        let source = b"module Main exposing (..)\n\nanswer =\n    42\n";
+        let visitor = parse_and_visit(source);
+
+        let answer = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "answer")
+            .expect("answer not found");
+        assert_eq!(answer.visibility, "public");
+        assert!(!answer.is_async);
+        assert!(!answer.is_test);
+        assert!(!answer.is_static);
+        assert!(!answer.is_abstract);
+        assert!(answer.parent_class.is_none());
+        assert!(answer.attributes.is_empty());
+    }
 }
