@@ -358,6 +358,7 @@ impl<'a> GroovyVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> GroovyVisitor<'_> {
         use tree_sitter::Parser;
@@ -800,5 +801,175 @@ class Svc {
         let visitor = parse_and_visit(source);
         let method = &visitor.classes[0].methods[0];
         assert!(method.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_body_prefix_truncation() {
+        // An oversized method body is truncated to exactly BODY_PREFIX_MAX_CHARS chars.
+        let big: String = std::iter::repeat_n('a', 2000).collect();
+        let source =
+            format!("class Svc {{\n    def big() {{\n        def s = \"{big}\"\n    }}\n}}\n");
+        let visitor = parse_and_visit(source.as_bytes());
+        let method = &visitor.classes[0].methods[0];
+        let body_prefix = method.body_prefix.as_ref().unwrap();
+        assert_eq!(body_prefix.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_import_semicolon_stripped() {
+        // A trailing semicolon is trimmed from the imported path.
+        let source = b"import a.B;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "a.B");
+    }
+
+    #[test]
+    fn test_class_doc_comment() {
+        // A /** ... */ block comment preceding a class is attached as its doc.
+        let source = br#"/** A service. */
+class Svc {
+    def a() {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let doc = visitor.classes[0].doc_comment.as_deref().unwrap();
+        assert!(doc.contains("A service"));
+    }
+
+    #[test]
+    fn test_triple_slash_line_comment_doc() {
+        // A `///` line comment preceding a top-level function is attached as doc.
+        let source = br#"/// Doc line.
+def documented() {}
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let doc = visitor.functions[0].doc_comment.as_deref().unwrap();
+        assert!(doc.contains("Doc line"));
+    }
+
+    #[test]
+    fn test_plain_line_comment_not_doc() {
+        // A plain `//` comment is not treated as a doc comment.
+        let source = br#"// just a note
+def plain() {}
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].doc_comment, None);
+    }
+
+    #[test]
+    fn test_do_while_not_counted_as_loop() {
+        // Grammar gap: tree-sitter-groovy emits `do_statement` (not the
+        // `do_while_statement` the complexity visitor matches on), so a do-while
+        // loop adds no complexity and stays at the straight-line baseline of 1.
+        let source = br#"
+class Svc {
+    def loopy(int n) {
+        def i = 0
+        do {
+            i++
+        } while (i < n)
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert_eq!(method.complexity.as_ref().unwrap().cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_else_branch_not_counted() {
+        // Grammar gap: an if/else parses the else as a bare `else` keyword plus a
+        // sibling `block`, never an `else_clause` node, so the else arm adds no
+        // complexity - if/else scores the same as a lone if.
+        let if_else = br#"
+class Svc {
+    def choose(int x) {
+        if (x > 0) {
+            return 1
+        } else {
+            return 0
+        }
+    }
+}
+"#;
+        let lone_if = br#"
+class Svc {
+    def choose(int x) {
+        if (x > 0) {
+            return 1
+        }
+        return 0
+    }
+}
+"#;
+        let a = parse_and_visit(if_else).classes[0].methods[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        let b = parse_and_visit(lone_if).classes[0].methods[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_calls_never_extracted() {
+        // The Groovy visitor never populates `calls`; method invocations are dropped.
+        let source = br#"
+class Svc {
+    def work() {
+        helper()
+        other()
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_class_body_prefix_captures_methods() {
+        // A class body_prefix carries the brace-delimited body text.
+        let source = br#"class Svc {
+    def a() {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let body_prefix = visitor.classes[0].body_prefix.as_ref().unwrap();
+        assert!(body_prefix.contains("def a()"));
+    }
+
+    #[test]
+    fn test_leading_blank_lines_offset_line_start() {
+        // Two leading blank lines push the class line_start to row 3 (1-indexed).
+        let source = br#"
+
+class Late {
+    def a() {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes[0].line_start, 3);
+    }
+
+    #[test]
+    fn test_untyped_parameter_dropped() {
+        // Grammar gap: an untyped Groovy parameter (`def take(x)`) parses the `x`
+        // under an ERROR node rather than a `formal_parameter`, so extract_parameters
+        // finds nothing and the method has zero parameters.
+        let source = br#"
+class Svc {
+    def take(x) {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.classes[0].methods[0].parameters.is_empty());
     }
 }
