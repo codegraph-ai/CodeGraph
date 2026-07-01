@@ -129,4 +129,69 @@ hello() ->
         assert_eq!(ir.traits.len(), 1);
         assert_eq!(ir.traits[0].name, "gen_server");
     }
+
+    #[test]
+    fn test_module_name_falls_back_to_filename_stem() {
+        // No `-module(...)` attribute, so visitor.module_name is None and the
+        // name must be derived from the file_stem of the path.
+        let source = "foo() -> ok.\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("/tmp/myapp.erl"), &config).unwrap();
+
+        assert_eq!(ir.module.as_ref().unwrap().name, "myapp");
+    }
+
+    #[test]
+    fn test_module_attribute_overrides_filename() {
+        // The `-module(...)` attribute takes precedence over the filename stem.
+        let source = "-module(declared).\n\nfoo() -> ok.\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("/tmp/onfilesystem.erl"), &config).unwrap();
+
+        assert_eq!(ir.module.as_ref().unwrap().name, "declared");
+    }
+
+    #[test]
+    fn test_module_metadata_fields() {
+        let source = "-module(m).\n\nfoo() -> ok.\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("dir/test.erl"), &config).unwrap();
+
+        let module = ir.module.as_ref().unwrap();
+        assert_eq!(module.language, "erlang");
+        assert_eq!(module.path, "dir/test.erl");
+        // Three physical lines in the source (each terminated by `\n`).
+        assert_eq!(module.line_count, 3);
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_calls_are_propagated_to_ir() {
+        // A local call (`bar()`) inside `foo/0` should surface in ir.calls.
+        let source = "-module(m).\n\nfoo() -> bar().\n\nbar() -> ok.\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("test.erl"), &config).unwrap();
+
+        assert!(
+            ir.calls
+                .iter()
+                .any(|c| c.caller == "foo" && c.callee == "bar"),
+            "expected foo -> bar call, got {:?}",
+            ir.calls
+        );
+    }
+
+    #[test]
+    fn test_empty_source_uses_filename_stem() {
+        // Empty source parses to an empty tree; the module name still falls back
+        // to the filename stem rather than erroring.
+        let source = "";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("blank.erl"), &config).unwrap();
+
+        assert_eq!(ir.module.as_ref().unwrap().name, "blank");
+        assert_eq!(ir.module.as_ref().unwrap().line_count, 0);
+        assert!(ir.functions.is_empty());
+    }
 }
