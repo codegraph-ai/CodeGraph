@@ -271,4 +271,41 @@ mod tests {
         let back: ClassEntity = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);
     }
+
+    #[test]
+    fn field_serde_round_trip_all_fields() {
+        // Field's derived Serialize/Deserialize is only ever exercised nested
+        // inside ClassEntity; pin the standalone round-trip with every field
+        // populated so the Option arms and exact snake_case wire names are covered.
+        let f = Field::new("MAX")
+            .with_type("u32")
+            .with_visibility("private")
+            .static_field()
+            .constant()
+            .with_default("100");
+        let json = serde_json::to_string(&f).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "MAX");
+        assert_eq!(v["type_annotation"], "u32");
+        assert_eq!(v["visibility"], "private");
+        assert_eq!(v["is_static"], true);
+        assert_eq!(v["is_constant"], true);
+        assert_eq!(v["default_value"], "100");
+        let back: Field = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
+    }
+
+    #[test]
+    fn field_eq_and_hash_dedup_in_set() {
+        // Field uniquely derives Eq + Hash (ClassEntity only has PartialEq);
+        // exercise those derives by using Field as a HashSet key.
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Field::new("x").with_type("i32"));
+        set.insert(Field::new("x").with_type("i32")); // equal -> collapses
+        set.insert(Field::new("x").with_type("i64")); // differs by type -> distinct
+        set.insert(Field::new("y").with_type("i32")); // differs by name -> distinct
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&Field::new("x").with_type("i32")));
+    }
 }
