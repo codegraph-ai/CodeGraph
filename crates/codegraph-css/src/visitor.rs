@@ -344,7 +344,11 @@ h1, h2 {
             visitor.functions.len(),
             2,
             "expected 2 nested rules in @media, got: {:?}",
-            visitor.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+            visitor
+                .functions
+                .iter()
+                .map(|f| &f.name)
+                .collect::<Vec<_>>()
         );
     }
 
