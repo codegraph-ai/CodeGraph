@@ -275,6 +275,38 @@ mod tests {
     }
 
     #[test]
+    fn test_export_dot_show_properties_missing_key_appends_nothing() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        helpers::add_function(&mut graph, file, "f", 10, 20).unwrap();
+
+        // Request a property the function node does not carry: the None arm of
+        // `if let Some(value) = node.properties.get(prop_name)` leaves the label
+        // untouched (no trailing "\n{key}:{value}" segment is appended).
+        let opts = DotOptions {
+            show_properties: vec!["nonexistent".to_string()],
+            ..DotOptions::default()
+        };
+        let dot = export_dot_styled(&graph, opts).unwrap();
+        assert!(dot.contains("n1 [label=\"f\", shape=box, fillcolor=\"#90CAF9\"];"));
+        // Nothing was appended, so no escaped-newline separator appears in the label.
+        assert!(!dot.contains("label=\"f\\n"));
+    }
+
+    #[test]
+    fn test_export_dot_node_label_escapes_quote_in_name() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        // A name containing a double quote is routed through escape_dot_label in
+        // the export path, so the emitted label carries the escaped `\"` sequence
+        // rather than a raw quote that would break the DOT attribute string.
+        helpers::add_function(&mut graph, file, "sa\"y", 1, 5).unwrap();
+
+        let dot = export_dot(&graph).unwrap();
+        assert!(dot.contains("n1 [label=\"sa\\\"y\", shape=box, fillcolor=\"#90CAF9\"];"));
+    }
+
+    #[test]
     fn test_export_dot_edges_rendered_with_label() {
         let mut graph = CodeGraph::in_memory().unwrap();
         let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
