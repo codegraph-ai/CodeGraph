@@ -541,6 +541,197 @@ int x;
     }
 
     #[test]
+    fn test_get_directive_non_hash_returns_none() {
+        assert!(get_preprocessor_directive("int x;").is_none());
+        assert!(get_preprocessor_directive("").is_none());
+        assert!(get_preprocessor_directive("  code").is_none());
+    }
+
+    #[test]
+    fn test_get_directive_if_variants() {
+        // Condition after "if " is captured and trimmed.
+        assert!(matches!(
+            get_preprocessor_directive("#if 0"),
+            Some(PreprocessorDirective::If(c)) if c == "0"
+        ));
+        // Bare "#if" yields an empty condition, not None.
+        assert!(matches!(
+            get_preprocessor_directive("#if"),
+            Some(PreprocessorDirective::If(c)) if c.is_empty()
+        ));
+        // A space between '#' and the keyword is tolerated (trim_start on rest).
+        assert!(matches!(
+            get_preprocessor_directive("# if FOO"),
+            Some(PreprocessorDirective::If(c)) if c == "FOO"
+        ));
+    }
+
+    #[test]
+    fn test_get_directive_ifdef_ifndef_extract_name() {
+        assert!(matches!(
+            get_preprocessor_directive("#ifdef CONFIG_FOO"),
+            Some(PreprocessorDirective::Ifdef(n)) if n == "CONFIG_FOO"
+        ));
+        // Tab separator is accepted and only the first token becomes the name.
+        assert!(matches!(
+            get_preprocessor_directive("#ifndef\tBAR extra"),
+            Some(PreprocessorDirective::Ifndef(n)) if n == "BAR"
+        ));
+    }
+
+    #[test]
+    fn test_get_directive_elif_else_endif() {
+        assert!(matches!(
+            get_preprocessor_directive("#elif 1"),
+            Some(PreprocessorDirective::Elif(c)) if c == "1"
+        ));
+        assert!(matches!(
+            get_preprocessor_directive("#else"),
+            Some(PreprocessorDirective::Else)
+        ));
+        assert!(matches!(
+            get_preprocessor_directive("#endif"),
+            Some(PreprocessorDirective::Endif)
+        ));
+        // The "endif/" prefix branch handles a trailing comment with no space.
+        assert!(matches!(
+            get_preprocessor_directive("#endif/* CONFIG */"),
+            Some(PreprocessorDirective::Endif)
+        ));
+    }
+
+    #[test]
+    fn test_get_directive_keyword_kinds() {
+        assert!(matches!(
+            get_preprocessor_directive("#include <stdio.h>"),
+            Some(PreprocessorDirective::Include)
+        ));
+        assert!(matches!(
+            get_preprocessor_directive("#define FOO 1"),
+            Some(PreprocessorDirective::Define)
+        ));
+        assert!(matches!(
+            get_preprocessor_directive("#undef FOO"),
+            Some(PreprocessorDirective::Undef)
+        ));
+        assert!(matches!(
+            get_preprocessor_directive("#pragma once"),
+            Some(PreprocessorDirective::Pragma)
+        ));
+        assert!(matches!(
+            get_preprocessor_directive("#error nope"),
+            Some(PreprocessorDirective::Error)
+        ));
+        assert!(matches!(
+            get_preprocessor_directive("#warning careful"),
+            Some(PreprocessorDirective::Warning)
+        ));
+        // Anything unrecognized falls through to Other (e.g. #line).
+        assert!(matches!(
+            get_preprocessor_directive("#line 42"),
+            Some(PreprocessorDirective::Other)
+        ));
+    }
+
+    #[test]
+    fn test_if_1_keeps_content() {
+        let source = "int a;\n#if 1\nint b;\n#endif\nint c;\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        // #if 1 is not a false condition, so the branch stays active.
+        assert!(result.contains("int a;"));
+        assert!(result.contains("int b;"));
+        assert!(result.contains("int c;"));
+    }
+
+    #[test]
+    fn test_single_line_define_wrapped_in_comment() {
+        let source = "#define FOO 1\nint x;\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        // An active single-line #define is preserved as a comment, not emitted verbatim.
+        assert!(result.contains("/* #define FOO 1 */"));
+        assert!(!result.contains("\n#define"));
+        assert!(result.contains("int x;"));
+    }
+
+    #[test]
+    fn test_pragma_commented_when_active() {
+        let source = "#pragma once\nint x;\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        assert!(result.contains("/* #pragma once */"));
+    }
+
+    #[test]
+    fn test_define_in_disabled_block_stripped() {
+        let source = "#if 0\n#define SECRET 1\n#endif\nint x;\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        // A #define inside a dead branch is dropped, not commented.
+        assert!(!result.contains("#define"));
+        assert!(!result.contains("SECRET"));
+        assert!(result.contains("int x;"));
+    }
+
+    #[test]
+    fn test_multiline_define_collapsed_to_single_comment() {
+        let source = "#define FOO \\\n    bar\nint x;\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        // The continuation is folded into one comment holding both parts.
+        assert!(result.contains("/* #define FOO bar */"));
+        // Line count is preserved (empty line for the continued first line).
+        assert_eq!(result.lines().count(), source.lines().count());
+    }
+
+    #[test]
+    fn test_internal_comment_escaped_in_define() {
+        let source = "#define FOO /* inner */ 1\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        // Nested comment markers are rewritten to /+ and +/ so the wrapper stays valid.
+        assert!(result.contains("/+ inner +/"));
+        assert!(!result.contains("/* inner */"));
+    }
+
+    #[test]
+    fn test_other_directive_kept_active_stripped_disabled() {
+        // Active: an unrecognized directive is emitted verbatim.
+        let active = "#line 10\nint x;\n";
+        let (result, _c) = evaluate_conditionals(active, ConditionalStrategy::EvaluateSimple);
+        assert!(result.contains("#line 10"));
+
+        // Disabled: the same directive is stripped away.
+        let disabled = "#if 0\n#line 10\n#endif\nint x;\n";
+        let (result, _c) = evaluate_conditionals(disabled, ConditionalStrategy::EvaluateSimple);
+        assert!(!result.contains("#line 10"));
+    }
+
+    #[test]
+    fn test_stray_endif_does_not_underflow() {
+        // An unmatched #endif must not pop below the base Active state.
+        let source = "#endif\nint x;\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        assert!(result.contains("int x;"));
+    }
+
+    #[test]
+    fn test_elif_after_active_branch_disables() {
+        let source = "#if 1\nint b;\n#elif 1\nint c;\n#endif\nint d;\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        // The first branch was active, so the #elif branch is skipped.
+        assert!(result.contains("int b;"));
+        assert!(!result.contains("int c;"));
+        assert!(result.contains("int d;"));
+    }
+
+    #[test]
+    fn test_multiple_else_handled_gracefully() {
+        let source = "#if 0\nint b;\n#else\nint c;\n#else\nint d;\n#endif\nint e;\n";
+        let (result, _c) = evaluate_conditionals(source, ConditionalStrategy::EvaluateSimple);
+        // First #else activates the dead branch; a second #else stays active (clone).
+        assert!(!result.contains("int b;"));
+        assert!(result.contains("int c;"));
+        assert!(result.contains("int d;"));
+        assert!(result.contains("int e;"));
+    }
+
+    #[test]
     fn test_complex_kernel_code() {
         let source = r#"
 #include <linux/module.h>
