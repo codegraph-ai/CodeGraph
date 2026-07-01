@@ -409,66 +409,203 @@ mod tests {
     use crate::temporal::TemporalMetadata;
     use tempfile::TempDir;
 
+    /// Build a MemoryNode carrying the given embedding (if any).
+    fn make_memory(embedding: Option<Vec<f32>>) -> MemoryNode {
+        MemoryNode {
+            id: MemoryId::new(),
+            kind: MemoryKind::DebugContext {
+                problem_description: "Test problem".into(),
+                root_cause: Some("Test cause".into()),
+                solution: "Test solution".into(),
+                symptoms: vec![],
+                related_errors: vec![],
+            },
+            title: "Test Memory".into(),
+            content: "Test content".into(),
+            temporal: TemporalMetadata::new_current(),
+            code_links: vec![],
+            embedding,
+            tags: vec![],
+            source: MemorySource::default(),
+            confidence: 1.0,
+            agent_source: None,
+        }
+    }
+
+    fn open_db(path: &Path) -> DB {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        DB::open(&opts, path).unwrap()
+    }
+
+    fn read_version(db: &DB) -> Option<u32> {
+        db.get(DB_VERSION_KEY).unwrap().map(|bytes| {
+            let slice: &[u8] = bytes.as_ref();
+            u32::from_le_bytes(slice.try_into().unwrap())
+        })
+    }
+
+    fn read_memory(db: &DB, key: &[u8]) -> MemoryNode {
+        let value = db.get(key).unwrap().unwrap();
+        serde_json::from_slice(&value).unwrap()
+    }
+
     #[test]
     fn test_migration_with_json_data() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path();
 
-        // Create v1 database with JSON-serialized data
+        // Create v1 database with JSON-serialized data (no version key).
         {
-            let mut opts = Options::default();
-            opts.create_if_missing(true);
-            let db = DB::open(&opts, db_path).unwrap();
-
-            let memory = MemoryNode {
-                id: MemoryId::new(),
-                kind: MemoryKind::DebugContext {
-                    problem_description: "Test problem".into(),
-                    root_cause: Some("Test cause".into()),
-                    solution: "Test solution".into(),
-                    symptoms: vec![],
-                    related_errors: vec![],
-                },
-                title: "Test Memory".into(),
-                content: "Test content".into(),
-                temporal: TemporalMetadata::new_current(),
-                code_links: vec![],
-                embedding: None,
-                tags: vec![],
-                source: MemorySource::default(),
-                confidence: 1.0,
-                agent_source: None,
-            };
-
-            // Store as JSON (v1 format)
-            let json_bytes = serde_json::to_vec(&memory).unwrap();
+            let db = open_db(db_path);
+            let json_bytes = serde_json::to_vec(&make_memory(None)).unwrap();
             db.put(b"mem:test-id", json_bytes).unwrap();
             db.flush().unwrap();
         }
 
-        // Run migration
         migrate_if_needed(db_path).unwrap();
 
-        // Verify migration succeeded
+        let db = DB::open_default(db_path).unwrap();
+        assert_eq!(read_version(&db), Some(CURRENT_VERSION));
+        // migration preserves memories.
+        assert!(db.get(b"mem:test-id").unwrap().is_some());
+        assert!(
+            read_memory(&db, b"mem:test-id").embedding.is_none(),
+            "v3→v4 migration should clear embeddings"
+        );
+    }
+
+    #[test]
+    fn test_no_database_is_noop() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("does-not-exist");
+
+        // No CURRENT file => migration is a no-op and does not create the dir.
+        migrate_if_needed(&db_path).unwrap();
+        assert!(!db_path.join("CURRENT").exists());
+    }
+
+    #[test]
+    fn test_already_current_is_untouched() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
         {
-            let db = DB::open_default(db_path).unwrap();
-
-            // Check version was set
-            let version_bytes = db.get(DB_VERSION_KEY).unwrap().unwrap();
-            let bytes_slice: &[u8] = version_bytes.as_ref();
-            let version = u32::from_le_bytes(bytes_slice.try_into().unwrap());
-            assert_eq!(version, CURRENT_VERSION);
-
-            // Verify data still exists (migration preserves memories, clears vectors)
-            assert!(db.get(b"mem:test-id").unwrap().is_some());
-
-            // Verify embedding was cleared during v3→v4 migration
-            let value = db.get(b"mem:test-id").unwrap().unwrap();
-            let memory: MemoryNode = serde_json::from_slice(&value).unwrap();
-            assert!(
-                memory.embedding.is_none(),
-                "v3→v4 migration should clear embeddings"
-            );
+            let db = open_db(db_path);
+            db.put(DB_VERSION_KEY, CURRENT_VERSION.to_le_bytes())
+                .unwrap();
+            // A stale vector and an embedded memory that a real migration would purge.
+            db.put(b"vec:test-id", b"stale-vector").unwrap();
+            let json = serde_json::to_vec(&make_memory(Some(vec![0.1, 0.2]))).unwrap();
+            db.put(b"mem:test-id", json).unwrap();
+            db.flush().unwrap();
         }
+
+        migrate_if_needed(db_path).unwrap();
+
+        // current_version == CURRENT_VERSION means perform_migration never runs.
+        let db = DB::open_default(db_path).unwrap();
+        assert_eq!(read_version(&db), Some(CURRENT_VERSION));
+        assert!(db.get(b"vec:test-id").unwrap().is_some());
+        assert!(read_memory(&db, b"mem:test-id").embedding.is_some());
+    }
+
+    #[test]
+    fn test_vec_keys_deleted_and_embeddings_cleared() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
+        {
+            let db = open_db(db_path);
+            // Start at v3 so the v3→v4 and v4→v5 steps both run.
+            db.put(DB_VERSION_KEY, 3u32.to_le_bytes()).unwrap();
+            db.put(b"vec:a", b"vec-bytes").unwrap();
+            db.put(b"vec:b", b"vec-bytes").unwrap();
+            let json = serde_json::to_vec(&make_memory(Some(vec![1.0, 2.0, 3.0]))).unwrap();
+            db.put(b"mem:keep", json).unwrap();
+            db.flush().unwrap();
+        }
+
+        migrate_if_needed(db_path).unwrap();
+
+        let db = DB::open_default(db_path).unwrap();
+        assert_eq!(read_version(&db), Some(CURRENT_VERSION));
+        assert!(
+            db.get(b"vec:a").unwrap().is_none(),
+            "vec: keys must be deleted"
+        );
+        assert!(db.get(b"vec:b").unwrap().is_none());
+        assert!(db.get(b"mem:keep").unwrap().is_some(), "memories preserved");
+        assert!(read_memory(&db, b"mem:keep").embedding.is_none());
+    }
+
+    #[test]
+    fn test_v2_migration_preserves_json_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
+        {
+            let db = open_db(db_path);
+            db.put(DB_VERSION_KEY, 2u32.to_le_bytes()).unwrap();
+            // v2 => v3 tries bincode first, then falls back to JSON; store a JSON
+            // entry so the fallback branch of migrate_v2_to_v3 runs and preserves it.
+            let json = serde_json::to_vec(&make_memory(Some(vec![0.5]))).unwrap();
+            db.put(b"mem:json", json).unwrap();
+            db.flush().unwrap();
+        }
+
+        migrate_if_needed(db_path).unwrap();
+
+        let db = DB::open_default(db_path).unwrap();
+        assert_eq!(read_version(&db), Some(CURRENT_VERSION));
+        // The entry survives and stays JSON-readable; later steps clear its embedding.
+        let restored = read_memory(&db, b"mem:json");
+        assert_eq!(restored.title, "Test Memory");
+        assert!(restored.embedding.is_none());
+    }
+
+    #[test]
+    fn test_newer_version_left_alone_by_migrate_if_needed() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
+        {
+            let db = open_db(db_path);
+            db.put(DB_VERSION_KEY, (CURRENT_VERSION + 1).to_le_bytes())
+                .unwrap();
+            db.flush().unwrap();
+        }
+
+        // A newer-than-supported version is > CURRENT, so the `< CURRENT` guard
+        // skips perform_migration entirely and the version is left as-is.
+        migrate_if_needed(db_path).unwrap();
+        let db = DB::open_default(db_path).unwrap();
+        assert_eq!(read_version(&db), Some(CURRENT_VERSION + 1));
+    }
+
+    #[test]
+    fn test_perform_migration_rejects_future_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = open_db(temp_dir.path());
+
+        // Called directly, a future version is rejected rather than silently accepted.
+        let err = perform_migration(&db, CURRENT_VERSION + 1).unwrap_err();
+        assert!(matches!(err, MemoryError::InvalidPath(_)));
+    }
+
+    #[test]
+    fn test_invalid_version_bytes_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
+        {
+            let db = open_db(db_path);
+            // A version value that is not exactly 4 bytes wide.
+            db.put(DB_VERSION_KEY, vec![1u8, 2, 3]).unwrap();
+            db.flush().unwrap();
+        }
+
+        let err = migrate_if_needed(db_path).unwrap_err();
+        assert!(matches!(err, MemoryError::InvalidPath(_)));
     }
 }
