@@ -1089,4 +1089,231 @@ library SafeMath {
         assert!(names.contains(&"totalSupply"));
         assert!(names.contains(&"balanceOf"));
     }
+
+    #[test]
+    fn test_empty_source_yields_nothing() {
+        let visitor =
+            parse_and_visit(b"// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n");
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.traits.is_empty());
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_contracts_extracted() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract A {\n    function a() public {}\n}\n\ncontract B {\n    function b() public {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let names: Vec<&str> = visitor.classes.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["A", "B"]);
+        // Each method is routed to its own enclosing contract via parent_class.
+        assert_eq!(
+            visitor.classes[0].methods[0].parent_class.as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            visitor.classes[1].methods[0].parent_class.as_deref(),
+            Some("B")
+        );
+    }
+
+    #[test]
+    fn test_contract_line_bounds_are_one_based() {
+        // Contract spans source lines 3..5 (1-based).
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    uint256 x;\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let c = &visitor.classes[0];
+        assert_eq!(c.line_start, 3);
+        assert_eq!(c.line_end, 5);
+        // Contracts have no visibility keyword — always reported public.
+        assert_eq!(c.visibility, "public");
+        // Fields are not extracted by this visitor.
+        assert!(c.fields.is_empty());
+    }
+
+    #[test]
+    fn test_wildcard_star_import_not_flagged_wildcard() {
+        // `import * as X from "path"` has no `import_wildcard` node in this grammar:
+        // the `*` is a bare token and `X` parses as an outside-braces `as` alias.
+        let source = b"pragma solidity ^0.8.0;\n\nimport * as Utils from \"./utils.sol\";\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "./utils.sol");
+        assert_eq!(imp.alias.as_deref(), Some("Utils"));
+        assert!(!imp.is_wildcard);
+        assert!(imp.symbols.is_empty());
+    }
+
+    #[test]
+    fn test_import_importer_is_file() {
+        let source = b"pragma solidity ^0.8.0;\n\nimport \"./a.sol\";\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports[0].importer, "file");
+    }
+
+    #[test]
+    fn test_function_external_and_default_visibility() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function ext() external {}\n    function plain() {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let methods = &visitor.classes[0].methods;
+        let ext = methods.iter().find(|m| m.name == "ext").unwrap();
+        let plain = methods.iter().find(|m| m.name == "plain").unwrap();
+        assert_eq!(ext.visibility, "external");
+        // No visibility keyword defaults to "internal".
+        assert_eq!(plain.visibility, "internal");
+    }
+
+    #[test]
+    fn test_multiple_return_types_joined() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function pair() public returns (uint256, bool) {\n        return (1, true);\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        // Multiple return params are joined with ", ".
+        assert_eq!(f.return_type.as_deref(), Some("uint256, bool"));
+    }
+
+    #[test]
+    fn test_parameter_type_annotation_captured() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f(address to, uint256 amount) public {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let params = &visitor.classes[0].methods[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "to");
+        assert_eq!(params[0].type_annotation.as_deref(), Some("address"));
+        assert_eq!(params[1].name, "amount");
+        assert_eq!(params[1].type_annotation.as_deref(), Some("uint256"));
+    }
+
+    #[test]
+    fn test_function_body_prefix_present() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f() public {\n        uint256 x = 1;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        let prefix = f.body_prefix.as_deref().expect("body prefix present");
+        assert!(prefix.contains("uint256 x"));
+    }
+
+    #[test]
+    fn test_virtual_function_with_body_is_abstract() {
+        // `virtual` marks a function abstract even when it has a body.
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f() public virtual {\n        return;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        assert!(f.is_abstract);
+    }
+
+    #[test]
+    fn test_complexity_loop_counted() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f(uint256 n) public {\n        for (uint256 i = 0; i < n; i++) {\n            n += i;\n        }\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.classes[0].methods[0]
+            .complexity
+            .as_ref()
+            .expect("body yields complexity");
+        assert!(complexity.loops >= 1);
+    }
+
+    #[test]
+    fn test_complexity_logical_operator_counted() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f(uint256 x) public {\n        if (x > 0 && x < 10) {\n            x = 1;\n        }\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.classes[0].methods[0]
+            .complexity
+            .as_ref()
+            .expect("body yields complexity");
+        assert!(complexity.logical_operators >= 1);
+    }
+
+    #[test]
+    fn test_complexity_try_and_early_return_counted() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f() public returns (uint256) {\n        try this.f() returns (uint256 r) {\n            return r;\n        } catch {\n            return 0;\n        }\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.classes[0].methods[0]
+            .complexity
+            .as_ref()
+            .expect("body yields complexity");
+        assert!(complexity.exception_handlers >= 1);
+        assert!(complexity.early_returns >= 1);
+    }
+
+    #[test]
+    fn test_constructor_signature_has_typed_params() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    constructor(uint256 supply, address owner) {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let ctor = visitor.classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name == "constructor")
+            .unwrap();
+        assert_eq!(ctor.signature, "constructor(uint256 supply, address owner)");
+    }
+
+    #[test]
+    fn test_modifier_with_parameters() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    modifier only(address who) {\n        require(msg.sender == who);\n        _;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor.classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name == "only")
+            .unwrap();
+        assert_eq!(m.parameters.len(), 1);
+        assert_eq!(m.parameters[0].name, "who");
+        assert_eq!(m.signature, "modifier only(address who)");
+    }
+
+    #[test]
+    fn test_natspec_block_comment() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    /** @dev block doc */\n    function f() public {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        assert!(f
+            .doc_comment
+            .as_deref()
+            .map(|d| d.contains("@dev"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn test_special_fn_has_no_complexity() {
+        let source =
+            b"pragma solidity ^0.8.0;\n\ncontract C {\n    receive() external payable {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let recv = visitor.classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name == "receive")
+            .unwrap();
+        // extract_special_fn hardcodes complexity to None regardless of body.
+        assert!(recv.complexity.is_none());
+        assert_eq!(recv.visibility, "external");
+        assert_eq!(recv.signature, "receive() external");
+    }
+
+    #[test]
+    fn test_library_function_pure_visibility_internal() {
+        let source = b"pragma solidity ^0.8.0;\n\nlibrary L {\n    function helper() internal pure returns (uint256) {\n        return 1;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        assert_eq!(f.visibility, "internal");
+        assert_eq!(f.return_type.as_deref(), Some("uint256"));
+        assert!(!f.is_abstract);
+    }
 }

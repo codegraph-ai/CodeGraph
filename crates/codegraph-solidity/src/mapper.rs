@@ -683,7 +683,6 @@ mod tests {
             max_nesting_depth: 4,
             exception_handlers: 1,
             early_returns: 2,
-            ..Default::default()
         };
         let method = FunctionEntity::new("mint", 5, 12)
             .with_signature("function mint(address to)")
