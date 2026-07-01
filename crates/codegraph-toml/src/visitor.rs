@@ -488,4 +488,149 @@ mod tests {
             .expect("dotted section prefix");
         assert_eq!(f.parent_class.as_deref(), Some("tool.black"));
     }
+
+    #[test]
+    fn empty_document_yields_no_entities() {
+        let v = visit("");
+        assert_eq!(v.classes.len(), 0);
+        assert_eq!(v.functions.len(), 0);
+    }
+
+    #[test]
+    fn comment_only_document_yields_no_entities() {
+        let v = visit("# just a comment\n# and another\n");
+        assert_eq!(v.classes.len(), 0);
+        assert_eq!(v.functions.len(), 0);
+    }
+
+    #[test]
+    fn value_just_above_cap_is_truncated() {
+        // Inner 119 + two `"` quotes = 121-char value text, one over the 120 cap,
+        // so it MUST get an ellipsis (complements the exactly-120 not-truncated test).
+        let inner = "x".repeat(119);
+        let src = format!("key = \"{inner}\"\n");
+        let v = visit(&src);
+        assert_eq!(v.functions.len(), 1);
+        let sig = &v.functions[0].signature;
+        assert!(
+            sig.ends_with("..."),
+            "121-char value should be truncated: len {}",
+            sig.len()
+        );
+    }
+
+    #[test]
+    fn multiline_array_value_extends_pair_and_section_end() {
+        // The array value spans physical lines 2-5; the pair's line_end and the
+        // enclosing section's line_end must both extend to cover it.
+        let src = "[a]\narr = [\n  1,\n  2,\n]\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 1);
+        let c = &v.classes[0];
+        assert_eq!(c.line_start, 1);
+        assert!(
+            c.line_end >= 5,
+            "section end should reach line 5, got {}",
+            c.line_end
+        );
+        let f = v
+            .functions
+            .iter()
+            .find(|f| f.name == "a.arr")
+            .expect("a.arr");
+        assert_eq!(f.line_start, 2);
+        assert!(
+            f.line_end >= 5,
+            "pair end should reach line 5, got {}",
+            f.line_end
+        );
+    }
+
+    #[test]
+    fn top_level_multiline_array_pair_spans_lines() {
+        // A section-less pair whose array value spans lines has line_end > line_start.
+        let src = "ports = [\n  8000,\n  8001,\n]\n";
+        let v = visit(src);
+        assert_eq!(v.functions.len(), 1);
+        let f = &v.functions[0];
+        assert_eq!(f.name, "ports");
+        assert_eq!(f.parent_class, None);
+        assert_eq!(f.line_start, 1);
+        assert!(
+            f.line_end >= 4,
+            "multiline pair end should reach line 4, got {}",
+            f.line_end
+        );
+    }
+
+    #[test]
+    fn subtable_after_parent_emits_two_distinct_classes() {
+        // `[a]` and `[a.b]` are separate TOML tables, each a document-level node,
+        // so both surface as distinct ClassEntities with their own pairs.
+        let src = "[a]\nx = 1\n[a.b]\ny = 2\n";
+        let v = visit(src);
+        let names: Vec<&str> = v.classes.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"a"), "classes: {names:?}");
+        assert!(names.contains(&"a.b"), "classes: {names:?}");
+        let fy = v
+            .functions
+            .iter()
+            .find(|f| f.name == "a.b.y")
+            .expect("a.b.y");
+        assert_eq!(fy.parent_class.as_deref(), Some("a.b"));
+    }
+
+    #[test]
+    fn array_of_tables_element_prefixes_all_its_pairs() {
+        let src = "[[bin]]\nname = \"server\"\npath = \"src/main.rs\"\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 1);
+        let name = v
+            .functions
+            .iter()
+            .find(|f| f.name == "bin.name")
+            .expect("bin.name");
+        let path = v
+            .functions
+            .iter()
+            .find(|f| f.name == "bin.path")
+            .expect("bin.path");
+        assert_eq!(name.parent_class.as_deref(), Some("bin"));
+        assert_eq!(path.parent_class.as_deref(), Some("bin"));
+    }
+
+    #[test]
+    fn final_section_end_extends_to_document_end() {
+        // Trailing blank lines after the last pair: flush_section takes the max of
+        // the section's tracked end and the document end, so the class line_end
+        // reaches beyond the last pair.
+        let src = "[a]\nx = 1\n\n\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 1);
+        let c = &v.classes[0];
+        assert!(
+            c.line_end >= 2,
+            "final section end should cover at least the last pair, got {}",
+            c.line_end
+        );
+    }
+
+    #[test]
+    fn comment_inside_table_body_is_ignored() {
+        let src = "[a]\n# inner comment\nx = 1\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 1);
+        let pairs: Vec<&str> = v.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(pairs, vec!["a.x"], "only the pair, not the inner comment");
+    }
+
+    #[test]
+    fn negative_and_hex_integer_values_preserved_verbatim() {
+        let src = "offset = -42\nmask = 0xFF\n";
+        let v = visit(src);
+        let offset = v.functions.iter().find(|f| f.name == "offset").unwrap();
+        let mask = v.functions.iter().find(|f| f.name == "mask").unwrap();
+        assert_eq!(offset.signature, "offset = -42");
+        assert_eq!(mask.signature, "mask = 0xFF");
+    }
 }
