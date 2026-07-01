@@ -8,9 +8,8 @@
 //! programs, packages, tasks, functions, instantiations, imports).
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImportRelation, Parameter, BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImportRelation, Parameter,
 };
 use tree_sitter::Node;
 
@@ -271,9 +270,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
         let entity = ClassEntity {
             name,
@@ -333,9 +330,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
@@ -394,9 +389,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
@@ -821,5 +814,196 @@ endmodule";
             "Expected module instantiation call"
         );
         assert_eq!(visitor.calls[0].callee, "counter");
+    }
+
+    /// Parse `source` and return a populated visitor.
+    fn parse_visit(source: &[u8]) -> VerilogVisitor<'_> {
+        use tree_sitter::Parser;
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_verilog::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        // Leak the tree so the borrow lives as long as the returned visitor's source ref.
+        let tree = Box::leak(Box::new(tree));
+        let mut visitor = VerilogVisitor::new(source);
+        visitor.visit_node(tree.root_node());
+        visitor
+    }
+
+    #[test]
+    fn test_empty_source_extracts_nothing() {
+        let v = parse_visit(b"");
+        assert!(v.modules.is_empty());
+        assert!(v.functions.is_empty());
+        assert!(v.imports.is_empty());
+        assert!(v.calls.is_empty());
+    }
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = b"module top();
+  function int add(input int a, input int b);
+    return a + b;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        assert_eq!(v.functions.len(), 1);
+        let f = &v.functions[0];
+        // Verilog functions are always public, synchronous, non-static, non-abstract.
+        assert_eq!(f.visibility, "public");
+        assert!(!f.is_async);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(!f.is_test);
+        // Verilog has no return-type extraction, and no doc/attributes.
+        assert_eq!(f.return_type, None);
+        assert_eq!(f.doc_comment, None);
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_function_one_based_line_bounds_and_signature() {
+        let source = b"module top();
+  function int add(input int a);
+    return a;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let f = &v.functions[0];
+        // Function declaration begins on the 2nd line (row 1 -> line 2).
+        assert_eq!(f.line_start, 2);
+        assert!(f.line_end >= f.line_start);
+        // Signature is the first line of the declaration text.
+        assert!(f.signature.contains("function int add"));
+        assert!(f.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_function_parent_class_is_enclosing_module() {
+        let source = b"module alu();
+  function int neg(input int a);
+    return -a;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        assert_eq!(v.functions[0].parent_class.as_deref(), Some("alu"));
+    }
+
+    #[test]
+    fn test_baseline_function_complexity() {
+        let source = b"module top();
+  function int id(input int a);
+    return a;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        // A straight-line function has no branches or loops.
+        assert_eq!(c.branches, 0);
+        assert_eq!(c.loops, 0);
+    }
+
+    #[test]
+    fn test_conditional_raises_complexity() {
+        let source = b"module top();
+  function int pick(input int a);
+    if (a > 0) return a;
+    else return 0;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            c.branches >= 1,
+            "if statement should register a branch, got {}",
+            c.branches
+        );
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_loop_raises_complexity() {
+        let source = b"module top();
+  function int sum(input int n);
+    int total; total = 0;
+    for (int i = 0; i < n; i = i + 1) total = total + i;
+    return total;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        assert!(c.loops >= 1, "for loop should register a loop");
+    }
+
+    #[test]
+    fn test_task_extracted_as_function_with_name_and_parent() {
+        let source = b"module dut();
+  task reset(input logic clk);
+  endtask
+endmodule";
+        let v = parse_visit(source);
+        assert_eq!(v.functions.len(), 1);
+        assert_eq!(v.functions[0].name, "reset");
+        assert_eq!(v.functions[0].parent_class.as_deref(), Some("dut"));
+    }
+
+    #[test]
+    fn test_include_directive_becomes_import() {
+        let source = b"`include \"defs.svh\"\nmodule top(); endmodule";
+        let v = parse_visit(source);
+        assert!(
+            v.imports.iter().any(|i| i.imported == "defs.svh"),
+            "expected an include import for defs.svh, got {:?}",
+            v.imports.iter().map(|i| &i.imported).collect::<Vec<_>>()
+        );
+        let inc = v.imports.iter().find(|i| i.imported == "defs.svh").unwrap();
+        // Top-level include has no enclosing module -> importer defaults to "file".
+        assert_eq!(inc.importer, "file");
+        assert!(!inc.is_wildcard);
+    }
+
+    #[test]
+    fn test_specific_symbol_package_import_is_not_wildcard() {
+        let source = b"module top(); import my_pkg::my_type; endmodule";
+        let v = parse_visit(source);
+        let imp = v
+            .imports
+            .iter()
+            .find(|i| i.imported == "my_pkg")
+            .expect("expected my_pkg import");
+        assert!(
+            !imp.is_wildcard,
+            "a specific symbol import (::my_type) is not a wildcard"
+        );
+        // Import inside a module records the module as the importer.
+        assert_eq!(imp.importer, "top");
+    }
+
+    #[test]
+    fn test_interface_is_flagged_but_module_is_not() {
+        let mod_v = parse_visit(b"module top(); endmodule");
+        assert!(!mod_v.modules[0].is_interface);
+        let if_v = parse_visit(b"interface bus; endinterface");
+        assert!(if_v.modules[0].is_interface);
+    }
+
+    #[test]
+    fn test_multiple_modules_extracted() {
+        let source = b"module a(); endmodule\nmodule b(); endmodule";
+        let v = parse_visit(source);
+        let names: Vec<&str> = v.modules.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+        assert_eq!(v.modules.len(), 2);
+    }
+
+    #[test]
+    fn test_module_class_entity_defaults() {
+        let v = parse_visit(b"module top(); endmodule");
+        let m = &v.modules[0];
+        assert_eq!(m.visibility, "public");
+        assert!(!m.is_abstract);
+        assert_eq!(m.line_start, 1);
+        assert!(m.base_classes.is_empty());
+        assert!(m.body_prefix.is_some());
     }
 }
