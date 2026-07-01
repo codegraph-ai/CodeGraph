@@ -965,4 +965,195 @@ end
         assert!(!sig.contains('\n'));
         assert!(sig.contains("def greet("));
     }
+
+    #[test]
+    fn test_or_operator_raises_complexity() {
+        // The `||` symbolic operator (not just the word `or`) is counted.
+        let source = br#"
+defmodule MyApp do
+  def either(x, y) do
+    x || y
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_nested_module_function_extracted() {
+        // A function defined inside a nested defmodule is still discovered.
+        let source = br#"
+defmodule Outer do
+  defmodule Inner do
+    def deep do
+      :ok
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "deep");
+    }
+
+    #[test]
+    fn test_if_else_reaches_complexity_three() {
+        // if adds one branch and the else_block adds another, so cc >= 3.
+        let source = br#"
+defmodule MyApp do
+  def check(x) do
+    if x > 0 do
+      :pos
+    else
+      :neg
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_multiple_calls_tracked() {
+        let source = br#"
+defmodule MyApp do
+  def caller do
+    do_a()
+    do_b()
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.iter().any(|c| c.callee == "do_a"));
+        assert!(visitor.calls.iter().any(|c| c.callee == "do_b"));
+    }
+
+    #[test]
+    fn test_function_parent_class_always_none() {
+        // Elixir functions never record their enclosing module as parent_class.
+        let source = br#"
+defmodule MyApp do
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].parent_class.is_none());
+    }
+
+    #[test]
+    fn test_zero_arg_function_has_empty_params() {
+        let source = br#"
+defmodule MyApp do
+  def init do
+    :ok
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn test_doc_comment_skips_intervening_comment() {
+        // A plain `#` comment between @doc and the def does not block attachment.
+        let source = br#"
+defmodule MyApp do
+  @doc "Greets"
+  # implementation note
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let doc = visitor.functions[0].doc_comment.as_deref().unwrap_or("");
+        assert!(doc.starts_with("@doc"));
+    }
+
+    #[test]
+    fn test_spec_attribute_not_treated_as_doc() {
+        // Only @doc/@moduledoc are accepted; a bare @spec breaks the search -> None.
+        let source = br#"
+defmodule MyApp do
+  @spec greet(String.t) :: String.t
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_use_with_options_records_module_name() {
+        // `use GenServer, restart: :permanent` records only the module alias.
+        let source = br#"
+defmodule MyApp do
+  use GenServer, restart: :permanent
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "GenServer");
+    }
+
+    #[test]
+    fn test_control_flow_macro_recorded_as_call() {
+        // visit_body_for_calls does not exclude if/for/case, so the `if` macro
+        // itself is recorded as a callee alongside the real do_work call.
+        let source = br#"
+defmodule MyApp do
+  def caller(x) do
+    if x > 0 do
+      do_work()
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.iter().any(|c| c.callee == "if"));
+        assert!(visitor.calls.iter().any(|c| c.callee == "do_work"));
+    }
+
+    #[test]
+    fn test_private_function_with_params() {
+        let source = br#"
+defmodule MyApp do
+  defp helper(a, b) do
+    a + b
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.visibility, "private");
+        let names: Vec<&str> = f.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_call_inside_for_loop_attributed() {
+        // A call nested inside a for-comprehension body is attributed to the function.
+        let source = br#"
+defmodule MyApp do
+  def loop(list) do
+    for x <- list do
+      do_work(x)
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "loop" && c.callee == "do_work"));
+    }
 }
