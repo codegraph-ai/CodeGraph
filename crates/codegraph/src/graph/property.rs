@@ -415,6 +415,52 @@ mod tests {
     }
 
     #[test]
+    fn test_property_value_exact_wire_format() {
+        // PropertyValue is an externally-tagged enum; every variant's on-disk shape
+        // is a persistence contract that the round-trip test cannot detect a rename of.
+        assert_eq!(
+            serde_json::to_string(&PropertyValue::String("hi".to_string())).unwrap(),
+            r#"{"String":"hi"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PropertyValue::Int(7)).unwrap(),
+            r#"{"Int":7}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PropertyValue::Float(1.5)).unwrap(),
+            r#"{"Float":1.5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PropertyValue::Bool(true)).unwrap(),
+            r#"{"Bool":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PropertyValue::StringList(vec!["a".to_string()])).unwrap(),
+            r#"{"StringList":["a"]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PropertyValue::IntList(vec![1, 2])).unwrap(),
+            r#"{"IntList":[1,2]}"#
+        );
+        // The unit variant serializes as a bare tag string, not an object.
+        assert_eq!(
+            serde_json::to_string(&PropertyValue::Null).unwrap(),
+            r#""Null""#
+        );
+    }
+
+    #[test]
+    fn test_property_map_exact_wire_format() {
+        // PropertyMap wraps a single `data` field; the wrapper key and the
+        // nested externally-tagged value shape are the on-disk graph format.
+        let props = PropertyMap::new().with("name", "fn");
+        assert_eq!(
+            serde_json::to_string(&props).unwrap(),
+            r#"{"data":{"name":{"String":"fn"}}}"#
+        );
+    }
+
+    #[test]
     fn test_get_string_list_compat() {
         // StringList variant works directly
         let props = PropertyMap::new().with("symbols", vec!["foo".to_string(), "bar".to_string()]);
