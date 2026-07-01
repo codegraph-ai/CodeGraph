@@ -237,6 +237,15 @@ mod tests {
     }
 
     #[test]
+    fn keyless_pair_is_skipped() {
+        // A bare `: value` parses as a block_mapping_pair with no "key" field, so
+        // child_by_field_name("key") is None and visit_top_level_pair returns early
+        // without recording a function - the missing-key arm no other test reaches.
+        let visitor = parse_and_visit(b": value\n");
+        assert!(visitor.functions.is_empty());
+    }
+
+    #[test]
     fn key_without_value_uses_key_as_signature_and_no_body_prefix() {
         // A pair with an empty value yields no value node, so body_prefix stays None
         // and the signature falls back to the bare key.
