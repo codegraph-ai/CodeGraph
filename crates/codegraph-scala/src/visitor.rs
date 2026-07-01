@@ -45,7 +45,7 @@ impl<'a> ScalaVisitor<'a> {
 
     pub fn visit_node(&mut self, node: Node) {
         match node.kind() {
-            "function_definition" => {
+            "function_definition" | "function_declaration" => {
                 self.visit_function(node);
                 return;
             }
@@ -485,5 +485,222 @@ mod tests {
         let visitor = parse_and_visit(source);
 
         assert_eq!(visitor.imports.len(), 1);
+    }
+
+    #[test]
+    fn test_empty_source_is_empty() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.traits.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+        assert!(visitor.inheritance.is_empty());
+        assert!(visitor.implementations.is_empty());
+    }
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = b"def add(a: Int, b: Int): Int = a + b";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert_eq!(f.visibility, "public");
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        // top-level function has no enclosing class -> is_static true
+        assert!(f.is_static);
+        assert!(f.parent_class.is_none());
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 1);
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_function_signature_first_line() {
+        let source = b"def add(a: Int, b: Int): Int = {\n  a + b\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].signature,
+            "def add(a: Int, b: Int): Int = {"
+        );
+    }
+
+    #[test]
+    fn test_function_parameters_with_types() {
+        let source = b"def add(a: Int, b: String): Int = 0";
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "a");
+        assert_eq!(params[0].type_annotation.as_deref(), Some("Int"));
+        assert_eq!(params[1].name, "b");
+        assert_eq!(params[1].type_annotation.as_deref(), Some("String"));
+    }
+
+    #[test]
+    fn test_function_return_type() {
+        let source = b"def five(): Int = 5";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].return_type.as_deref(), Some("Int"));
+    }
+
+    #[test]
+    fn test_function_is_test_prefix() {
+        let source = b"def testAdd(): Unit = ()";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_function_body_prefix_present() {
+        let source = b"def work(): Int = {\n  val x = 1\n  x\n}";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_abstract_method_has_no_body() {
+        // a def with no body inside a trait is abstract
+        let source = b"trait T {\n  def greet(name: String): String\n}";
+        let visitor = parse_and_visit(source);
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greet")
+            .expect("greet method extracted");
+        assert!(f.is_abstract);
+        assert!(f.body_prefix.is_none());
+        assert!(f.complexity.is_none());
+    }
+
+    #[test]
+    fn test_method_parent_class_and_not_static() {
+        let source = b"class Calc {\n  def add(a: Int): Int = a\n}";
+        let visitor = parse_and_visit(source);
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "add")
+            .expect("method extracted");
+        assert_eq!(f.parent_class.as_deref(), Some("Calc"));
+        assert!(!f.is_static);
+    }
+
+    #[test]
+    fn test_function_baseline_complexity() {
+        let source = b"def straight(): Int = {\n  val x = 1\n  x\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_if_expression_raises_complexity() {
+        let source = b"def choose(x: Int): Int = {\n  if (x > 0) 1 else 2\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_for_expression_raises_complexity() {
+        let source = b"def loop(n: Int): Int = {\n  for (i <- 0 until n) println(i)\n  0\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_match_expression_raises_complexity() {
+        let source =
+            b"def kind(x: Int): String = x match {\n  case 0 => \"zero\"\n  case _ => \"other\"\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_class_metadata_defaults() {
+        let source = b"class Person(val name: String)";
+        let visitor = parse_and_visit(source);
+        let c = &visitor.classes[0];
+        assert_eq!(c.visibility, "public");
+        assert!(!c.is_abstract);
+        assert!(!c.is_interface);
+        assert_eq!(c.line_start, 1);
+    }
+
+    #[test]
+    fn test_abstract_class() {
+        let source = b"abstract class Shape {\n  def area(): Double\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Shape")
+            .expect("class extracted");
+        assert!(c.is_abstract);
+    }
+
+    #[test]
+    fn test_case_class_attribute() {
+        let source = b"case class Point(x: Int, y: Int)";
+        let visitor = parse_and_visit(source);
+        let c = &visitor.classes[0];
+        assert!(c.attributes.contains(&"case".to_string()));
+    }
+
+    #[test]
+    fn test_class_extends_inheritance() {
+        let source = b"class Dog extends Animal";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.inheritance.len(), 1);
+        assert_eq!(visitor.inheritance[0].child, "Dog");
+        assert_eq!(visitor.inheritance[0].parent, "Animal");
+    }
+
+    #[test]
+    fn test_import_wildcard_underscore() {
+        let source = b"import scala.collection.mutable._";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert!(visitor.imports[0].is_wildcard);
+        assert_eq!(visitor.imports[0].importer, "main");
+    }
+
+    #[test]
+    fn test_import_selector_wildcard() {
+        let source = b"import scala.collection.mutable.{Map, Set}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        // contains ".{" so flagged as wildcard by the visitor's heuristic
+        assert!(visitor.imports[0].is_wildcard);
+    }
+
+    #[test]
+    fn test_non_wildcard_import() {
+        let source = b"import scala.collection.mutable.ListBuffer";
+        let visitor = parse_and_visit(source);
+        assert!(!visitor.imports[0].is_wildcard);
+        assert!(visitor.imports[0].symbols.is_empty());
+        assert!(visitor.imports[0].alias.is_none());
+    }
+
+    #[test]
+    fn test_object_attribute() {
+        let source = b"object Config {\n  val port = 8080\n}";
+        let visitor = parse_and_visit(source);
+        let c = &visitor.classes[0];
+        assert_eq!(c.name, "Config");
+        assert!(c.attributes.contains(&"object".to_string()));
+        assert!(!c.is_abstract);
+    }
+
+    #[test]
+    fn test_multiple_functions() {
+        let source = b"def a(): Int = 1\ndef b(): Int = 2\ndef c(): Int = 3";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 3);
     }
 }
