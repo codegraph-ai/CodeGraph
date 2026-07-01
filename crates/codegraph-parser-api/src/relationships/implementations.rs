@@ -61,4 +61,11 @@ mod tests {
         let back: ImplementationRelation = serde_json::from_str(&json).unwrap();
         assert_eq!(r, back);
     }
+
+    #[test]
+    fn serializes_with_exact_snake_case_wire_names() {
+        let r = ImplementationRelation::new("MyStruct", "Display");
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, r#"{"implementor":"MyStruct","trait_name":"Display"}"#);
+    }
 }
