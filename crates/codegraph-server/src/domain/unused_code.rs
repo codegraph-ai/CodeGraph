@@ -1088,4 +1088,76 @@ mod tests {
         assert_eq!(compute_unused_confidence("plain", true, &dummy), 0.5);
         assert_eq!(compute_unused_confidence("plain", false, &dummy), 0.9);
     }
+
+    #[test]
+    fn has_called_child_methods_true_when_a_contained_method_is_called() {
+        // Class --Contains--> method, and caller --Calls--> method.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(&mut g, NodeType::Class, &[("name", str_prop("Widget"))]);
+        let method = add_fn(&mut g, "render", "src/w.rs");
+        let caller = add_fn(&mut g, "main", "src/w.rs");
+        edge(&mut g, class, method, EdgeType::Contains);
+        edge(&mut g, caller, method, EdgeType::Calls);
+        assert!(has_called_child_methods(&g, class));
+    }
+
+    #[test]
+    fn has_called_child_methods_false_when_contained_method_has_no_caller() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(&mut g, NodeType::Class, &[("name", str_prop("Widget"))]);
+        let method = add_fn(&mut g, "render", "src/w.rs");
+        edge(&mut g, class, method, EdgeType::Contains);
+        assert!(!has_called_child_methods(&g, class));
+    }
+
+    #[test]
+    fn has_called_child_methods_ignores_non_contains_children() {
+        // The child is reached via a Calls edge, not Contains, so even though it
+        // has an incoming caller it is not treated as a contained method.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(&mut g, NodeType::Class, &[("name", str_prop("Widget"))]);
+        let other = add_fn(&mut g, "helper", "src/w.rs");
+        let caller = add_fn(&mut g, "main", "src/w.rs");
+        edge(&mut g, class, other, EdgeType::Calls);
+        edge(&mut g, caller, other, EdgeType::Calls);
+        assert!(!has_called_child_methods(&g, class));
+    }
+
+    #[test]
+    fn has_active_same_file_functions_true_when_a_sibling_has_a_caller() {
+        // Class and an active sibling function share src/a.rs.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", str_prop("Widget")), ("path", str_prop("src/a.rs"))],
+        );
+        let sibling = add_fn(&mut g, "active", "src/a.rs");
+        let caller = add_fn(&mut g, "main", "src/a.rs");
+        edge(&mut g, caller, sibling, EdgeType::Calls);
+        assert!(has_active_same_file_functions(&g, class));
+    }
+
+    #[test]
+    fn has_active_same_file_functions_false_when_siblings_are_uncalled() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", str_prop("Widget")), ("path", str_prop("src/a.rs"))],
+        );
+        add_fn(&mut g, "idle", "src/a.rs");
+        assert!(!has_active_same_file_functions(&g, class));
+    }
+
+    #[test]
+    fn has_active_same_file_functions_false_when_node_has_no_path() {
+        // Empty path short-circuits to false before any query runs.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(&mut g, NodeType::Class, &[("name", str_prop("Widget"))]);
+        let sibling = add_fn(&mut g, "active", "");
+        let caller = add_fn(&mut g, "main", "");
+        edge(&mut g, caller, sibling, EdgeType::Calls);
+        assert!(!has_active_same_file_functions(&g, class));
+    }
 }
