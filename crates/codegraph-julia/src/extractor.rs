@@ -58,6 +58,11 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        let config = ParserConfig::default();
+        extract(source, Path::new(path), &config).expect("extract should succeed")
+    }
+
     #[test]
     fn test_extract_simple_function() {
         let source = r#"
@@ -65,23 +70,14 @@ function hello()
     println("Hello, world!")
 end
 "#;
-        let config = ParserConfig::default();
-        let result = extract(source, Path::new("test.jl"), &config);
-
-        assert!(result.is_ok());
-        let ir = result.unwrap();
+        let ir = extract_ok(source, "test.jl");
         assert_eq!(ir.functions.len(), 1);
         assert_eq!(ir.functions[0].name, "hello");
     }
 
     #[test]
     fn test_extract_using() {
-        let source = "using DataFrames\n";
-        let config = ParserConfig::default();
-        let result = extract(source, Path::new("test.jl"), &config);
-
-        assert!(result.is_ok());
-        let ir = result.unwrap();
+        let ir = extract_ok("using DataFrames\n", "test.jl");
         assert_eq!(ir.imports.len(), 1);
     }
 
@@ -93,12 +89,120 @@ struct User
     email::String
 end
 "#;
-        let config = ParserConfig::default();
-        let result = extract(source, Path::new("test.jl"), &config);
-
-        assert!(result.is_ok());
-        let ir = result.unwrap();
+        let ir = extract_ok(source, "test.jl");
         assert_eq!(ir.classes.len(), 1);
         assert_eq!(ir.classes[0].name, "User");
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("", "widgets.jl");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "widgets");
+    }
+
+    #[test]
+    fn test_module_name_fallback_when_no_stem() {
+        let ir = extract_ok("", "..");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_module_metadata() {
+        let source = "function f()\nend\nfunction g()\nend\n";
+        let ir = extract_ok(source, "meta.jl");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "meta.jl");
+        assert_eq!(module.language, "julia");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "empty.jl");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let ir = extract_ok("# just a comment\n", "comment.jl");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_abstract_type_flows_into_traits() {
+        let ir = extract_ok("abstract type Animal end\n", "types.jl");
+        assert_eq!(ir.traits.len(), 1);
+        assert_eq!(ir.traits[0].name, "Animal");
+        assert!(ir.classes.is_empty());
+    }
+
+    #[test]
+    fn test_calls_populated_via_caller_callee() {
+        let source = r#"
+function callee()
+end
+
+function caller()
+    callee()
+end
+"#;
+        let ir = extract_ok(source, "calls.jl");
+        assert_eq!(ir.functions.len(), 2);
+        assert!(
+            ir.calls.iter().any(|c| c.callee == "callee"),
+            "expected a call relation to callee, got {:?}",
+            ir.calls
+        );
+    }
+
+    #[test]
+    fn test_mixed_source_populates_every_kind() {
+        let source = r#"
+using DataFrames
+
+abstract type Shape end
+
+struct Circle
+    radius::Float64
+end
+
+function area(c)
+    compute(c)
+end
+"#;
+        let ir = extract_ok(source, "mixed.jl");
+        assert!(!ir.imports.is_empty(), "expected imports");
+        assert!(!ir.traits.is_empty(), "expected traits");
+        assert!(!ir.classes.is_empty(), "expected classes");
+        assert!(!ir.functions.is_empty(), "expected functions");
+        assert!(!ir.calls.is_empty(), "expected calls");
+    }
+
+    #[test]
+    fn test_multiple_functions() {
+        let source = r#"
+function one()
+end
+
+function two()
+end
+
+function three()
+end
+"#;
+        let ir = extract_ok(source, "multi.jl");
+        assert_eq!(ir.functions.len(), 3);
     }
 }
