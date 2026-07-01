@@ -114,6 +114,29 @@ mod tests {
     }
 
     #[test]
+    fn trait_default_serializes_exact_wire_format() {
+        let t = TraitEntity::new("Drawable", 5, 15);
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"Drawable","visibility":"public","line_start":5,"line_end":15,"required_methods":[],"parent_traits":[],"doc_comment":null,"attributes":[]}"#
+        );
+    }
+
+    #[test]
+    fn trait_populated_serializes_exact_wire_format() {
+        let t = TraitEntity::new("Widget", 1, 20)
+            .with_parent_traits(vec!["Base".to_string()])
+            .with_doc("widget trait")
+            .with_attributes(vec!["#[async_trait]".to_string()]);
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(
+            json,
+            r##"{"name":"Widget","visibility":"public","line_start":1,"line_end":20,"required_methods":[],"parent_traits":["Base"],"doc_comment":"widget trait","attributes":["#[async_trait]"]}"##
+        );
+    }
+
+    #[test]
     fn accepts_string_and_str_inputs() {
         let t = TraitEntity::new(String::from("T"), 1, 2)
             .with_visibility(String::from("crate"))
