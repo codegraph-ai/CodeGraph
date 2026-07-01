@@ -394,6 +394,7 @@ impl<'a> ElixirVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> ElixirVisitor<'_> {
         use tree_sitter::Parser;
@@ -772,5 +773,196 @@ end
         assert!(visitor.functions.is_empty());
         assert!(visitor.imports.is_empty());
         assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_line_numbers_offset_by_blank_lines() {
+        // Two leading blank lines push defmodule to row 2 and def to row 3 (1-indexed).
+        let source = b"\n\ndefmodule MyApp do\n  def greet(name) do\n    name\n  end\nend\n";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.line_start, 4);
+        assert_eq!(f.line_end, 6);
+    }
+
+    #[test]
+    fn test_default_arg_param_extracted() {
+        let source = br#"
+defmodule MyApp do
+  def greet(name \\ "world") do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "name");
+    }
+
+    #[test]
+    fn test_multiple_params_order_preserved() {
+        let source = br#"
+defmodule MyApp do
+  def add(a, b, c) do
+    a + b + c
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_call_metadata_defaults() {
+        let source = br#"
+defmodule MyApp do
+  def caller do
+    do_work()
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "do_work")
+            .expect("do_work call should be tracked");
+        assert_eq!(call.caller, "caller");
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+        // do_work() sits on the 4th line (1-indexed) of the source.
+        assert_eq!(call.call_site_line, 4);
+    }
+
+    #[test]
+    fn test_nested_call_in_branch_tracked() {
+        // A call buried inside an `if` body is still attributed to the function.
+        let source = br#"
+defmodule MyApp do
+  def caller(x) do
+    if x > 0 do
+      do_work()
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "caller" && c.callee == "do_work"));
+    }
+
+    #[test]
+    fn test_cond_raises_complexity() {
+        let source = br#"
+defmodule MyApp do
+  def classify(x) do
+    cond do
+      x > 0 -> :pos
+      true -> :other
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_unless_raises_complexity() {
+        let source = br#"
+defmodule MyApp do
+  def check(x) do
+    unless x > 0 do
+      :neg
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_logical_operator_raises_complexity() {
+        let source = br#"
+defmodule MyApp do
+  def both(x, y) do
+    x > 0 and y > 0
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_moduledoc_attached_as_doc_comment() {
+        // extract_doc_comment accepts both @doc and @moduledoc prefixes.
+        let source = br#"
+defmodule MyApp do
+  @moduledoc "The module"
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let doc = visitor.functions[0].doc_comment.as_deref().unwrap_or("");
+        assert!(doc.starts_with("@moduledoc"));
+    }
+
+    #[test]
+    fn test_alias_import_recorded() {
+        let source = br#"
+defmodule MyApp do
+  alias MyApp.Repo
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "MyApp.Repo");
+        assert!(!imp.is_wildcard);
+        assert!(imp.alias.is_none());
+    }
+
+    #[test]
+    fn test_body_prefix_truncated() {
+        // Build a function body larger than BODY_PREFIX_MAX_CHARS so it truncates.
+        let filler = "    x = x + 1\n".repeat(200);
+        let source = format!(
+            "defmodule MyApp do\n  def loop(x) do\n{}    x\n  end\nend\n",
+            filler
+        );
+        let visitor = parse_and_visit(source.as_bytes());
+        let body = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(body.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_signature_single_physical_line() {
+        // def spanning multiple physical lines keeps only the first line as signature.
+        let source = br#"
+defmodule MyApp do
+  def greet(
+    name
+  ) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let sig = &visitor.functions[0].signature;
+        assert!(!sig.contains('\n'));
+        assert!(sig.contains("def greet("));
     }
 }
