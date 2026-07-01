@@ -112,4 +112,64 @@ function deploy() {
         assert_eq!(ir.imports.len(), 1);
         assert_eq!(ir.imports[0].imported, "./utils.sh");
     }
+
+    #[test]
+    fn test_extract_module_metadata() {
+        let source = r#"#!/bin/bash
+greet() {
+    echo "hi"
+}
+"#;
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("deploy.sh"), &config).unwrap();
+
+        let module = ir.module.expect("module entity present");
+        assert_eq!(module.name, "deploy");
+        assert_eq!(module.path, "deploy.sh");
+        assert_eq!(module.language, "bash");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_extract_module_name_unknown_fallback() {
+        // An empty path has no file_stem, so the module name falls back to "unknown".
+        let config = ParserConfig::default();
+        let ir = extract("echo hi\n", Path::new(""), &config).unwrap();
+
+        let module = ir.module.expect("module entity present");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_extract_empty_source() {
+        // Empty source parses to a valid empty tree: module name still derives from
+        // the file stem, line_count is 0, and no functions are extracted.
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new("empty.sh"), &config).unwrap();
+
+        let module = ir.module.expect("module entity present");
+        assert_eq!(module.name, "empty");
+        assert_eq!(module.line_count, 0);
+        assert!(ir.functions.is_empty());
+    }
+
+    #[test]
+    fn test_extract_calls_propagated() {
+        // A command invoked inside a function body surfaces as a call relation,
+        // propagated from visitor.calls into ir.calls.
+        let source = r#"#!/bin/bash
+run() {
+    deploy
+}
+"#;
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("test.sh"), &config).unwrap();
+
+        assert!(ir
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "deploy"));
+    }
 }
