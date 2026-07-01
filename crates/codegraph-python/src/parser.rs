@@ -482,4 +482,257 @@ mod tests {
         let parser = Parser::new();
         assert!(parser.config().include_private);
     }
+
+    // --- helpers ---------------------------------------------------------
+
+    fn graph() -> codegraph::CodeGraph {
+        codegraph::CodeGraph::in_memory().expect("in-memory graph")
+    }
+
+    fn file_with(functions: usize, classes: usize, traits: usize, lines: usize) -> FileInfo {
+        let mut info = FileInfo::new(PathBuf::from("x.py"));
+        info.functions = (0..functions).map(|i| format!("f{i}")).collect();
+        info.classes = (0..classes).map(|i| format!("c{i}")).collect();
+        info.traits = (0..traits).map(|i| format!("t{i}")).collect();
+        info.lines = lines;
+        info.parse_time = Duration::from_millis(10);
+        info
+    }
+
+    // --- FileInfo --------------------------------------------------------
+
+    #[test]
+    fn test_file_info_entity_count_sums_all_kinds() {
+        let info = file_with(2, 3, 1, 100);
+        // modules stays empty; count = 2 + 3 + 0 + 1
+        assert_eq!(info.entity_count(), 6);
+    }
+
+    // --- ProjectInfo -----------------------------------------------------
+
+    #[test]
+    fn test_project_info_default_equals_new() {
+        let d = ProjectInfo::default();
+        let n = ProjectInfo::new();
+        assert_eq!(d.files.len(), n.files.len());
+        assert_eq!(d.total_functions, n.total_functions);
+        assert_eq!(d.total_lines, n.total_lines);
+        assert_eq!(d.total_time, n.total_time);
+    }
+
+    #[test]
+    fn test_project_info_add_file_accumulates_totals() {
+        let mut info = ProjectInfo::new();
+        info.add_file(file_with(2, 1, 1, 50));
+        info.add_file(file_with(3, 0, 0, 20));
+
+        assert_eq!(info.files.len(), 2);
+        assert_eq!(info.total_functions, 5);
+        assert_eq!(info.total_classes, 1);
+        assert_eq!(info.total_traits, 1);
+        assert_eq!(info.total_lines, 70);
+        assert_eq!(info.total_time, Duration::from_millis(20));
+    }
+
+    #[test]
+    fn test_project_info_add_failure_records_error() {
+        let mut info = ProjectInfo::new();
+        info.add_failure(PathBuf::from("bad.py"), "boom".to_string());
+        assert_eq!(info.failed_files.len(), 1);
+        assert_eq!(
+            info.failed_files.get(&PathBuf::from("bad.py")).unwrap(),
+            "boom"
+        );
+    }
+
+    #[test]
+    fn test_project_info_success_rate_all_failed() {
+        let mut info = ProjectInfo::new();
+        info.add_failure(PathBuf::from("a.py"), "e".to_string());
+        info.add_failure(PathBuf::from("b.py"), "e".to_string());
+        assert_eq!(info.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_project_info_avg_parse_time_empty_and_populated() {
+        let mut info = ProjectInfo::new();
+        assert_eq!(info.avg_parse_time(), Duration::from_secs(0));
+
+        info.add_file(file_with(0, 0, 0, 0)); // 10ms each
+        info.add_file(file_with(0, 0, 0, 0));
+        assert_eq!(info.avg_parse_time(), Duration::from_millis(10));
+    }
+
+    // --- Parser construction ---------------------------------------------
+
+    #[test]
+    fn test_parser_with_config_preserves_config() {
+        let cfg = ParserConfig {
+            include_private: false,
+            ..ParserConfig::default()
+        };
+        let parser = Parser::with_config(cfg);
+        assert!(!parser.config().include_private);
+    }
+
+    #[test]
+    fn test_parser_default_equals_new() {
+        let d = Parser::default();
+        assert_eq!(
+            d.config().max_file_size,
+            Parser::new().config().max_file_size
+        );
+    }
+
+    // --- parse_source ----------------------------------------------------
+
+    #[test]
+    fn test_parse_source_extracts_function_class_method_module() {
+        let parser = Parser::new();
+        let mut g = graph();
+        let src = "def foo():\n    pass\n\nclass Bar:\n    def baz(self):\n        pass\n";
+        let info = parser
+            .parse_source(src, std::path::Path::new("m.py"), &mut g)
+            .unwrap();
+
+        assert!(info.functions.contains(&"foo".to_string()));
+        // methods are qualified as Class.method
+        assert!(info.functions.contains(&"Bar.baz".to_string()));
+        assert_eq!(info.classes, vec!["Bar".to_string()]);
+        assert_eq!(info.modules, vec!["m".to_string()]);
+        assert_eq!(info.lines, 6);
+        assert_eq!(info.file_path, PathBuf::from("m.py"));
+    }
+
+    #[test]
+    fn test_parse_source_empty_yields_module_only() {
+        let parser = Parser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source("", std::path::Path::new("empty.py"), &mut g)
+            .unwrap();
+        assert!(info.functions.is_empty());
+        assert!(info.classes.is_empty());
+        // an empty file still produces a module entity
+        assert_eq!(info.modules, vec!["empty".to_string()]);
+    }
+
+    // --- parse_file ------------------------------------------------------
+
+    #[test]
+    fn test_parse_file_rejects_disallowed_extension() {
+        let parser = Parser::new();
+        let mut g = graph();
+        let err = parser
+            .parse_file(std::path::Path::new("notpy.rs"), &mut g)
+            .unwrap_err();
+        assert!(matches!(err, crate::error::ParseError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_parse_file_missing_file_is_io_error() {
+        let parser = Parser::new();
+        let mut g = graph();
+        let err = parser
+            .parse_file(std::path::Path::new("does_not_exist.py"), &mut g)
+            .unwrap_err();
+        assert!(matches!(err, crate::error::ParseError::IoError { .. }));
+    }
+
+    #[test]
+    fn test_parse_file_too_large() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.py");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "def x():\n    pass").unwrap();
+
+        let cfg = ParserConfig {
+            max_file_size: 4, // smaller than the file
+            ..ParserConfig::default()
+        };
+        let parser = Parser::with_config(cfg);
+        let mut g = graph();
+        let err = parser.parse_file(&path, &mut g).unwrap_err();
+        assert!(matches!(err, crate::error::ParseError::FileTooLarge { .. }));
+    }
+
+    #[test]
+    fn test_parse_file_success_reads_and_parses() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.py");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "def hello():\n    return 1\n").unwrap();
+
+        let parser = Parser::new();
+        let mut g = graph();
+        let info = parser.parse_file(&path, &mut g).unwrap();
+        assert!(info.functions.contains(&"hello".to_string()));
+    }
+
+    // --- parse_directory -------------------------------------------------
+
+    #[test]
+    fn test_parse_directory_parses_py_and_skips_excluded_dirs() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        // a valid python file at the root
+        let mut a = std::fs::File::create(dir.path().join("a.py")).unwrap();
+        write!(a, "def one():\n    pass\n").unwrap();
+        // a non-python file that must be ignored
+        std::fs::File::create(dir.path().join("readme.txt")).unwrap();
+        // a python file inside an excluded directory
+        let excluded = dir.path().join("__pycache__");
+        std::fs::create_dir(&excluded).unwrap();
+        let mut b = std::fs::File::create(excluded.join("b.py")).unwrap();
+        write!(b, "def two():\n    pass\n").unwrap();
+
+        let parser = Parser::new();
+        let mut g = graph();
+        let project = parser.parse_directory(dir.path(), &mut g).unwrap();
+
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.total_functions, 1);
+        assert!(project.failed_files.is_empty());
+        assert_eq!(project.success_rate(), 100.0);
+    }
+
+    #[test]
+    fn test_parse_directory_records_syntax_failures() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = std::fs::File::create(dir.path().join("broken.py")).unwrap();
+        // unterminated construct that the extractor rejects
+        writeln!(bad, "def (:").unwrap();
+
+        let parser = Parser::new();
+        let mut g = graph();
+        let project = parser.parse_directory(dir.path(), &mut g).unwrap();
+        // either parsed (tree-sitter is lenient) or recorded as a failure -
+        // in both cases the directory walk itself must succeed and account
+        // for exactly one candidate file
+        assert_eq!(project.files.len() + project.failed_files.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_directory_parallel_config() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            let mut f = std::fs::File::create(dir.path().join(format!("f{i}.py"))).unwrap();
+            write!(f, "def fn{i}():\n    pass\n").unwrap();
+        }
+
+        let cfg = ParserConfig {
+            parallel: true,
+            num_threads: Some(2),
+            ..ParserConfig::default()
+        };
+        let parser = Parser::with_config(cfg);
+        let mut g = graph();
+        let project = parser.parse_directory(dir.path(), &mut g).unwrap();
+        assert_eq!(project.files.len(), 3);
+        assert_eq!(project.total_functions, 3);
+    }
 }
