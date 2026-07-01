@@ -610,4 +610,65 @@ mod tests {
         let err = migrate_if_needed(db_path).unwrap_err();
         assert!(matches!(err, MemoryError::InvalidPath(_)));
     }
+
+    #[test]
+    fn test_v2_migration_leaves_bincode_bytes_unrecognized() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
+        // A current-shape MemoryNode serializes with bincode, but it cannot be
+        // *deserialized* by bincode: MemorySource is an internally-tagged enum
+        // (`#[serde(tag = "type")]`), which bincode does not support. So these
+        // bytes match neither the bincode nor the JSON branch of
+        // migrate_v2_to_v3 and hit the skip path, surviving untouched.
+        let bincode_bytes = bincode::serialize(&make_memory(Some(vec![0.5, 0.6]))).unwrap();
+        assert!(
+            bincode::deserialize::<MemoryNode>(&bincode_bytes).is_err(),
+            "current MemoryNode is not bincode-round-trippable"
+        );
+        {
+            let db = open_db(db_path);
+            db.put(DB_VERSION_KEY, 2u32.to_le_bytes()).unwrap();
+            db.put(b"mem:binc", &bincode_bytes).unwrap();
+            db.flush().unwrap();
+        }
+
+        migrate_if_needed(db_path).unwrap();
+
+        let db = DB::open_default(db_path).unwrap();
+        assert_eq!(read_version(&db), Some(CURRENT_VERSION));
+        // Unrecognized bytes are skipped, not converted, and remain byte-identical.
+        let raw = db.get(b"mem:binc").unwrap().unwrap();
+        assert_eq!(raw.as_slice(), bincode_bytes.as_slice());
+    }
+
+    #[test]
+    fn test_v2_migration_skips_corrupt_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
+        // Bytes that deserialize as neither bincode nor JSON.
+        let garbage: &[u8] = b"not-valid-anything";
+        {
+            let db = open_db(db_path);
+            db.put(DB_VERSION_KEY, 2u32.to_le_bytes()).unwrap();
+            db.put(b"mem:corrupt", garbage).unwrap();
+            // A valid neighbour to prove migration proceeds past the skip.
+            let json = serde_json::to_vec(&make_memory(Some(vec![0.9]))).unwrap();
+            db.put(b"mem:ok", json).unwrap();
+            db.flush().unwrap();
+        }
+
+        // The corrupt entry hits the both-formats-fail skip branch; migration
+        // still completes and updates the version rather than erroring out.
+        migrate_if_needed(db_path).unwrap();
+
+        let db = DB::open_default(db_path).unwrap();
+        assert_eq!(read_version(&db), Some(CURRENT_VERSION));
+        // The corrupt entry is left untouched (never re-serialized).
+        let corrupt = db.get(b"mem:corrupt").unwrap().unwrap();
+        assert_eq!(corrupt.as_slice(), garbage);
+        // The valid neighbour migrates normally.
+        assert!(read_memory(&db, b"mem:ok").embedding.is_none());
+    }
 }
