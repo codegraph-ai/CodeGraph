@@ -71,7 +71,8 @@ pub fn ir_to_graph(
             .with("line_end", func.line_end as i64)
             .with("is_async", func.is_async)
             .with("is_static", func.is_static)
-            .with("is_abstract", func.is_abstract);
+            .with("is_abstract", func.is_abstract)
+            .with("is_test", func.is_test);
 
         // Add complexity metrics if available
         if let Some(ref complexity) = func.complexity {

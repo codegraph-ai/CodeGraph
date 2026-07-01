@@ -4046,6 +4046,10 @@ impl McpServer {
                 let mut all_tests = Vec::new();
                 let mut untested_functions = Vec::new();
                 let mut total_direct = 0usize;
+                // Callers of signature-changed functions — the ones that can
+                // actually break. Body-only changes don't break callers, so
+                // they shouldn't drive the risk level or blast radius.
+                let mut breaking_callers = 0usize;
                 let mut all_affected_files = std::collections::HashSet::new();
                 let mut func_details = Vec::new();
 
@@ -4104,12 +4108,25 @@ impl McpServer {
                                 if let Ok(caller) = graph.get_node(caller_id) {
                                     let cname = crate::domain::node_props::name(caller);
                                     let cfile = caller.properties.get_string("path").unwrap_or("");
-                                    let is_test = cname.to_lowercase().starts_with("test_")
+                                    // Prefer the structural is_test marker recorded at index time
+                                    // (#[test]/#[cfg(test)], @Test, …); fall back to name/path
+                                    // heuristics only for languages that don't populate it. The
+                                    // heuristics alone miss idiomatic Rust tests with descriptive
+                                    // names inside `#[cfg(test)] mod tests`.
+                                    let is_test = crate::domain::node_props::is_test(caller)
+                                        || cname.to_lowercase().starts_with("test_")
                                         || cname.to_lowercase().contains("_test")
                                         || cfile.contains("/tests/")
                                         || cfile.contains("/test_");
+                                    // Callers under examples/ (and doctests) exercise the
+                                    // function at runtime — count them as coverage, not as
+                                    // breakable production callers. This is what covers code
+                                    // driven only by eval/example harnesses.
+                                    let is_exercising = !is_test
+                                        && (cfile.contains("/examples/")
+                                            || cfile.contains("/benches/"));
 
-                                    if is_test {
+                                    if is_test || is_exercising {
                                         has_test_caller = true;
                                         all_tests.push(serde_json::json!({
                                             "test": cname, "file": cfile, "covers": func_name,
@@ -4128,11 +4145,18 @@ impl McpServer {
                             }
                         }
                         total_direct += caller_count as usize;
+                        if change_type == "signature_changed" {
+                            breaking_callers += caller_count as usize;
+                        }
 
                         // #87: Test gap — function has no test callers.
                         // Skip functions that ARE tests (they don't need
                         // their own coverage) and trivial getters/setters.
-                        let fn_is_test = func_name.to_lowercase().starts_with("test_")
+                        let fn_is_test = graph
+                            .get_node(*node_id)
+                            .ok()
+                            .is_some_and(|n| crate::domain::node_props::is_test(n))
+                            || func_name.to_lowercase().starts_with("test_")
                             || func_name.to_lowercase().contains("_test")
                             || changed_rel[idx].contains("/tests/")
                             || changed_rel[idx].contains("_test.");
@@ -4282,10 +4306,29 @@ impl McpServer {
 
                 drop(graph);
 
-                // Risk level
-                let risk_level = if total_direct > 20 || untested_functions.len() > 5 {
+                // Functions actually touched by this PR (denominator for ratios).
+                let total_functions: u64 = file_impacts
+                    .iter()
+                    .map(|f| f["functions_changed"].as_u64().unwrap_or(0))
+                    .sum();
+
+                // Risk is driven by what can actually break — callers of
+                // signature-changed functions — and by the share of touched
+                // functions left untested, NOT by the raw caller count (which
+                // body-only changes inflate, e.g. a widely-called helper whose
+                // body changed but signature didn't).
+                let untested_ratio = if total_functions > 0 {
+                    untested_functions.len() as f64 / total_functions as f64
+                } else {
+                    0.0
+                };
+                let risk_level = if breaking_callers > 25
+                    || (untested_functions.len() > 5 && untested_ratio > 0.5)
+                {
                     "high"
-                } else if total_direct > 5 || untested_functions.len() > 2 {
+                } else if breaking_callers > 8
+                    || (untested_functions.len() > 2 && untested_ratio > 0.25)
+                {
                     "medium"
                 } else {
                     "low"
@@ -4305,11 +4348,6 @@ impl McpServer {
                     commit_prefix, primary_module
                 );
 
-                let total_functions: u64 = file_impacts
-                    .iter()
-                    .map(|f| f["functions_changed"].as_u64().unwrap_or(0))
-                    .sum();
-
                 let mut result = serde_json::json!({
                     "base_branch": base,
                     "changed_files": changed_rel.len(),
@@ -4317,6 +4355,7 @@ impl McpServer {
                     "lines_removed": lines_removed,
                     "functions_touched": total_functions,
                     "direct_callers": total_direct,
+                    "breaking_callers": breaking_callers,
                     "related_tests": unique_tests.len(),
                     "untested_functions": untested_functions.len(),
                     "affected_modules": affected_modules,
@@ -4324,9 +4363,9 @@ impl McpServer {
                     "commit_hint": commit_hint,
                     "files": file_impacts,
                     "message": format!(
-                        "PR changes {} files (+{}/-{}, {} functions). {} direct callers, {} tests, {} untested. Risk: {}.",
+                        "PR changes {} files (+{}/-{}, {} functions). {} direct callers ({} breaking), {} tests, {} untested. Risk: {}.",
                         changed_rel.len(), lines_added, lines_removed, total_functions,
-                        total_direct, unique_tests.len(), untested_functions.len(), risk_level,
+                        total_direct, breaking_callers, unique_tests.len(), untested_functions.len(), risk_level,
                     ),
                 });
 
@@ -4385,9 +4424,10 @@ impl McpServer {
 
                     if total_direct > 0 {
                         md.push_str(&format!(
-                            "### Blast radius\n{} direct caller{} affected",
+                            "### Blast radius\n{} direct caller{} affected ({} breaking)",
                             total_direct,
                             if total_direct == 1 { "" } else { "s" },
+                            breaking_callers,
                         ));
                         if !affected_modules.is_empty() {
                             let mods: Vec<String> = affected_modules

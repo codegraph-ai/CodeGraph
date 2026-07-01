@@ -109,3 +109,11 @@ pub(crate) fn is_public(node: &Node) -> bool {
         .or_else(|| node.properties.get_bool("exported"))
         .unwrap_or_else(|| matches!(visibility(node), "public" | "pub"))
 }
+
+/// Whether the node is a test function, as recorded at index time from the
+/// language's test marker (`#[test]`/`#[cfg(test)]`, `@Test`, etc.). This is
+/// the structural signal; callers should prefer it over name heuristics, which
+/// miss idiomatic test names (Rust `#[cfg(test)] mod tests { fn descriptive() }`).
+pub(crate) fn is_test(node: &Node) -> bool {
+    node.properties.get_bool("is_test").unwrap_or(false)
+}
