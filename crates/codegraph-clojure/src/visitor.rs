@@ -862,4 +862,117 @@ mod tests {
         let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
     }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // A single body form whose text far exceeds the cap.
+        let big = "a".repeat(BODY_PREFIX_MAX_CHARS + 200);
+        let source = format!("(defn f [] (str \"{big}\"))");
+        let visitor = parse_and_visit(source.as_bytes());
+        let bp = visitor.functions[0].body_prefix.as_deref().unwrap();
+        assert_eq!(bp.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_leading_blank_lines_offset_line_start() {
+        let source = b"\n\n(defn f [] 1)";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].line_start, 3);
+    }
+
+    #[test]
+    fn test_and_raises_complexity() {
+        // `and` is counted as a logical operator, not a branch.
+        let source = b"(defn f [x] (and x true))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_or_raises_complexity() {
+        let source = b"(defn f [x] (or x false))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_try_catch_raises_complexity() {
+        // try and catch each add an exception handler.
+        let source = b"(defn f [] (try (foo) (catch Exception e nil)))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_call_metadata_defaults() {
+        let source = b"(defn f [x] (helper x))";
+        let visitor = parse_and_visit(source);
+        let call = visitor.calls.iter().find(|c| c.callee == "helper").unwrap();
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+        assert_eq!(call.call_site_line, 1);
+    }
+
+    #[test]
+    fn test_nested_call_attributed_to_enclosing_function() {
+        // A call nested inside an `if` is still attributed to the enclosing defn.
+        let source = b"(defn f [x] (if x (helper x) nil))";
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "f" && c.callee == "helper"));
+    }
+
+    #[test]
+    fn test_let_excluded_from_calls() {
+        let source = b"(defn f [] (let [x 1] (println x)))";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.iter().all(|c| c.callee != "let"));
+        assert!(visitor.calls.iter().any(|c| c.callee == "println"));
+    }
+
+    #[test]
+    fn test_variadic_rest_param_not_flagged_variadic() {
+        // The `&` marker is dropped and `rest` is captured, but extract_params_from_vec
+        // uses Parameter::new so it is never flagged is_variadic.
+        let source = b"(defn f [x & rest] (count rest))";
+        let visitor = parse_and_visit(source);
+        let rest = visitor.functions[0]
+            .parameters
+            .iter()
+            .find(|p| p.name == "rest")
+            .unwrap();
+        assert!(!rest.is_variadic);
+    }
+
+    #[test]
+    fn test_second_function_line_start_follows_first() {
+        let source = b"(defn a [] 1)\n(defn b [] 2)";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].line_end, 1);
+        assert_eq!(visitor.functions[1].line_start, 2);
+    }
+
+    #[test]
+    fn test_multiline_function_line_end_spans_body() {
+        let source = b"(defn f [x]\n  (println x)\n  (inc x))";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 3);
+    }
+
+    #[test]
+    fn test_deftype_fields_not_extracted() {
+        // deftype/defrecord map to a ClassEntity but their field vector is left empty.
+        let source = b"(deftype Point [x y])";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.classes[0].fields.is_empty());
+    }
 }
