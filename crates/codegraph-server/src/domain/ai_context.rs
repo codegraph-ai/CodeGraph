@@ -1723,4 +1723,179 @@ mod tests {
         assert!(!out.contains("stmt_30();"));
         assert!(out.contains("// ... (10 lines omitted)"));
     }
+
+    // ============================================================
+    // get_file_imports / get_dependencies (Imports-edge collectors)
+    // ============================================================
+
+    #[test]
+    fn file_imports_collects_named_import_targets_and_dedups() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Two source nodes sharing the same file path.
+        let a = add_fn(&mut g, "a", "/src/app.rs", 1, 5, "");
+        let b = add_fn(&mut g, "b", "/src/app.rs", 6, 10, "");
+        // Two distinct import targets, one shared between both sources.
+        let dep1 = add_node(&mut g, NodeType::Module, &[("name", str_prop("serde"))]);
+        let dep2 = add_node(&mut g, NodeType::Module, &[("name", str_prop("tokio"))]);
+        edge(&mut g, a, dep1, EdgeType::Imports);
+        edge(&mut g, a, dep2, EdgeType::Imports);
+        // b re-imports serde — must be de-duplicated, not double counted.
+        edge(&mut g, b, dep1, EdgeType::Imports);
+
+        let mut imports = get_file_imports(&g, "/src/app.rs");
+        imports.sort();
+        assert_eq!(imports, vec!["serde".to_string(), "tokio".to_string()]);
+    }
+
+    #[test]
+    fn file_imports_ignores_non_import_edges_and_empty_names() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_fn(&mut g, "a", "/src/app.rs", 1, 5, "");
+        // A Calls edge (not Imports) must be skipped.
+        let callee = add_node(&mut g, NodeType::Function, &[("name", str_prop("helper"))]);
+        edge(&mut g, a, callee, EdgeType::Calls);
+        // An Imports edge to a node with an empty name must be skipped.
+        let anon = add_node(&mut g, NodeType::Module, &[("name", str_prop(""))]);
+        edge(&mut g, a, anon, EdgeType::Imports);
+
+        assert!(get_file_imports(&g, "/src/app.rs").is_empty());
+    }
+
+    #[test]
+    fn file_imports_empty_for_unknown_path() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        assert!(get_file_imports(&g, "/nope.rs").is_empty());
+    }
+
+    #[test]
+    fn dependencies_returns_import_targets_only() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_fn(&mut g, "f", "/src/app.rs", 1, 5, "");
+        let dep = add_node(&mut g, NodeType::Module, &[("name", str_prop("anyhow"))]);
+        let called = add_node(&mut g, NodeType::Function, &[("name", str_prop("g"))]);
+        edge(&mut g, f, dep, EdgeType::Imports);
+        edge(&mut g, f, called, EdgeType::Calls);
+
+        let deps = get_dependencies(&g, f);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "anyhow");
+        assert_eq!(deps[0].dep_type, "import");
+        assert!(deps[0].code.is_none());
+    }
+
+    #[test]
+    fn dependencies_skips_empty_named_imports() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_fn(&mut g, "f", "/src/app.rs", 1, 5, "");
+        let anon = add_node(&mut g, NodeType::Module, &[("name", str_prop(""))]);
+        edge(&mut g, f, anon, EdgeType::Imports);
+        assert!(get_dependencies(&g, f).is_empty());
+    }
+
+    // ============================================================
+    // get_sibling_functions
+    // ============================================================
+
+    #[test]
+    fn sibling_functions_excludes_self_and_sorts_by_line() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "target", "/src/app.rs", 20, 30, "");
+        add_fn(&mut g, "later", "/src/app.rs", 40, 50, "");
+        add_fn(&mut g, "earlier", "/src/app.rs", 1, 10, "");
+
+        let sibs = get_sibling_functions(&g, target, "/src/app.rs");
+        let names: Vec<_> = sibs.iter().map(|s| s.name.as_str()).collect();
+        // target itself excluded; remaining sorted ascending by line_start.
+        assert_eq!(names, vec!["earlier", "later"]);
+        assert_eq!(sibs[0].line_start, 1);
+    }
+
+    #[test]
+    fn sibling_functions_skips_non_functions_and_empty_names() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "target", "/src/app.rs", 20, 30, "");
+        // A Class node at the same path — not a Function, must be skipped.
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[
+                ("name", str_prop("Widget")),
+                ("path", str_prop("/src/app.rs")),
+            ],
+        );
+        // A Function with an empty name — skipped.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("")), ("path", str_prop("/src/app.rs"))],
+        );
+        assert!(get_sibling_functions(&g, target, "/src/app.rs").is_empty());
+    }
+
+    #[test]
+    fn sibling_functions_signature_falls_back_to_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "target", "/src/app.rs", 20, 30, "");
+        // Sibling with no explicit signature property → signature == name.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("plain")),
+                ("path", str_prop("/src/app.rs")),
+                ("line_start", int_prop(5)),
+            ],
+        );
+        let sibs = get_sibling_functions(&g, target, "/src/app.rs");
+        assert_eq!(sibs.len(), 1);
+        assert_eq!(sibs[0].signature, "plain");
+    }
+
+    // ============================================================
+    // get_debug_hints — error-path detection over Calls edges
+    // ============================================================
+
+    #[test]
+    fn debug_hints_collects_error_named_callees_only() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_fn(&mut g, "f", "/src/app.rs", 1, 20, "");
+        // Callees whose names match the error/panic/fail patterns.
+        let e1 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("handle_error"))],
+        );
+        let e2 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("do_panic"))],
+        );
+        // A normal callee — must NOT appear in error_paths.
+        let ok = add_node(&mut g, NodeType::Function, &[("name", str_prop("compute"))]);
+        // A References edge (not Calls) to an error name — excluded (Calls-only).
+        let ref_err = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("throw_it"))],
+        );
+        edge(&mut g, f, e1, EdgeType::Calls);
+        edge(&mut g, f, e2, EdgeType::Calls);
+        edge(&mut g, f, ok, EdgeType::Calls);
+        edge(&mut g, f, ref_err, EdgeType::References);
+
+        let hints = get_debug_hints(&g, f).expect("hints");
+        let mut paths = hints.error_paths.clone();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["do_panic".to_string(), "handle_error".to_string()]
+        );
+    }
+
+    #[test]
+    fn debug_hints_none_for_unknown_node() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        // No node with this id exists → get_node fails → None.
+        assert!(get_debug_hints(&g, 999_999).is_none());
+    }
 }

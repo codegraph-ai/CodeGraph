@@ -103,11 +103,7 @@ mod tests {
     #[test]
     fn test_noop_handle_command_returns_none() {
         let ctx = make_ctx();
-        let result = NoopProCommandProvider.handle_command(
-            "codegraph.anything",
-            Value::Null,
-            ctx,
-        );
+        let result = NoopProCommandProvider.handle_command("codegraph.anything", Value::Null, ctx);
         assert!(result.is_none());
     }
 
