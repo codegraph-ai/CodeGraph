@@ -97,6 +97,34 @@ mod boundary_tests {
     fn zero_max_bytes() {
         assert_eq!(truncate_at_char_boundary("héllo", 0), "");
     }
+
+    #[test]
+    fn body_prefix_short_input_passes_through() {
+        // The public wrapper returns short input unchanged (below the cap).
+        assert_eq!(truncate_body_prefix("FROM python:3.11"), "FROM python:3.11");
+    }
+
+    #[test]
+    fn body_prefix_truncates_at_max_chars_on_boundary() {
+        // Exercises the wrapper's fixed BODY_PREFIX_MAX_CHARS (1024) cap.
+        // Pure ASCII, so the cut lands exactly on the byte limit.
+        let s = "x".repeat(BODY_PREFIX_MAX_CHARS + 50);
+        let out = truncate_body_prefix(&s);
+        assert_eq!(out.len(), BODY_PREFIX_MAX_CHARS);
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn body_prefix_walks_back_off_multibyte_at_cap() {
+        // A 3-byte '中' straddling the 1024-byte cap forces the wrapper to
+        // walk back to the boundary before it (1023), never panicking.
+        let mut s = "x".repeat(BODY_PREFIX_MAX_CHARS - 1);
+        s.push('中'); // occupies bytes 1023..1026
+        s.push_str("tail");
+        let out = truncate_body_prefix(&s);
+        assert_eq!(out.len(), BODY_PREFIX_MAX_CHARS - 1);
+        assert!(out.is_char_boundary(out.len()));
+    }
 }
 
 /// Represents a function parameter
