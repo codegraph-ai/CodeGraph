@@ -3076,7 +3076,7 @@ impl McpServer {
                     })
                     .unwrap_or_default();
 
-                let memory = self.build_memory_node(kind, title, content, &tags, &args)?;
+                let memory = Self::build_memory_node(kind, title, content, &tags, &args)?;
 
                 let id = self
                     .backend
@@ -4744,7 +4744,6 @@ impl McpServer {
 
     /// Build a memory node from parameters
     fn build_memory_node(
-        &self,
         kind: &str,
         title: &str,
         content: &str,
@@ -5229,5 +5228,199 @@ mod quarantine_tests {
             &MemoryKindFilter::KnownIssue,
             &issue
         ));
+        // Convention, ArchitecturalDecision, and ProjectContext round out the
+        // variant pairs the earlier assertions skipped.
+        let conv = MemoryKind::Convention {
+            name: "n".into(),
+            description: "d".into(),
+            pattern: None,
+            anti_pattern: None,
+        };
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::Convention,
+            &conv
+        ));
+        assert!(!super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::ProjectContext,
+            &conv
+        ));
+        let arch = MemoryKind::ArchitecturalDecision {
+            decision: "de".into(),
+            rationale: "r".into(),
+            alternatives_considered: None,
+            stakeholders: vec![],
+        };
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::ArchitecturalDecision,
+            &arch
+        ));
+        let proj = MemoryKind::ProjectContext {
+            topic: "t".into(),
+            description: "d".into(),
+            tags: vec![],
+        };
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::ProjectContext,
+            &proj
+        ));
+    }
+
+    #[test]
+    fn build_memory_node_debug_context_reads_problem_and_solution() {
+        use crate::memory::MemoryKind;
+        let args = serde_json::json!({
+            "problem": "segfault on load",
+            "solution": "null-check the handle",
+        });
+        let node = super::McpServer::build_memory_node(
+            "debug_context",
+            "Crash on load",
+            "long form content",
+            &["crash".to_string(), "loader".to_string()],
+            &args,
+        )
+        .expect("debug_context should build");
+        assert_eq!(node.title, "Crash on load");
+        assert_eq!(node.content, "long form content");
+        assert_eq!(node.tags, vec!["crash".to_string(), "loader".to_string()]);
+        match node.kind {
+            MemoryKind::DebugContext {
+                problem_description,
+                solution,
+                ..
+            } => {
+                assert_eq!(problem_description, "segfault on load");
+                assert_eq!(solution, "null-check the handle");
+            }
+            other => panic!("expected DebugContext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_memory_node_debug_context_defaults_when_fields_missing() {
+        use crate::memory::MemoryKind;
+        // No problem/solution keys → the documented "Unknown ..." fallbacks.
+        let node = super::McpServer::build_memory_node(
+            "debug_context",
+            "t",
+            "c",
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect("build");
+        match node.kind {
+            MemoryKind::DebugContext {
+                problem_description,
+                solution,
+                ..
+            } => {
+                assert_eq!(problem_description, "Unknown problem");
+                assert_eq!(solution, "Unknown solution");
+            }
+            other => panic!("expected DebugContext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_memory_node_architectural_decision_falls_back_to_title_and_content() {
+        use crate::memory::MemoryKind;
+        // decision/rationale absent → fall back to title/content, not empty.
+        let node = super::McpServer::build_memory_node(
+            "architectural_decision",
+            "Use RocksDB",
+            "It is embedded and fast",
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect("build");
+        match node.kind {
+            MemoryKind::ArchitecturalDecision {
+                decision,
+                rationale,
+                ..
+            } => {
+                assert_eq!(decision, "Use RocksDB");
+                assert_eq!(rationale, "It is embedded and fast");
+            }
+            other => panic!("expected ArchitecturalDecision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_memory_node_known_issue_maps_severity_strings() {
+        use crate::memory::{IssueSeverity, MemoryKind};
+        let sev = |s: &str| {
+            let node = super::McpServer::build_memory_node(
+                "known_issue",
+                "t",
+                "c",
+                &[],
+                &serde_json::json!({ "description": "d", "severity": s }),
+            )
+            .expect("build");
+            match node.kind {
+                MemoryKind::KnownIssue { severity, .. } => severity,
+                other => panic!("expected KnownIssue, got {other:?}"),
+            }
+        };
+        assert_eq!(sev("critical"), IssueSeverity::Critical);
+        assert_eq!(sev("high"), IssueSeverity::High);
+        assert_eq!(sev("low"), IssueSeverity::Low);
+        assert_eq!(sev("medium"), IssueSeverity::Medium);
+        // Unrecognized and absent severity both default to Medium.
+        assert_eq!(sev("bogus"), IssueSeverity::Medium);
+    }
+
+    #[test]
+    fn build_memory_node_convention_and_project_context() {
+        use crate::memory::MemoryKind;
+        let conv = super::McpServer::build_memory_node(
+            "convention",
+            "TitleName",
+            "TitleDesc",
+            &[],
+            &serde_json::json!({ "name": "snake_case", "description": "use snake_case" }),
+        )
+        .expect("build");
+        match conv.kind {
+            MemoryKind::Convention {
+                name, description, ..
+            } => {
+                assert_eq!(name, "snake_case");
+                assert_eq!(description, "use snake_case");
+            }
+            other => panic!("expected Convention, got {other:?}"),
+        }
+        // project_context with missing topic/description falls back to title/content.
+        let proj = super::McpServer::build_memory_node(
+            "project_context",
+            "Overview",
+            "System overview",
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect("build");
+        match proj.kind {
+            MemoryKind::ProjectContext {
+                topic, description, ..
+            } => {
+                assert_eq!(topic, "Overview");
+                assert_eq!(description, "System overview");
+            }
+            other => panic!("expected ProjectContext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_memory_node_unknown_kind_errors() {
+        let err = super::McpServer::build_memory_node(
+            "not_a_kind",
+            "t",
+            "c",
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect_err("unknown kind must error");
+        assert!(err.contains("Unknown memory kind"), "got: {err}");
     }
 }
