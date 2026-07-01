@@ -70,6 +70,62 @@ pub fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        extract(source, Path::new(path), &ParserConfig::default())
+            .expect("extract should succeed on valid Swift")
+    }
+
+    #[test]
+    fn test_module_metadata_from_file_stem() {
+        let ir = extract_ok("", "Sources/App/Person.swift");
+        let module = ir.module.expect("module metadata should be set");
+        assert_eq!(module.name, "Person");
+        assert_eq!(module.language, "swift");
+        assert_eq!(module.path, "Sources/App/Person.swift");
+        assert_eq!(module.doc_comment, None);
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        // ".." has no file stem, so the name falls back to "unknown".
+        let ir = extract_ok("", "..");
+        assert_eq!(ir.module.expect("module set").name, "unknown");
+    }
+
+    #[test]
+    fn test_empty_source_yields_no_entities() {
+        let ir = extract_ok("", "Empty.swift");
+        assert_eq!(ir.module.expect("module set").line_count, 0);
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_line_count_matches_source_lines() {
+        let source = "\n\nfunc noop() {}\n\n";
+        let ir = extract_ok(source, "Blank.swift");
+        assert_eq!(
+            ir.module.expect("module set").line_count,
+            source.lines().count()
+        );
+    }
+
+    #[test]
+    fn test_syntax_error_returns_err() {
+        // A malformed class body makes root_node.has_error() true, hitting
+        // the SyntaxError branch that every valid-source test skips.
+        let result = extract(
+            "class Broken {",
+            Path::new("Broken.swift"),
+            &ParserConfig::default(),
+        );
+        assert!(matches!(result, Err(ParserError::SyntaxError(..))));
+    }
+
     #[test]
     fn test_extract_simple_class() {
         let source = r#"
