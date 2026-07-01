@@ -643,6 +643,53 @@ mod tests {
     }
 
     #[test]
+    fn glob_match_double_star_recurses_into_bare_filename() {
+        // "**/*.rs" splits on "**" into ["", "/*.rs"]; the suffix "*.rs"
+        // still contains '*', so glob_match recurses on the filename. When the
+        // path has no '/', it recurses on the whole path (the else branch of
+        // the rfind('/') lookup) rather than a trailing segment.
+        assert!(glob_match("**/*.rs", "main.rs"));
+        assert!(!glob_match("**/*.py", "main.rs"));
+    }
+
+    #[test]
+    fn glob_match_double_star_with_literal_suffix() {
+        // A "**" pattern whose suffix has no wildcard takes the simple
+        // ends_with path (not the recursive branch): prefix must match the
+        // start, suffix must match the end.
+        assert!(glob_match("src/**/util.rs", "src/a/b/util.rs"));
+        assert!(!glob_match("src/**/util.rs", "src/a/b/other.rs"));
+        // Prefix mismatch fails before the suffix is even consulted.
+        assert!(!glob_match("src/**/util.rs", "lib/a/util.rs"));
+    }
+
+    #[test]
+    fn glob_match_bare_double_star_matches_everything() {
+        // "**" -> ["", ""]: empty prefix and empty suffix, so every path
+        // passes through to the `return true` at the end of the ** block.
+        assert!(glob_match("**", "any/deeply/nested/path.rs"));
+        assert!(glob_match("**", "flat.rs"));
+    }
+
+    #[test]
+    fn glob_match_multiple_double_stars_fall_through_to_wildcards() {
+        // Three-way split on "**" (["", "a", ""]) has len != 2, so the **
+        // fast path is skipped and the generic '*' matcher runs instead,
+        // treating "a" as a required middle literal.
+        assert!(glob_match("**a**", "xax"));
+        assert!(!glob_match("**a**", "xyz"));
+    }
+
+    #[test]
+    fn glob_match_middle_wildcard_segment() {
+        // A three-part '*' split ("src", "util", "rs") exercises the middle
+        // branch: "util" must appear in order between the anchored ends, and a
+        // missing middle literal returns false.
+        assert!(glob_match("src*util*rs", "src/x/util/y.rs"));
+        assert!(!glob_match("src*zzz*rs", "src/x/util/y.rs"));
+    }
+
+    #[test]
     fn regex_match_anchors() {
         assert!(regex_match("^process", "processData"));
         assert!(!regex_match("^Data", "processData"));
