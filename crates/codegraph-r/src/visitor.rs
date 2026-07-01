@@ -165,8 +165,15 @@ impl<'a> RVisitor<'a> {
                 if let Some(args) = node.child_by_field_name("arguments") {
                     let mut cursor = args.walk();
                     for arg in args.children(&mut cursor) {
-                        if arg.kind() == "identifier" || arg.kind() == "string" {
-                            let module = self.node_text(arg);
+                        // The grammar wraps each call argument in an `argument`
+                        // node; unwrap it to reach the identifier/string value.
+                        let value = if arg.kind() == "argument" {
+                            arg.named_child(0).unwrap_or(arg)
+                        } else {
+                            arg
+                        };
+                        if value.kind() == "identifier" || value.kind() == "string" {
+                            let module = self.node_text(value);
                             let module = module.trim_matches(|c| c == '"' || c == '\'').to_string();
                             if !module.is_empty() && module != "(" && module != ")" && module != ","
                             {
