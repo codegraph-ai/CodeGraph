@@ -384,4 +384,234 @@ mod tests {
         let visitor = parse_and_visit(source);
         assert_eq!(visitor.functions.len(), 0);
     }
+
+    // -------------------------------------------------------------------------
+    // Empty / trivial sources
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let visitor = parse_and_visit(b"(* just a comment *)");
+        assert!(visitor.functions.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Function metadata defaults
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = b"let greet name = name";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert_eq!(f.visibility, "public");
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert_eq!(f.return_type, None);
+        assert_eq!(f.parent_class, None);
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_function_line_bounds_one_based() {
+        let source = b"let a = 1\nlet greet name = name";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        // second physical line
+        assert_eq!(visitor.functions[0].line_start, 2);
+        assert_eq!(visitor.functions[0].line_end, 2);
+    }
+
+    #[test]
+    fn test_function_signature_first_line_only() {
+        let source = b"let greet name =\n  let x = name in\n  x";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        // signature is derived from the let_binding node, which excludes the
+        // leading `let` keyword (that belongs to the parent value_definition).
+        assert_eq!(visitor.functions[0].signature, "greet name =");
+    }
+
+    // -------------------------------------------------------------------------
+    // Parameters
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_single_parameter() {
+        let source = b"let greet name = name";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].parameters.len(), 1);
+        assert_eq!(visitor.functions[0].parameters[0].name, "name");
+    }
+
+    #[test]
+    fn test_underscore_parameter_excluded_skips_plain_body() {
+        // `let f _ = 42`: the only param is `_` (dropped), body is not a
+        // fun/function expression, so nothing is extracted.
+        let source = b"let f _ = 42";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // fun / function bodies with no explicit parameters
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_fun_expression_body_extracted() {
+        let source = b"let add = fun x y -> x + y";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "add");
+        // the params live inside the fun_expression, not as `parameter` children
+        assert!(visitor.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn test_function_expression_body_extracted() {
+        let source = b"let describe = function 0 -> \"zero\" | _ -> \"other\"";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "describe");
+    }
+
+    // -------------------------------------------------------------------------
+    // open / imports
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_open_import_defaults() {
+        let source = b"open Printf";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.importer, "main");
+        assert_eq!(imp.imported, "Printf");
+        assert!(imp.is_wildcard);
+        assert!(imp.symbols.is_empty());
+        assert_eq!(imp.alias, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // body_prefix
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_body_prefix_present() {
+        let source = b"let greet name = name";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[0].body_prefix.is_some());
+        assert!(visitor.functions[0]
+            .body_prefix
+            .as_ref()
+            .unwrap()
+            .contains("name"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Complexity
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_baseline_complexity_is_one() {
+        let source = b"let greet name = name";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_if_raises_complexity() {
+        let source = b"let f x = if x > 0 then 1 else 0";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_match_raises_complexity() {
+        let source = b"let f x = match x with 0 -> \"a\" | _ -> \"b\"";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_for_loop_raises_complexity() {
+        let source = b"let f n = for i = 0 to n do ignore i done";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_while_loop_raises_complexity() {
+        let source = b"let f () = while true do () done";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Call tracking
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_call_qualifier_stripped() {
+        let source = b"let greet name = Printf.printf \"Hi %s\" name";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.calls.iter().any(|c| c.callee == "printf"));
+        assert!(visitor.calls.iter().all(|c| c.caller == "greet"));
+    }
+
+    #[test]
+    fn test_top_level_call_not_tracked() {
+        // an application outside any function body yields no CallRelation
+        let source = b"let () = print_string \"hi\"";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Multiple definitions
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_multiple_functions() {
+        let source = b"let a x = x\nlet b y = y\nlet c z = z";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 3);
+        assert_eq!(visitor.functions[0].name, "a");
+        assert_eq!(visitor.functions[1].name, "b");
+        assert_eq!(visitor.functions[2].name, "c");
+    }
+
+    // -------------------------------------------------------------------------
+    // module_definition recursion
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_function_inside_module_extracted() {
+        let source = b"module M = struct\n  let inner x = x\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "inner");
+    }
 }
