@@ -275,4 +275,226 @@ write_def output.def
         let metrics = parser.metrics();
         assert_eq!(metrics.files_attempted, 0);
     }
+
+    use std::io::Write;
+
+    /// A minimal Tcl script producing exactly one function. Tcl's tree-sitter
+    /// grammar is ERROR-node sensitive: a `proc` reliably yields a function when
+    /// it stands alone, but a following `namespace`/`package` block tends to get
+    /// absorbed into a preceding construct's ERROR span, so entity kinds are
+    /// exercised in separate focused sources rather than one combined SAMPLE.
+    /// Here SAMPLE pins functions=1 / classes=0 / traits=0 / imports=0 with
+    /// entity_count=1.
+    const SAMPLE: &str = "proc greet {name} {\n    puts \"Hello $name\"\n}\n";
+
+    fn graph() -> CodeGraph {
+        CodeGraph::in_memory().expect("in-memory graph")
+    }
+
+    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).expect("create temp file");
+        f.write_all(content.as_bytes()).expect("write temp file");
+        path
+    }
+
+    #[test]
+    fn test_default_matches_new_metrics() {
+        let default = TclParser::default().metrics();
+        let new = TclParser::new().metrics();
+        assert_eq!(default.files_attempted, new.files_attempted);
+        assert_eq!(default.files_attempted, 0);
+        assert_eq!(default.total_entities, 0);
+    }
+
+    #[test]
+    fn test_with_config_and_accessor() {
+        let cfg = ParserConfig::default().with_max_file_size(4242);
+        let parser = TclParser::with_config(cfg);
+        assert_eq!(parser.config().max_file_size, 4242);
+    }
+
+    #[test]
+    fn test_parse_source_extracts_function() {
+        let parser = TclParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("s.tcl"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.functions.len(), 1, "one proc");
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.traits.len(), 0, "Tcl has no traits");
+        assert_eq!(info.imports.len(), 0);
+        assert_eq!(info.entity_count(), 1, "functions + classes + traits");
+    }
+
+    #[test]
+    fn test_parse_source_extracts_namespace_class() {
+        // A `namespace eval` block maps to a class (Tcl's OO surface).
+        let parser = TclParser::new();
+        let mut g = graph();
+        let src = "namespace eval Widget {\n}\nproc greet {} {}\n";
+        let info = parser
+            .parse_source(src, Path::new("s.tcl"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.classes.len(), 1, "one namespace");
+        assert_eq!(info.traits.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_source_extracts_package_import() {
+        // `package require` records an import.
+        let parser = TclParser::new();
+        let mut g = graph();
+        let src = "package require Tk\n";
+        let info = parser
+            .parse_source(src, Path::new("s.tcl"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.imports.len(), 1, "one package require");
+    }
+
+    #[test]
+    fn test_parse_source_records_line_count() {
+        let parser = TclParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("s.tcl"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.line_count, SAMPLE.lines().count());
+        // parse_source leaves byte_count at 0; only parse_file fills it in.
+        assert_eq!(info.byte_count, 0);
+    }
+
+    #[test]
+    fn test_parse_source_comment_only_yields_no_entities() {
+        // A `#` comment line parses with no entities.
+        let parser = TclParser::new();
+        let mut g = graph();
+        let src = "# just a comment\n";
+        let info = parser
+            .parse_source(src, Path::new("s.tcl"), &mut g)
+            .expect("comment-only source still parses");
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.traits.len(), 0);
+        assert_eq!(info.imports.len(), 0);
+        assert_eq!(info.line_count, 1);
+    }
+
+    #[test]
+    fn test_parse_source_does_not_touch_metrics() {
+        // Tcl's parse_source is metric-free; only parse_file records metrics.
+        let parser = TclParser::new();
+        let mut g = graph();
+        parser
+            .parse_source(SAMPLE, Path::new("s.tcl"), &mut g)
+            .expect("parse ok");
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.total_entities, 0);
+    }
+
+    #[test]
+    fn test_parse_file_success_updates_metrics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "sample.tcl", SAMPLE);
+        let parser = TclParser::new();
+        let mut g = graph();
+        let info = parser.parse_file(&path, &mut g).expect("parse ok");
+        assert_eq!(info.functions.len(), 1);
+        assert_eq!(info.byte_count, SAMPLE.len());
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_succeeded, 1);
+        // Tcl's parse_file counts functions + classes + imports (not entity_count).
+        assert_eq!(
+            m.total_entities,
+            info.functions.len() + info.classes.len() + info.imports.len()
+        );
+    }
+
+    #[test]
+    fn test_parse_file_missing_file_is_io_error() {
+        let parser = TclParser::new();
+        let mut g = graph();
+        let err = parser
+            .parse_file(Path::new("/no/such/sample.tcl"), &mut g)
+            .expect_err("missing file should error");
+        assert!(matches!(err, ParserError::IoError(..)));
+        // A missing-file check short-circuits before metrics are touched.
+        assert_eq!(parser.metrics().files_attempted, 0);
+    }
+
+    #[test]
+    fn test_parse_file_too_large() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "sample.tcl", SAMPLE);
+        let parser = TclParser::with_config(ParserConfig::default().with_max_file_size(4));
+        let mut g = graph();
+        let err = parser
+            .parse_file(&path, &mut g)
+            .expect_err("oversized file should error");
+        assert!(matches!(err, ParserError::FileTooLarge(..)));
+        // The size guard short-circuits before metrics are touched.
+        assert_eq!(parser.metrics().files_attempted, 0);
+    }
+
+    #[test]
+    fn test_reset_metrics_zeroes_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "sample.tcl", SAMPLE);
+        let mut parser = TclParser::new();
+        let mut g = graph();
+        parser.parse_file(&path, &mut g).expect("parse ok");
+        assert_eq!(parser.metrics().files_attempted, 1);
+        parser.reset_metrics();
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.files_succeeded, 0);
+        assert_eq!(m.total_entities, 0);
+    }
+
+    #[test]
+    fn test_metrics_accumulate_across_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.tcl", SAMPLE);
+        let b = write_file(dir.path(), "b.tcl", SAMPLE);
+        let parser = TclParser::new();
+        let mut g = graph();
+        parser.parse_file(&a, &mut g).expect("parse a");
+        parser.parse_file(&b, &mut g).expect("parse b");
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 2);
+        assert_eq!(m.files_succeeded, 2);
+    }
+
+    #[test]
+    fn test_parse_files_sequential_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.tcl", SAMPLE);
+        let b = write_file(dir.path(), "b.tcl", SAMPLE);
+        let parser = TclParser::new();
+        let mut g = graph();
+        let project = parser.parse_files(&[a, b], &mut g).expect("parse ok");
+        assert_eq!(project.files.len(), 2);
+        assert!(project.failed_files.is_empty());
+        // TclParser::parse_files hardcodes these aggregate counts to 0.
+        assert_eq!(project.total_functions, 0);
+        assert_eq!(project.total_classes, 0);
+    }
+
+    #[test]
+    fn test_parse_files_partitions_failures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = write_file(dir.path(), "good.tcl", SAMPLE);
+        let missing = dir.path().join("missing.tcl");
+        let parser = TclParser::new();
+        let mut g = graph();
+        let project = parser
+            .parse_files(&[good, missing.clone()], &mut g)
+            .expect("parse ok");
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.failed_files.len(), 1);
+        assert_eq!(project.failed_files[0].0, missing);
+    }
 }
