@@ -324,4 +324,135 @@ mod tests {
         assert!(has_codebehind, "Should have CodeBehind import edge");
         assert!(has_extends, "Should have Inherits extends edge");
     }
+
+    #[test]
+    fn test_parse_attributes_basic_and_multiple() {
+        let attrs = parse_attributes(r#"Language="C#" AutoEventWireup="true""#);
+        assert_eq!(
+            attrs,
+            vec![
+                ("Language".to_string(), "C#".to_string()),
+                ("AutoEventWireup".to_string(), "true".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_attributes_empty_input() {
+        assert!(parse_attributes("").is_empty());
+        assert!(parse_attributes("   ").is_empty());
+    }
+
+    #[test]
+    fn test_parse_attributes_single_quote_yields_empty_value() {
+        // The opening-quote skip only consumes '=', '"', and whitespace - not a
+        // single quote - so the value read stops immediately on the leading ',
+        // leaving Src empty and the remaining chars mis-parsed as a bogus key.
+        let attrs = parse_attributes(r#"Src='Controls/Header.ascx'"#);
+        assert_eq!(
+            attrs,
+            vec![
+                ("Src".to_string(), String::new()),
+                ("Controls/Header.ascx'".to_string(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_directive_codefile_aliases_to_code_behind() {
+        // CodeFile is the alternate attribute name for CodeBehind and matching is
+        // case-insensitive on the key.
+        let dir = parse_directive(r#"Page codefile="Default.aspx.cs""#).unwrap();
+        assert_eq!(dir.directive_type, "Page");
+        assert_eq!(dir.code_behind.as_deref(), Some("Default.aspx.cs"));
+        assert!(dir.inherits.is_none());
+    }
+
+    #[test]
+    fn test_parse_directive_type_only_no_attrs() {
+        let dir = parse_directive("Page").unwrap();
+        assert_eq!(dir.directive_type, "Page");
+        assert!(dir.code_behind.is_none());
+        assert!(dir.inherits.is_none());
+        assert!(dir.master_page.is_none());
+        assert!(dir.src.is_none());
+        assert!(dir.namespace.is_none());
+    }
+
+    #[test]
+    fn test_extract_directives_unterminated_is_dropped() {
+        // A "<%@" with no closing "%>" breaks the scan and yields nothing.
+        assert!(extract_directives("<%@ Page CodeBehind=\"x.cs\"").is_empty());
+    }
+
+    #[test]
+    fn test_extract_directives_empty_content_yields_empty_type() {
+        // "<%@ %>" trims to ""; splitn still yields [""], so parse_directive's `?`
+        // does NOT fire - it produces a directive with an empty type that later
+        // falls through parse_aspx's `_` arm harmlessly.
+        let dirs = extract_directives("<%@ %>");
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].directive_type, "");
+    }
+
+    fn imported_names(graph: &CodeGraph) -> Vec<String> {
+        let mut names = Vec::new();
+        for (_, edge) in graph.iter_edges() {
+            if edge.edge_type == EdgeType::Imports {
+                if let Ok(t) = graph.get_node(edge.target_id) {
+                    names.push(t.properties.get_string("name").unwrap_or("").to_string());
+                }
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn test_parse_aspx_master_directive_creates_masterpage_import() {
+        let source = r#"<%@ Master Language="C#" MasterPageFile="~/Root.Master" %>"#;
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = parse_aspx(source, Path::new("/tmp/Site.master"), &mut graph).unwrap();
+        assert_eq!(info.imports.len(), 1);
+        assert!(imported_names(&graph).contains(&"~/Root.Master".to_string()));
+    }
+
+    #[test]
+    fn test_parse_aspx_control_directive_codebehind_import() {
+        let source = r#"<%@ Control Language="C#" CodeBehind="Nav.ascx.cs" %>"#;
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = parse_aspx(source, Path::new("/tmp/Nav.ascx"), &mut graph).unwrap();
+        assert_eq!(info.imports.len(), 1);
+        assert!(imported_names(&graph).contains(&"Nav.ascx.cs".to_string()));
+    }
+
+    #[test]
+    fn test_parse_aspx_register_directive_usercontrol_import() {
+        let source =
+            r#"<%@ Register TagPrefix="uc" TagName="Header" Src="Controls/Header.ascx" %>"#;
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = parse_aspx(source, Path::new("/tmp/Page.aspx"), &mut graph).unwrap();
+        assert_eq!(info.imports.len(), 1);
+        assert!(imported_names(&graph).contains(&"Controls/Header.ascx".to_string()));
+    }
+
+    #[test]
+    fn test_parse_aspx_unknown_directive_creates_no_imports() {
+        // "OutputCache" falls through the match's `_` arm - file node only, no edges.
+        let source = r#"<%@ OutputCache Duration="60" VaryByParam="none" %>"#;
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = parse_aspx(source, Path::new("/tmp/Page.aspx"), &mut graph).unwrap();
+        assert!(info.imports.is_empty());
+        assert_eq!(graph.iter_edges().count(), 0);
+    }
+
+    #[test]
+    fn test_parse_aspx_file_node_name_from_stem() {
+        let source = "<html></html>";
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = parse_aspx(source, Path::new("/tmp/Contact.aspx"), &mut graph).unwrap();
+        let file_node = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file_node.properties.get_string("name"), Some("Contact"));
+        assert_eq!(file_node.properties.get_string("language"), Some("aspx"));
+        assert_eq!(info.line_count, 1);
+    }
 }
