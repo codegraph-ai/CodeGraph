@@ -1003,4 +1003,193 @@ c() -> ok.
         assert!(names.contains(&"b"));
         assert!(names.contains(&"c"));
     }
+
+    // ------------------------------------------------------------------
+    // body_prefix truncation & records
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // Build a function whose text far exceeds the truncation boundary.
+        let filler = "    X = 1, X = 1, X = 1, X = 1, X = 1,\n".repeat(40);
+        let source = format!("-module(m).\nbig() ->\n{filler}    ok.\n").into_bytes();
+        let visitor = parse_and_visit(&source);
+        let bp = visitor.functions[0].body_prefix.as_deref().unwrap();
+        assert_eq!(bp.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_record_body_prefix_present() {
+        let source = br#"-module(m).
+-record(person, {name, age}).
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.classes[0]
+            .body_prefix
+            .as_deref()
+            .unwrap()
+            .contains("person"));
+    }
+
+    #[test]
+    fn test_record_doc_comment_captured() {
+        let source = br#"-module(m).
+%% @doc a person record
+-record(person, {name, age}).
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.classes[0].doc_comment.as_deref(),
+            Some("%% @doc a person record")
+        );
+    }
+
+    #[test]
+    fn test_record_line_bounds_one_based() {
+        let source = br#"-module(m).
+
+-record(person, {name, age}).
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        // The record is on the third physical line (1-based).
+        assert_eq!(visitor.classes[0].line_start, 3);
+        assert_eq!(visitor.classes[0].line_end, 3);
+    }
+
+    // ------------------------------------------------------------------
+    // Additional complexity paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_complexity_if_raises() {
+        let source = br#"-module(m).
+pick(N) ->
+    if
+        N > 0 -> pos;
+        true -> nonpos
+    end.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity
+                > 2
+        );
+    }
+
+    #[test]
+    fn test_complexity_receive_raises() {
+        let source = br#"-module(m).
+loop() ->
+    receive
+        stop -> ok;
+        _ -> loop()
+    end.
+"#;
+        let visitor = parse_and_visit(source);
+        // Two receive clauses (cr_clause) each register as a branch.
+        assert!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity
+                > 2
+        );
+    }
+
+    #[test]
+    fn test_complexity_try_catch_exception_handler() {
+        let source = br#"-module(m).
+safe() ->
+    try risky() of
+        Ok -> Ok
+    catch
+        _:_ -> error
+    end.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .exception_handlers
+                >= 1
+        );
+    }
+
+    #[test]
+    fn test_complexity_list_comprehension_not_counted_as_loop() {
+        // tree-sitter-erlang emits `list_comprehension`/`binary_comprehension`, but
+        // the complexity walker only matches `lc`/`bc` (which the grammar never
+        // produces), so a comprehension is a latent gap and adds no loop.
+        let source = br#"-module(m).
+doubles(Xs) -> [X * 2 || X <- Xs].
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].complexity.as_ref().unwrap().loops, 0);
+    }
+
+    #[test]
+    fn test_complexity_orelse_logical_operator() {
+        let source = br#"-module(m).
+flag(A, B) -> A orelse B.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .logical_operators
+                >= 1
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Call metadata & attribution
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_call_default_metadata() {
+        let source = br#"-module(m).
+a() -> b().
+b() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let call = visitor.calls.iter().find(|c| c.caller == "a").unwrap();
+        assert!(call.is_direct);
+        assert_eq!(call.struct_type, None);
+        assert_eq!(call.field_name, None);
+        // `b()` is on the second physical line.
+        assert_eq!(call.call_site_line, 2);
+    }
+
+    #[test]
+    fn test_nested_call_attributed_to_enclosing_function() {
+        // A call inside a case body is still attributed to the enclosing function.
+        let source = br#"-module(m).
+route(N) ->
+    case N of
+        0 -> helper();
+        _ -> ok
+    end.
+helper() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("expected nested helper call");
+        assert_eq!(call.caller, "route");
+    }
 }
