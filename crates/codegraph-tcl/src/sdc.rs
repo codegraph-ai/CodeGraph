@@ -395,4 +395,233 @@ mod tests {
         assert_eq!(extract_port_from_bracket("[get_ports {clk}]"), "clk");
         assert_eq!(extract_port_from_bracket("clk"), "clk");
     }
+
+    #[test]
+    fn test_extract_port_from_bracket_non_get_ports() {
+        // A bracketed expression that is not get_ports is returned verbatim.
+        assert_eq!(
+            extract_port_from_bracket("[get_clocks clk1]"),
+            "[get_clocks clk1]"
+        );
+        // get_ports prefix with extra whitespace still trims to the bare name.
+        assert_eq!(extract_port_from_bracket("[get_ports   clk_a]"), "clk_a");
+    }
+
+    #[test]
+    fn test_extract_sdc_from_args_dispatch() {
+        // Every mapped command routes to the right constraint variant.
+        assert!(matches!(
+            extract_sdc_from_args("create_clock", &["-name".into(), "c".into()]),
+            Some(SdcConstraint::Clock(_))
+        ));
+        assert!(matches!(
+            extract_sdc_from_args("create_generated_clock", &[]),
+            Some(SdcConstraint::Clock(_))
+        ));
+        assert!(matches!(
+            extract_sdc_from_args("set_input_delay", &["1".into()]),
+            Some(SdcConstraint::IoDelay(_))
+        ));
+        assert!(matches!(
+            extract_sdc_from_args("set_output_delay", &["1".into()]),
+            Some(SdcConstraint::IoDelay(_))
+        ));
+        for cmd in [
+            "set_false_path",
+            "set_multicycle_path",
+            "set_max_delay",
+            "set_min_delay",
+            "set_clock_uncertainty",
+            "set_clock_latency",
+            "set_clock_groups",
+        ] {
+            assert!(
+                matches!(
+                    extract_sdc_from_args(cmd, &[]),
+                    Some(SdcConstraint::TimingException(_))
+                ),
+                "{cmd} should map to a timing exception"
+            );
+        }
+        // Unmapped SDC commands (recognised elsewhere) yield no structured constraint.
+        assert!(extract_sdc_from_args("set_load", &[]).is_none());
+        assert!(extract_sdc_from_args("not_a_command", &[]).is_none());
+    }
+
+    #[test]
+    fn test_extract_io_delay_type_carries_through() {
+        // set_output_delay preserves delay_type = "output".
+        let r = extract_io_delay("output", &["0.25".into()]);
+        if let Some(SdcConstraint::IoDelay(d)) = r {
+            assert_eq!(d.delay_type, "output");
+            assert_eq!(d.delay, "0.25");
+            assert!(d.clock.is_empty());
+        } else {
+            panic!("expected IoDelay");
+        }
+    }
+
+    #[test]
+    fn test_extract_io_delay_only_first_positional_is_delay() {
+        // With -clock first, the first bare positional is the delay and later
+        // positionals (port specs) are ignored.
+        let args = vec![
+            "-clock".into(),
+            "clk".into(),
+            "3.0".into(),
+            "[get_ports d]".into(),
+        ];
+        if let Some(SdcConstraint::IoDelay(d)) = extract_io_delay("input", &args) {
+            assert_eq!(d.clock, "clk");
+            assert_eq!(d.delay, "3.0");
+        } else {
+            panic!("expected IoDelay");
+        }
+    }
+
+    #[test]
+    fn test_extract_io_delay_max_swallows_following_flag() {
+        // Quirk: -max is treated as a value-taking flag, so it consumes the
+        // following "-clock" as its argument. "clk" then becomes the first bare
+        // positional (the delay), leaving clock empty.
+        let args = vec!["-max".into(), "-clock".into(), "clk".into(), "3.0".into()];
+        if let Some(SdcConstraint::IoDelay(d)) = extract_io_delay("input", &args) {
+            assert!(d.clock.is_empty());
+            assert_eq!(d.delay, "clk");
+        } else {
+            panic!("expected IoDelay");
+        }
+    }
+
+    #[test]
+    fn test_extract_io_delay_unknown_flag_skipped() {
+        // An unrecognised flag consumes only itself, leaving the value positional.
+        let args = vec!["-weird".into(), "0.9".into()];
+        if let Some(SdcConstraint::IoDelay(d)) = extract_io_delay("input", &args) {
+            assert_eq!(d.delay, "0.9");
+        } else {
+            panic!("expected IoDelay");
+        }
+    }
+
+    #[test]
+    fn test_extract_create_clock_skips_flag_values() {
+        // -waveform takes a value that must not be mistaken for the port; the
+        // trailing get_ports positional wins.
+        let args = vec![
+            "-name".into(),
+            "sysclk".into(),
+            "-period".into(),
+            "8".into(),
+            "-waveform".into(),
+            "{0 4}".into(),
+            "[get_ports clk_pin]".into(),
+        ];
+        if let Some(SdcConstraint::Clock(c)) = extract_create_clock(&args) {
+            assert_eq!(c.name, "sysclk");
+            assert_eq!(c.period, "8");
+            assert_eq!(c.port, "clk_pin");
+        } else {
+            panic!("expected Clock");
+        }
+    }
+
+    #[test]
+    fn test_extract_create_clock_get_ports_overrides_plain_port() {
+        // A plain positional sets the port first, but a later get_ports positional
+        // always overwrites it (the branch is unconditional).
+        let args = vec!["plain_port".into(), "[get_ports real_clk]".into()];
+        if let Some(SdcConstraint::Clock(c)) = extract_create_clock(&args) {
+            assert_eq!(c.port, "real_clk");
+        } else {
+            panic!("expected Clock");
+        }
+    }
+
+    #[test]
+    fn test_extract_create_clock_unknown_flag_and_missing_values() {
+        // Unknown flags advance by one; -name/-period at the end default to empty.
+        let args = vec!["-quux".into(), "-name".into()];
+        if let Some(SdcConstraint::Clock(c)) = extract_create_clock(&args) {
+            assert!(c.name.is_empty());
+            assert!(c.period.is_empty());
+            assert!(c.port.is_empty());
+        } else {
+            panic!("expected Clock");
+        }
+    }
+
+    #[test]
+    fn test_extract_timing_exception_rise_fall_variants() {
+        // -rise_from / -fall_to are aliases for -from / -to.
+        let args = vec![
+            "-rise_from".into(),
+            "a".into(),
+            "-fall_to".into(),
+            "b".into(),
+        ];
+        if let Some(SdcConstraint::TimingException(e)) =
+            extract_timing_exception("max_delay", &args)
+        {
+            assert_eq!(e.from.as_deref(), Some("a"));
+            assert_eq!(e.to.as_deref(), Some("b"));
+            assert!(e.value.is_none());
+        } else {
+            panic!("expected TimingException");
+        }
+    }
+
+    #[test]
+    fn test_extract_timing_exception_positional_value_and_skips() {
+        // -through and -setup each consume a value; the first bare positional
+        // becomes the exception value, later ones are ignored.
+        let args = vec![
+            "-through".into(),
+            "mid".into(),
+            "-setup".into(),
+            "x".into(),
+            "2".into(),
+            "3".into(),
+        ];
+        if let Some(SdcConstraint::TimingException(e)) =
+            extract_timing_exception("multicycle_path", &args)
+        {
+            assert!(e.from.is_none());
+            assert!(e.to.is_none());
+            assert_eq!(e.value.as_deref(), Some("2"));
+        } else {
+            panic!("expected TimingException");
+        }
+    }
+
+    #[test]
+    fn test_extract_timing_exception_unknown_flag_skipped() {
+        let args = vec!["-nonsense".into(), "-from".into(), "clkA".into()];
+        if let Some(SdcConstraint::TimingException(e)) =
+            extract_timing_exception("false_path", &args)
+        {
+            assert_eq!(e.from.as_deref(), Some("clkA"));
+        } else {
+            panic!("expected TimingException");
+        }
+    }
+
+    #[test]
+    fn test_sdc_data_add_all_variants() {
+        let mut data = SdcData::default();
+        data.add(SdcConstraint::IoDelay(SdcIoDelay {
+            delay_type: "input".into(),
+            clock: "clk".into(),
+            delay: "1".into(),
+        }));
+        data.add(SdcConstraint::TimingException(SdcTimingException {
+            exception_type: "false_path".into(),
+            from: None,
+            to: None,
+            value: None,
+        }));
+        assert_eq!(data.io_delays.len(), 1);
+        assert_eq!(data.timing_exceptions.len(), 1);
+        assert!(data.clocks.is_empty());
+    }
 }
