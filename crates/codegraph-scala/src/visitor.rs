@@ -829,4 +829,125 @@ mod tests {
         assert_eq!(c.line_start, 1);
         assert_eq!(c.line_end, 4);
     }
+
+    #[test]
+    fn test_function_not_test_when_no_prefix() {
+        let source = b"def addition(): Boolean = true";
+        let visitor = parse_and_visit(source);
+        // is_test is a pure name-prefix check, so a non-"test" name is false
+        assert!(!visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_function_no_parameters() {
+        let source = b"def now(): Long = 0L";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn test_doc_comment_block_attached() {
+        let source = b"/** Adds two numbers. */\ndef add(a: Int, b: Int): Int = a + b";
+        let visitor = parse_and_visit(source);
+        let doc = visitor.functions[0]
+            .doc_comment
+            .as_ref()
+            .expect("doc comment");
+        assert!(doc.contains("Adds two numbers"));
+    }
+
+    #[test]
+    fn test_doc_comment_triple_slash_attached() {
+        let source = b"/// A doc line\ndef f(): Int = 1";
+        let visitor = parse_and_visit(source);
+        // extract_doc_comment accepts a /// prefixed comment as well as /**
+        assert!(visitor.functions[0].doc_comment.is_some());
+    }
+
+    #[test]
+    fn test_plain_line_comment_not_doc() {
+        let source = b"// just a note\ndef f(): Int = 1";
+        let visitor = parse_and_visit(source);
+        // only /** and /// prefixes count as doc comments
+        assert!(visitor.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_catch_clause_raises_complexity() {
+        let source =
+            b"def risky(): Int = {\n  try {\n    1\n  } catch {\n    case _: Exception => 0\n  }\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        // a catch_clause is recorded as an exception handler, raising CC above baseline
+        assert!(c.exception_handlers >= 1);
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_match_with_three_cases_accumulates_branches() {
+        let source = b"def kind(x: Int): String = x match {\n  case 0 => \"a\"\n  case 1 => \"b\"\n  case _ => \"c\"\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        // three case clauses each add a branch: 1 + 3 = 4
+        assert_eq!(c.cyclomatic_complexity, 4);
+    }
+
+    #[test]
+    fn test_trait_method_parented_to_trait() {
+        let source = b"trait Greeter {\n  def greet(): String = \"hi\"\n}";
+        let visitor = parse_and_visit(source);
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greet")
+            .expect("trait method extracted");
+        // a def inside a trait body takes the trait as its enclosing class
+        assert_eq!(f.parent_class.as_deref(), Some("Greeter"));
+        assert!(!f.is_static);
+    }
+
+    #[test]
+    fn test_class_extends_with_constructor_args() {
+        let source = b"class Dog extends Animal(4)";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.inheritance.len(), 1);
+        // parent name is split on '(' so the constructor args are dropped
+        assert_eq!(visitor.inheritance[0].parent, "Animal");
+        assert_eq!(visitor.inheritance[0].child, "Dog");
+    }
+
+    #[test]
+    fn test_call_inside_class_method_attributed_to_method() {
+        let source =
+            b"class Svc {\n  def helper(): Int = 1\n  def run(): Int = {\n    helper()\n  }\n}";
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("helper() call extracted");
+        // the call is attributed to the enclosing method, not the class
+        assert_eq!(call.caller, "run");
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_two_calls_in_one_body_recorded_separately() {
+        let source = b"def a(): Int = 1\ndef b(): Int = 2\ndef caller(): Int = {\n  a()\n  b()\n}";
+        let visitor = parse_and_visit(source);
+        let from_caller: Vec<_> = visitor
+            .calls
+            .iter()
+            .filter(|c| c.caller == "caller")
+            .collect();
+        assert_eq!(from_caller.len(), 2);
+    }
+
+    #[test]
+    fn test_top_level_call_has_no_caller() {
+        // a call outside any function has no current_function, so it is dropped
+        let source = b"println(\"hi\")";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
 }
