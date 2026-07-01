@@ -152,4 +152,59 @@ mod tests {
             "Property 'name' not found on node node-123"
         );
     }
+
+    #[test]
+    fn test_edge_not_found_error() {
+        let err = GraphError::EdgeNotFound {
+            edge_id: "edge-42".to_string(),
+        };
+        assert_eq!(err.to_string(), "Edge not found: edge-42");
+    }
+
+    #[test]
+    fn test_file_not_found_error() {
+        let err = GraphError::FileNotFound {
+            path: PathBuf::from("/tmp/missing.rs"),
+        };
+        assert_eq!(err.to_string(), "File not found: /tmp/missing.rs");
+    }
+
+    #[test]
+    fn test_property_type_mismatch_error() {
+        let err = GraphError::PropertyTypeMismatch {
+            key: "count".to_string(),
+            expected: "integer".to_string(),
+            actual: "string".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Property type mismatch: expected integer, got string for key 'count'"
+        );
+    }
+
+    #[test]
+    fn test_serialization_error_message() {
+        let err = GraphError::serialization("bad json", None::<std::io::Error>);
+        assert_eq!(err.to_string(), "Serialization error: bad json");
+    }
+
+    #[test]
+    fn test_storage_error_with_source_chains() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let err = GraphError::storage("write failed", Some(io_err));
+        assert_eq!(err.to_string(), "Storage error: write failed");
+        // The Some(source) branch wraps the io error, exposed via Error::source().
+        let src = err.source().expect("expected a source error");
+        assert_eq!(src.to_string(), "disk full");
+    }
+
+    #[test]
+    fn test_serialization_error_with_source_chains() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::InvalidData, "not utf8");
+        let err = GraphError::serialization("decode failed", Some(io_err));
+        let src = err.source().expect("expected a source error");
+        assert_eq!(src.to_string(), "not utf8");
+    }
 }
