@@ -1049,4 +1049,32 @@ mod tests {
         // both edges emanate from the same file
         assert_eq!(result.files_affected, 1);
     }
+
+    // ---- find_cross_project_consumers early-return guards --------------
+
+    #[test]
+    fn cross_project_empty_symbol_short_circuits_before_any_lookup() {
+        // An empty symbol name returns no consumers regardless of the slug —
+        // this guard runs before the ephemeral-slug check and any graph.db
+        // access, so a non-ephemeral slug here proves the empty-name branch
+        // (not the slug branch) is what short-circuits.
+        let out =
+            find_cross_project_consumers("", Some("src/lib.rs"), "modify", Some("real-project"));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn cross_project_ephemeral_slug_short_circuits_with_nonempty_symbol() {
+        // A non-empty symbol under an ephemeral (harness tempdir) slug still
+        // yields nothing: cross-project answers from leftover slugs in the
+        // shared graph.db are noise for an isolated test workspace. Pinned
+        // directly here rather than only via analyze_impact.
+        let out = find_cross_project_consumers(
+            "do_work",
+            Some("src/lib.rs"),
+            "delete",
+            Some(EPHEMERAL_SLUG),
+        );
+        assert!(out.is_empty());
+    }
 }
