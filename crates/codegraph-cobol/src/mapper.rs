@@ -296,6 +296,76 @@ mod tests {
     }
 
     #[test]
+    fn module_doc_comment_is_emitted_on_file_node() {
+        // A module carrying a doc_comment stamps the optional `doc` prop on the
+        // file node (mapper.rs:31-33), an arm module_drives_file_metadata leaves
+        // unset.
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.set_module(
+            ModuleEntity::new("PAYROLL", "src/PAYROLL.cob", "cobol").with_doc("payroll batch"),
+        );
+        let (graph, info) = map(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("doc"), Some("payroll batch"));
+    }
+
+    #[test]
+    fn program_doc_and_body_prefix_are_emitted_on_class_node() {
+        // A program carrying doc_comment and body_prefix stamps both optional
+        // props on the Class node (mapper.rs:68-73); program_becomes_class_node
+        // leaves both unset.
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.add_class(
+            ClassEntity::new("MYPROG", 1, 20)
+                .with_doc("main program")
+                .with_body_prefix("IDENTIFICATION DIVISION."),
+        );
+        let (graph, info) = map(&ir);
+
+        let class = graph.get_node(info.classes[0]).unwrap();
+        assert_eq!(class.properties.get_string("doc"), Some("main program"));
+        assert_eq!(
+            class.properties.get_string("body_prefix"),
+            Some("IDENTIFICATION DIVISION.")
+        );
+    }
+
+    #[test]
+    fn paragraph_doc_and_body_prefix_are_emitted_on_function_node() {
+        // A paragraph carrying doc_comment and body_prefix stamps both optional
+        // props on the Function node (mapper.rs:99-104), arms no prior function
+        // test populated.
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.add_function(
+            FunctionEntity::new("INIT-PARA", 5, 10)
+                .with_doc("initializes state")
+                .with_body_prefix("MOVE 0 TO WS-COUNT."),
+        );
+        let (graph, info) = map(&ir);
+
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.properties.get_string("doc"), Some("initializes state"));
+        assert_eq!(
+            func.properties.get_string("body_prefix"),
+            Some("MOVE 0 TO WS-COUNT.")
+        );
+    }
+
+    #[test]
+    fn no_module_path_without_stem_falls_back_to_unknown() {
+        // With no module and a path that has no file_stem, the file node name
+        // falls back to "unknown" (mapper.rs:41-44); the map() helper always uses
+        // test.cob so this arm was never reached.
+        let ir = CodeIR::new(PathBuf::from(".."));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, Path::new("..")).unwrap();
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("unknown"));
+    }
+
+    #[test]
     fn program_becomes_class_node_with_file_contains_edge() {
         // A COBOL program maps to a Class node carrying name/visibility/line
         // bounds/is_abstract, wired file -> class via Contains.
