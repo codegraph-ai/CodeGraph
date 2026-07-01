@@ -186,3 +186,220 @@ impl Edge {
         self.properties.get(key)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_type_display_covers_all_variants() {
+        assert_eq!(NodeType::CodeFile.to_string(), "CodeFile");
+        assert_eq!(NodeType::Function.to_string(), "Function");
+        assert_eq!(NodeType::Class.to_string(), "Class");
+        assert_eq!(NodeType::Module.to_string(), "Module");
+        assert_eq!(NodeType::Variable.to_string(), "Variable");
+        assert_eq!(NodeType::Type.to_string(), "Type");
+        assert_eq!(NodeType::Interface.to_string(), "Interface");
+        assert_eq!(NodeType::Generic.to_string(), "Generic");
+    }
+
+    #[test]
+    fn edge_type_display_covers_all_variants() {
+        assert_eq!(EdgeType::Imports.to_string(), "Imports");
+        assert_eq!(EdgeType::ImportsFrom.to_string(), "ImportsFrom");
+        assert_eq!(EdgeType::Contains.to_string(), "Contains");
+        assert_eq!(EdgeType::Calls.to_string(), "Calls");
+        assert_eq!(EdgeType::Invokes.to_string(), "Invokes");
+        assert_eq!(EdgeType::Instantiates.to_string(), "Instantiates");
+        assert_eq!(EdgeType::Extends.to_string(), "Extends");
+        assert_eq!(EdgeType::Implements.to_string(), "Implements");
+        assert_eq!(EdgeType::Uses.to_string(), "Uses");
+        assert_eq!(EdgeType::Defines.to_string(), "Defines");
+        assert_eq!(EdgeType::References.to_string(), "References");
+        assert_eq!(EdgeType::RuntimeCalls.to_string(), "RuntimeCalls");
+    }
+
+    #[test]
+    fn node_type_display_matches_debug_for_each_variant() {
+        // The Display strings are intended to mirror the Rust identifier, so
+        // Display and Debug should agree for these fieldless variants.
+        for nt in [
+            NodeType::CodeFile,
+            NodeType::Function,
+            NodeType::Class,
+            NodeType::Module,
+            NodeType::Variable,
+            NodeType::Type,
+            NodeType::Interface,
+            NodeType::Generic,
+        ] {
+            assert_eq!(nt.to_string(), format!("{nt:?}"));
+        }
+    }
+
+    #[test]
+    fn edge_type_display_matches_debug_for_each_variant() {
+        for et in [
+            EdgeType::Imports,
+            EdgeType::ImportsFrom,
+            EdgeType::Contains,
+            EdgeType::Calls,
+            EdgeType::Invokes,
+            EdgeType::Instantiates,
+            EdgeType::Extends,
+            EdgeType::Implements,
+            EdgeType::Uses,
+            EdgeType::Defines,
+            EdgeType::References,
+            EdgeType::RuntimeCalls,
+        ] {
+            assert_eq!(et.to_string(), format!("{et:?}"));
+        }
+    }
+
+    #[test]
+    fn direction_variants_are_distinct_and_copy() {
+        // Direction is Copy + PartialEq; a copy compares equal to its source
+        // and the three variants are pairwise distinct.
+        let d = Direction::Outgoing;
+        let copied = d;
+        assert_eq!(d, copied);
+        assert_ne!(Direction::Outgoing, Direction::Incoming);
+        assert_ne!(Direction::Incoming, Direction::Both);
+        assert_ne!(Direction::Outgoing, Direction::Both);
+    }
+
+    #[test]
+    fn node_new_stores_id_type_and_properties() {
+        let mut props = PropertyMap::new();
+        props.insert("name", "main");
+        let node = Node::new(7, NodeType::Function, props);
+        assert_eq!(node.id, 7);
+        assert_eq!(node.node_type, NodeType::Function);
+        assert_eq!(
+            node.get_property("name"),
+            Some(&PropertyValue::String("main".to_string()))
+        );
+    }
+
+    #[test]
+    fn node_get_property_missing_returns_none() {
+        let node = Node::new(1, NodeType::Module, PropertyMap::new());
+        assert!(node.get_property("absent").is_none());
+    }
+
+    #[test]
+    fn node_set_property_inserts_and_overwrites() {
+        let mut node = Node::new(2, NodeType::Class, PropertyMap::new());
+        node.set_property("line_start", 10i64);
+        assert_eq!(
+            node.get_property("line_start"),
+            Some(&PropertyValue::Int(10))
+        );
+        // Re-setting the same key overwrites in place.
+        node.set_property("line_start", 42i64);
+        assert_eq!(
+            node.get_property("line_start"),
+            Some(&PropertyValue::Int(42))
+        );
+    }
+
+    #[test]
+    fn edge_new_stores_all_fields() {
+        let mut props = PropertyMap::new();
+        props.insert("line", 3i64);
+        let edge = Edge::new(5, 1, 2, EdgeType::Calls, props);
+        assert_eq!(edge.id, 5);
+        assert_eq!(edge.source_id, 1);
+        assert_eq!(edge.target_id, 2);
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(edge.get_property("line"), Some(&PropertyValue::Int(3)));
+    }
+
+    #[test]
+    fn edge_set_property_inserts_and_overwrites() {
+        let mut edge = Edge::new(1, 0, 0, EdgeType::References, PropertyMap::new());
+        assert!(edge.get_property("weight").is_none());
+        edge.set_property("weight", 1.5f64);
+        assert_eq!(
+            edge.get_property("weight"),
+            Some(&PropertyValue::Float(1.5))
+        );
+        edge.set_property("weight", 2.5f64);
+        assert_eq!(
+            edge.get_property("weight"),
+            Some(&PropertyValue::Float(2.5))
+        );
+    }
+
+    #[test]
+    fn node_serde_round_trip_preserves_fields() {
+        let mut props = PropertyMap::new();
+        props.insert("name", "widget");
+        props.insert("is_test", true);
+        let node = Node::new(99, NodeType::Interface, props);
+        let json = serde_json::to_string(&node).expect("serialize node");
+        let back: Node = serde_json::from_str(&json).expect("deserialize node");
+        assert_eq!(back.id, node.id);
+        assert_eq!(back.node_type, node.node_type);
+        assert_eq!(
+            back.get_property("name"),
+            Some(&PropertyValue::String("widget".to_string()))
+        );
+        assert_eq!(
+            back.get_property("is_test"),
+            Some(&PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn edge_serde_round_trip_preserves_fields() {
+        let edge = Edge::new(4, 10, 20, EdgeType::Implements, PropertyMap::new());
+        let json = serde_json::to_string(&edge).expect("serialize edge");
+        let back: Edge = serde_json::from_str(&json).expect("deserialize edge");
+        assert_eq!(back.id, edge.id);
+        assert_eq!(back.source_id, edge.source_id);
+        assert_eq!(back.target_id, edge.target_id);
+        assert_eq!(back.edge_type, edge.edge_type);
+    }
+
+    #[test]
+    fn node_type_serde_round_trips_each_variant() {
+        for nt in [
+            NodeType::CodeFile,
+            NodeType::Function,
+            NodeType::Class,
+            NodeType::Module,
+            NodeType::Variable,
+            NodeType::Type,
+            NodeType::Interface,
+            NodeType::Generic,
+        ] {
+            let json = serde_json::to_string(&nt).expect("serialize node type");
+            let back: NodeType = serde_json::from_str(&json).expect("deserialize node type");
+            assert_eq!(back, nt);
+        }
+    }
+
+    #[test]
+    fn edge_type_serde_round_trips_each_variant() {
+        for et in [
+            EdgeType::Imports,
+            EdgeType::ImportsFrom,
+            EdgeType::Contains,
+            EdgeType::Calls,
+            EdgeType::Invokes,
+            EdgeType::Instantiates,
+            EdgeType::Extends,
+            EdgeType::Implements,
+            EdgeType::Uses,
+            EdgeType::Defines,
+            EdgeType::References,
+            EdgeType::RuntimeCalls,
+        ] {
+            let json = serde_json::to_string(&et).expect("serialize edge type");
+            let back: EdgeType = serde_json::from_str(&json).expect("deserialize edge type");
+            assert_eq!(back, et);
+        }
+    }
+}
