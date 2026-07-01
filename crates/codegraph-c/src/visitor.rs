@@ -929,6 +929,7 @@ impl<'a> CVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
     use tree_sitter::Parser;
 
     fn parse_and_visit(source: &[u8]) -> CVisitor<'_> {
@@ -1326,5 +1327,147 @@ mod tests {
         assert_eq!(visitor.functions.len(), 2);
         assert_eq!(visitor.functions[0].name, "first");
         assert_eq!(visitor.functions[1].name, "second");
+    }
+
+    #[test]
+    fn test_visitor_body_prefix_truncated_to_max() {
+        // An oversized body is truncated to exactly BODY_PREFIX_MAX_CHARS chars.
+        let mut src = String::from("int f(void) {\n");
+        for _ in 0..300 {
+            src.push_str("    int a = 0;\n");
+        }
+        src.push_str("}\n");
+        let visitor = parse_and_visit(src.as_bytes());
+
+        assert_eq!(visitor.functions.len(), 1);
+        let body = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(body.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_visitor_empty_body_prefix_is_braces() {
+        // An empty compound statement still has non-empty text ("{}"), so
+        // body_prefix is Some, not None.
+        let source = b"void f(void) {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].body_prefix.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn test_visitor_struct_multiple_declarators_one_field() {
+        // A single field_declaration with two names yields two fields.
+        let source = b"struct S { int x, y; };";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.structs.len(), 1);
+        assert_eq!(visitor.structs[0].fields.len(), 2);
+        assert_eq!(visitor.structs[0].fields[0].name, "x");
+        assert_eq!(visitor.structs[0].fields[1].name, "y");
+    }
+
+    #[test]
+    fn test_visitor_struct_array_field() {
+        let source = b"struct S { int arr[10]; };";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.structs.len(), 1);
+        let field = &visitor.structs[0].fields[0];
+        assert_eq!(field.name, "arr");
+        assert!(field
+            .type_annotation
+            .as_ref()
+            .map(|t| t.contains("[]"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn test_visitor_struct_pointer_field_type_has_star() {
+        let source = b"struct S { char *name; };";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.structs.len(), 1);
+        let field = &visitor.structs[0].fields[0];
+        assert_eq!(field.name, "name");
+        assert!(field
+            .type_annotation
+            .as_ref()
+            .map(|t| t.contains('*'))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn test_visitor_vtable_initializer_records_call() {
+        // A `.field = func` pair in a struct initializer is recorded as a call
+        // carrying the struct type, field name, and a synthesized vtable caller.
+        let source = b"static struct net_device_ops ops = {\n    .ndo_open = my_open,\n};\n";
+        let visitor = parse_and_visit_with_calls(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "my_open")
+            .expect("vtable function pointer should be recorded as a call");
+        assert_eq!(call.field_name.as_deref(), Some("ndo_open"));
+        assert_eq!(call.struct_type.as_deref(), Some("net_device_ops"));
+        assert_eq!(call.caller.as_deref(), Some("vtable_ndo_open"));
+    }
+
+    #[test]
+    fn test_visitor_vtable_null_field_ignored() {
+        // A `.field = NULL` initializer is not recorded as a call.
+        let source = b"static struct ops o = {\n    .handler = NULL,\n};\n";
+        let visitor = parse_and_visit_with_calls(source);
+
+        assert!(!visitor.calls.iter().any(|c| c.callee == "NULL"));
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_visitor_complexity_ternary() {
+        let source = b"int pick(int x) { return x ? 1 : 2; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.branches >= 1);
+    }
+
+    #[test]
+    fn test_visitor_complexity_do_while() {
+        let source = b"void test(void) { do {} while (1); }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.loops >= 1);
+    }
+
+    #[test]
+    fn test_visitor_array_parameter_type() {
+        let source = b"void process(int arr[]) {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let param = &visitor.functions[0].parameters[0];
+        assert_eq!(param.name, "arr");
+        assert!(param
+            .type_annotation
+            .as_ref()
+            .map(|t| t.contains("[]"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn test_visitor_pointer_return_type_function() {
+        // A pointer return type nests the function_declarator under a
+        // pointer_declarator; the name is still extracted.
+        let source = b"int *get_buffer(void) { return 0; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "get_buffer");
+        assert_eq!(visitor.functions[0].return_type, Some("int".to_string()));
     }
 }
