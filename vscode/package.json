@@ -2,7 +2,7 @@
     "name": "codegraph",
     "displayName": "CodeGraph",
     "description": "Cross-language code intelligence powered by graph analysis",
-    "version": "0.18.6",
+    "version": "0.19.0",
     "publisher": "aStudioPlus",
     "author": "Andrey Vasilevsky <anvanster@gmail.com>",
     "license": "Apache-2.0",
@@ -274,15 +274,23 @@
                     "type": "string",
                     "enum": [
                         "bge-small",
-                        "jina-code-v2"
+                        "jina-code-v2",
+                        "static"
                     ],
                     "default": "bge-small",
                     "scope": "resource",
                     "enumDescriptions": [
                         "BGE-Small-EN-v1.5 (384d) — fast, good quality with full-body embeddings. ~127MB download.",
-                        "Jina Code V2 (768d) — 6x slower indexing, no quality advantage with full-body embeddings. ~642MB download."
+                        "Jina Code V2 (768d) — 6x slower indexing, no quality advantage with full-body embeddings. ~642MB download.",
+                        "Static (model2vec, 256d) — ~100x faster indexing, no ONNX runtime or 1.5GB RAM gate, ~90% of BGE quality in hybrid search. Requires a local model dir (codegraph.staticModelPath or CODEGRAPH_STATIC_MODEL env)."
                     ],
                     "description": "Embedding model for semantic search and code similarity"
+                },
+                "codegraph.staticModelPath": {
+                    "type": "string",
+                    "default": "",
+                    "scope": "resource",
+                    "description": "Directory of the model2vec static model (config.json + tokenizer.json + model.safetensors) used when embeddingModel is 'static'. Empty defaults to ~/.codegraph/static_models/jina-code-static-256. Distill one with scripts/distill_static_model.py."
                 },
                 "codegraph.fullBodyEmbedding": {
                     "type": "boolean",

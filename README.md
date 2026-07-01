@@ -77,12 +77,28 @@ one tool and exits without the MCP stdio handshake — ideal for scripting.
 |------|---------|-------------|
 | `--workspace <path>` | current dir | Directories to index (repeatable for multi-project) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
-| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast), `jina-code-v2` (768d, 6× slower), or `granite-97m` (384d, 32K ctx, ~3× slower) |
+| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast), `jina-code-v2` (768d, 6× slower), `granite-97m` (384d, 32K ctx, ~3× slower), or `static` (model2vec, 256d — ~100× faster indexing, no ONNX; needs a local model dir, see below) |
 | `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
 | `--max-files <n>` | 5000 | Maximum files to index |
 | `--profile <name>` | `all` | Filter the exposed MCP tool surface to a named subset (see below) |
 | `--graph-only` | off | Skip embedding generation — build the graph and serve structural tools only. No ONNX model load, 10-50× faster indexing. Semantic search unavailable. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot mode: index, run a single tool, print its result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
+
+#### `--embedding-model static` — model2vec fast indexing
+
+Static (model2vec) embeddings replace the ONNX transformer with a token→vector
+lookup table: indexing is **~100× faster** (this repo's 5,873 symbols embed in
+~1 s vs ~3.4 min with BGE) and there's **no ONNX runtime or 1.5 GB RAM gate**.
+Retrieval stays **hybrid (BM25 + semantic)**, so end-to-end quality is **~90% of
+BGE**. The VS Code extension ships the model bundled, so `static` works there
+with no setup. For the CLI/MCP server it needs a local model directory
+(`config.json` + `tokenizer.json` + `model.safetensors`):
+
+- Point at it with `CODEGRAPH_STATIC_MODEL=/path/to/model` (or the VS Code
+  `codegraph.staticModelPath` setting to override the bundled model). Default:
+  `~/.codegraph/static_models/jina-code-static-256`.
+- Distill one from any sentence-transformer (Apache-2.0 Jina-Code by default) in
+  ~30 s on CPU: `python scripts/distill_static_model.py`.
 
 #### `--profile` — narrow the MCP tool surface
 
@@ -103,7 +119,8 @@ The full 32-tool surface is convenient but inflates the agent's prompt-context c
   "codegraph.indexOnStartup": true,
   "codegraph.indexPaths": ["/path/to/project-a", "/path/to/project-b"],
   "codegraph.excludePatterns": ["**/cmake-build-debug/**", "**/generated/**"],
-  "codegraph.embeddingModel": "bge-small",
+  "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
+  "codegraph.staticModelPath": "",                // model2vec model dir when embeddingModel is "static"
   "codegraph.maxFileSizeKB": 1024,
   "codegraph.debug": false
 }
@@ -312,6 +329,12 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 | **Data Science** | R, Julia |
 
 HTTP handler detection: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java (Spring/JAX-RS), Go (stdlib/Gin/Echo/Fiber), C# (ASP.NET), Ruby (Rails), PHP (Laravel/Symfony).
+
+> **Community vs full builds:** COBOL, Fortran, Perl, Dart, Zig, and R are
+> compiled only with `--features extra-languages`. The default community binary
+> omits them — they had zero usage in telemetry and their tree-sitter grammars
+> add ~25 MB (COBOL's parse tables alone are 30 MB). The other 32 languages are
+> always available.
 
 ---
 

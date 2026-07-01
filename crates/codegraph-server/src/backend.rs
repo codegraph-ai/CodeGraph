@@ -919,24 +919,9 @@ impl LanguageServer for CodeGraphBackend {
 
             let embedding_model = raw_model
                 .and_then(|v| v.as_str())
-                .and_then(|s| {
+                .map(|s| {
                     tracing::info!("[LSP::initialize] Parsing embedding model string: {:?}", s);
-                    match s {
-                        "bge-small" => Some(codegraph_memory::CodeGraphEmbeddingModel::BgeSmall),
-                        "jina-code-v2" => {
-                            Some(codegraph_memory::CodeGraphEmbeddingModel::JinaCodeV2)
-                        }
-                        "granite-97m" | "granite" | "granite-97m-multilingual-r2" => Some(
-                            codegraph_memory::CodeGraphEmbeddingModel::Granite97mMultilingualR2,
-                        ),
-                        _ => {
-                            tracing::warn!(
-                                "[LSP::initialize] Unknown embedding model: {:?}, using default",
-                                s
-                            );
-                            None
-                        }
-                    }
+                    codegraph_memory::EmbeddingBackend::parse(s)
                 })
                 .unwrap_or_default();
 

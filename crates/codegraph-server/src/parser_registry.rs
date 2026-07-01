@@ -7,15 +7,18 @@ use codegraph::CodeGraph;
 use codegraph_bash::BashParser;
 use codegraph_c::CParser;
 use codegraph_clojure::ClojureParser;
+#[cfg(feature = "extra-languages")]
 use codegraph_cobol::CobolParser;
 use codegraph_cpp::CppParser;
 use codegraph_csharp::CSharpParser;
 use codegraph_css::CssParser;
+#[cfg(feature = "extra-languages")]
 use codegraph_dart::DartParser;
 use codegraph_dockerfile::DockerfileParser;
 use codegraph_elixir::ElixirParser;
 use codegraph_elm::ElmParser;
 use codegraph_erlang::ErlangParser;
+#[cfg(feature = "extra-languages")]
 use codegraph_fortran::FortranParser;
 use codegraph_go::GoParser;
 use codegraph_groovy::GroovyParser;
@@ -28,9 +31,11 @@ use codegraph_lua::LuaParser;
 use codegraph_objc::ObjcParser;
 use codegraph_ocaml::OcamlParser;
 use codegraph_parser_api::{CodeParser, FileInfo, ParserConfig, ParserError, ParserMetrics};
+#[cfg(feature = "extra-languages")]
 use codegraph_perl::PerlParser;
 use codegraph_php::PhpParser;
 use codegraph_python::PythonParser;
+#[cfg(feature = "extra-languages")]
 use codegraph_r::RParser;
 use codegraph_ruby::RubyParser;
 use codegraph_rust::RustParser;
@@ -42,6 +47,7 @@ use codegraph_toml::TomlParser;
 use codegraph_typescript::TypeScriptParser;
 use codegraph_verilog::VerilogParser;
 use codegraph_yaml::YamlParser;
+#[cfg(feature = "extra-languages")]
 use codegraph_zig::ZigParser;
 use std::path::Path;
 use std::sync::Arc;
@@ -51,15 +57,18 @@ pub struct ParserRegistry {
     bash: Arc<BashParser>,
     c: Arc<CParser>,
     clojure: Arc<ClojureParser>,
+    #[cfg(feature = "extra-languages")]
     cobol: Arc<CobolParser>,
     cpp: Arc<CppParser>,
     css: Arc<CssParser>,
     csharp: Arc<CSharpParser>,
+    #[cfg(feature = "extra-languages")]
     dart: Arc<DartParser>,
     dockerfile: Arc<DockerfileParser>,
     elixir: Arc<ElixirParser>,
     elm: Arc<ElmParser>,
     erlang: Arc<ErlangParser>,
+    #[cfg(feature = "extra-languages")]
     fortran: Arc<FortranParser>,
     go: Arc<GoParser>,
     groovy: Arc<GroovyParser>,
@@ -71,9 +80,11 @@ pub struct ParserRegistry {
     lua: Arc<LuaParser>,
     objc: Arc<ObjcParser>,
     ocaml: Arc<OcamlParser>,
+    #[cfg(feature = "extra-languages")]
     perl: Arc<PerlParser>,
     php: Arc<PhpParser>,
     python: Arc<PythonParser>,
+    #[cfg(feature = "extra-languages")]
     r: Arc<RParser>,
     ruby: Arc<RubyParser>,
     rust: Arc<RustParser>,
@@ -85,6 +96,7 @@ pub struct ParserRegistry {
     typescript: Arc<TypeScriptParser>,
     verilog: Arc<VerilogParser>,
     yaml: Arc<YamlParser>,
+    #[cfg(feature = "extra-languages")]
     zig: Arc<ZigParser>,
 }
 
@@ -100,15 +112,18 @@ impl ParserRegistry {
             bash: Arc::new(BashParser::with_config(config.clone())),
             c: Arc::new(CParser::with_config(config.clone())),
             clojure: Arc::new(ClojureParser::with_config(config.clone())),
+            #[cfg(feature = "extra-languages")]
             cobol: Arc::new(CobolParser::with_config(config.clone())),
             cpp: Arc::new(CppParser::with_config(config.clone())),
             css: Arc::new(CssParser::with_config(config.clone())),
             csharp: Arc::new(CSharpParser::with_config(config.clone())),
+            #[cfg(feature = "extra-languages")]
             dart: Arc::new(DartParser::with_config(config.clone())),
             dockerfile: Arc::new(DockerfileParser::with_config(config.clone())),
             elixir: Arc::new(ElixirParser::with_config(config.clone())),
             elm: Arc::new(ElmParser::with_config(config.clone())),
             erlang: Arc::new(ErlangParser::with_config(config.clone())),
+            #[cfg(feature = "extra-languages")]
             fortran: Arc::new(FortranParser::with_config(config.clone())),
             go: Arc::new(GoParser::with_config(config.clone())),
             groovy: Arc::new(GroovyParser::with_config(config.clone())),
@@ -120,9 +135,11 @@ impl ParserRegistry {
             lua: Arc::new(LuaParser::with_config(config.clone())),
             objc: Arc::new(ObjcParser::with_config(config.clone())),
             ocaml: Arc::new(OcamlParser::with_config(config.clone())),
+            #[cfg(feature = "extra-languages")]
             perl: Arc::new(PerlParser::with_config(config.clone())),
             php: Arc::new(PhpParser::with_config(config.clone())),
             python: Arc::new(PythonParser::with_config(config.clone())),
+            #[cfg(feature = "extra-languages")]
             r: Arc::new(RParser::with_config(config.clone())),
             ruby: Arc::new(RubyParser::with_config(config.clone())),
             rust: Arc::new(RustParser::with_config(config.clone())),
@@ -134,6 +151,7 @@ impl ParserRegistry {
             typescript: Arc::new(TypeScriptParser::with_config(config.clone())),
             verilog: Arc::new(VerilogParser::with_config(config.clone())),
             yaml: Arc::new(YamlParser::with_config(config.clone())),
+            #[cfg(feature = "extra-languages")]
             zig: Arc::new(ZigParser::with_config(config)),
         }
     }
@@ -144,15 +162,18 @@ impl ParserRegistry {
             "bash" | "shell" | "sh" => Some(self.bash.clone()),
             "c" => Some(self.c.clone()),
             "clojure" => Some(self.clojure.clone()),
+            #[cfg(feature = "extra-languages")]
             "cobol" => Some(self.cobol.clone()),
             "cpp" | "c++" => Some(self.cpp.clone()),
             "css" => Some(self.css.clone()),
             "csharp" | "c#" => Some(self.csharp.clone()),
+            #[cfg(feature = "extra-languages")]
             "dart" => Some(self.dart.clone()),
             "dockerfile" | "containerfile" => Some(self.dockerfile.clone()),
             "elixir" => Some(self.elixir.clone()),
             "elm" => Some(self.elm.clone()),
             "erlang" => Some(self.erlang.clone()),
+            #[cfg(feature = "extra-languages")]
             "fortran" => Some(self.fortran.clone()),
             "go" => Some(self.go.clone()),
             "groovy" => Some(self.groovy.clone()),
@@ -164,9 +185,11 @@ impl ParserRegistry {
             "lua" => Some(self.lua.clone()),
             "objc" | "objective-c" | "objectivec" => Some(self.objc.clone()),
             "ocaml" => Some(self.ocaml.clone()),
+            #[cfg(feature = "extra-languages")]
             "perl" => Some(self.perl.clone()),
             "php" => Some(self.php.clone()),
             "python" => Some(self.python.clone()),
+            #[cfg(feature = "extra-languages")]
             "r" => Some(self.r.clone()),
             "ruby" => Some(self.ruby.clone()),
             "rust" => Some(self.rust.clone()),
@@ -180,6 +203,7 @@ impl ParserRegistry {
             }
             "verilog" | "systemverilog" => Some(self.verilog.clone()),
             "yaml" => Some(self.yaml.clone()),
+            #[cfg(feature = "extra-languages")]
             "zig" => Some(self.zig.clone()),
             _ => None,
         }
@@ -191,20 +215,18 @@ impl ParserRegistry {
     /// C++-specific extensions (`.hpp`, `.cc`, `.cxx`, `.hh`, `.hxx`) are
     /// only claimed by the C++ parser and resolve correctly.
     pub fn parser_for_path(&self, path: &Path) -> Option<Arc<dyn CodeParser>> {
-        let parsers: [Arc<dyn CodeParser>; 38] = [
+        #[cfg_attr(not(feature = "extra-languages"), allow(unused_mut))]
+        let mut parsers: Vec<Arc<dyn CodeParser>> = vec![
             self.bash.clone(),
             self.c.clone(),
             self.clojure.clone(),
-            self.cobol.clone(),
             self.cpp.clone(),
             self.css.clone(),
             self.csharp.clone(),
-            self.dart.clone(),
             self.dockerfile.clone(),
             self.elixir.clone(),
             self.elm.clone(),
             self.erlang.clone(),
-            self.fortran.clone(),
             self.go.clone(),
             self.groovy.clone(),
             self.haskell.clone(),
@@ -215,10 +237,8 @@ impl ParserRegistry {
             self.lua.clone(),
             self.objc.clone(),
             self.ocaml.clone(),
-            self.perl.clone(),
             self.php.clone(),
             self.python.clone(),
-            self.r.clone(),
             self.ruby.clone(),
             self.rust.clone(),
             self.scala.clone(),
@@ -229,8 +249,22 @@ impl ParserRegistry {
             self.typescript.clone(),
             self.verilog.clone(),
             self.yaml.clone(),
-            self.zig.clone(),
         ];
+        // Gated grammars handle distinct extensions (.cob/.dart/.f90/.pl/.r/.zig),
+        // so appending them keeps resolution identical.
+        #[cfg(feature = "extra-languages")]
+        {
+            // Explicit element type coerces each Arc<ConcreteParser> to the trait object.
+            let extra: [Arc<dyn CodeParser>; 6] = [
+                self.cobol.clone(),
+                self.dart.clone(),
+                self.fortran.clone(),
+                self.perl.clone(),
+                self.r.clone(),
+                self.zig.clone(),
+            ];
+            parsers.extend(extra);
+        }
 
         parsers.into_iter().find(|p| p.can_parse(path))
     }
@@ -241,15 +275,18 @@ impl ParserRegistry {
         extensions.extend(self.bash.file_extensions().iter().copied());
         extensions.extend(self.c.file_extensions().iter().copied());
         extensions.extend(self.clojure.file_extensions().iter().copied());
+        #[cfg(feature = "extra-languages")]
         extensions.extend(self.cobol.file_extensions().iter().copied());
         extensions.extend(self.cpp.file_extensions().iter().copied());
         extensions.extend(self.css.file_extensions().iter().copied());
         extensions.extend(self.csharp.file_extensions().iter().copied());
+        #[cfg(feature = "extra-languages")]
         extensions.extend(self.dart.file_extensions().iter().copied());
         extensions.extend(self.dockerfile.file_extensions().iter().copied());
         extensions.extend(self.elixir.file_extensions().iter().copied());
         extensions.extend(self.elm.file_extensions().iter().copied());
         extensions.extend(self.erlang.file_extensions().iter().copied());
+        #[cfg(feature = "extra-languages")]
         extensions.extend(self.fortran.file_extensions().iter().copied());
         extensions.extend(self.go.file_extensions().iter().copied());
         extensions.extend(self.groovy.file_extensions().iter().copied());
@@ -261,9 +298,11 @@ impl ParserRegistry {
         extensions.extend(self.lua.file_extensions().iter().copied());
         extensions.extend(self.objc.file_extensions().iter().copied());
         extensions.extend(self.ocaml.file_extensions().iter().copied());
+        #[cfg(feature = "extra-languages")]
         extensions.extend(self.perl.file_extensions().iter().copied());
         extensions.extend(self.php.file_extensions().iter().copied());
         extensions.extend(self.python.file_extensions().iter().copied());
+        #[cfg(feature = "extra-languages")]
         extensions.extend(self.r.file_extensions().iter().copied());
         extensions.extend(self.ruby.file_extensions().iter().copied());
         extensions.extend(self.rust.file_extensions().iter().copied());
@@ -275,26 +314,25 @@ impl ParserRegistry {
         extensions.extend(self.typescript.file_extensions().iter().copied());
         extensions.extend(self.verilog.file_extensions().iter().copied());
         extensions.extend(self.yaml.file_extensions().iter().copied());
+        #[cfg(feature = "extra-languages")]
         extensions.extend(self.zig.file_extensions().iter().copied());
         extensions
     }
 
     /// Get metrics from all parsers.
     pub fn all_metrics(&self) -> Vec<(&str, ParserMetrics)> {
-        vec![
+        #[cfg_attr(not(feature = "extra-languages"), allow(unused_mut))]
+        let mut metrics: Vec<(&str, ParserMetrics)> = vec![
             ("bash", self.bash.metrics()),
             ("c", self.c.metrics()),
             ("clojure", self.clojure.metrics()),
-            ("cobol", self.cobol.metrics()),
             ("cpp", self.cpp.metrics()),
             ("css", self.css.metrics()),
             ("csharp", self.csharp.metrics()),
-            ("dart", self.dart.metrics()),
             ("dockerfile", self.dockerfile.metrics()),
             ("elixir", self.elixir.metrics()),
             ("elm", self.elm.metrics()),
             ("erlang", self.erlang.metrics()),
-            ("fortran", self.fortran.metrics()),
             ("go", self.go.metrics()),
             ("groovy", self.groovy.metrics()),
             ("haskell", self.haskell.metrics()),
@@ -305,10 +343,8 @@ impl ParserRegistry {
             ("lua", self.lua.metrics()),
             ("objc", self.objc.metrics()),
             ("ocaml", self.ocaml.metrics()),
-            ("perl", self.perl.metrics()),
             ("php", self.php.metrics()),
             ("python", self.python.metrics()),
-            ("r", self.r.metrics()),
             ("ruby", self.ruby.metrics()),
             ("rust", self.rust.metrics()),
             ("scala", self.scala.metrics()),
@@ -319,8 +355,17 @@ impl ParserRegistry {
             ("typescript", self.typescript.metrics()),
             ("verilog", self.verilog.metrics()),
             ("yaml", self.yaml.metrics()),
+        ];
+        #[cfg(feature = "extra-languages")]
+        metrics.extend([
+            ("cobol", self.cobol.metrics()),
+            ("dart", self.dart.metrics()),
+            ("fortran", self.fortran.metrics()),
+            ("perl", self.perl.metrics()),
+            ("r", self.r.metrics()),
             ("zig", self.zig.metrics()),
-        ]
+        ]);
+        metrics
     }
 
     /// Check if a file path is supported by any parser.
@@ -370,16 +415,12 @@ impl ParserRegistry {
             Some("bash")
         } else if self.clojure.can_parse(path) {
             Some("clojure")
-        } else if self.cobol.can_parse(path) {
-            Some("cobol")
         } else if self.cpp.can_parse(path) {
             Some("cpp")
         } else if self.csharp.can_parse(path) {
             Some("csharp")
         } else if self.css.can_parse(path) {
             Some("css")
-        } else if self.dart.can_parse(path) {
-            Some("dart")
         } else if self.dockerfile.can_parse(path) {
             Some("dockerfile")
         } else if self.elixir.can_parse(path) {
@@ -388,8 +429,6 @@ impl ParserRegistry {
             Some("elm")
         } else if self.erlang.can_parse(path) {
             Some("erlang")
-        } else if self.fortran.can_parse(path) {
-            Some("fortran")
         } else if self.go.can_parse(path) {
             Some("go")
         } else if self.groovy.can_parse(path) {
@@ -410,14 +449,10 @@ impl ParserRegistry {
             Some("objc")
         } else if self.ocaml.can_parse(path) {
             Some("ocaml")
-        } else if self.perl.can_parse(path) {
-            Some("perl")
         } else if self.php.can_parse(path) {
             Some("php")
         } else if self.python.can_parse(path) {
             Some("python")
-        } else if self.r.can_parse(path) {
-            Some("r")
         } else if self.ruby.can_parse(path) {
             Some("ruby")
         } else if self.rust.can_parse(path) {
@@ -446,11 +481,35 @@ impl ParserRegistry {
             Some("verilog")
         } else if self.yaml.can_parse(path) {
             Some("yaml")
+        } else {
+            self.extra_language_for_path(path)
+        }
+    }
+
+    /// Resolve a path to one of the `extra-languages` grammars (cobol / dart /
+    /// fortran / perl / r / zig). `None` when the feature is disabled.
+    #[cfg(feature = "extra-languages")]
+    fn extra_language_for_path(&self, path: &Path) -> Option<&'static str> {
+        if self.cobol.can_parse(path) {
+            Some("cobol")
+        } else if self.dart.can_parse(path) {
+            Some("dart")
+        } else if self.fortran.can_parse(path) {
+            Some("fortran")
+        } else if self.perl.can_parse(path) {
+            Some("perl")
+        } else if self.r.can_parse(path) {
+            Some("r")
         } else if self.zig.can_parse(path) {
             Some("zig")
         } else {
             None
         }
+    }
+
+    #[cfg(not(feature = "extra-languages"))]
+    fn extra_language_for_path(&self, _path: &Path) -> Option<&'static str> {
+        None
     }
 }
 
@@ -471,10 +530,13 @@ mod tests {
     fn test_parser_registry_new() {
         let registry = ParserRegistry::new();
         assert!(registry.get_parser("c").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("cobol").is_some());
         assert!(registry.get_parser("cpp").is_some());
         assert!(registry.get_parser("csharp").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("dart").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("fortran").is_some());
         assert!(registry.get_parser("go").is_some());
         assert!(registry.get_parser("java").is_some());
@@ -483,6 +545,7 @@ mod tests {
         assert!(registry.get_parser("groovy").is_some());
         assert!(registry.get_parser("php").is_some());
         assert!(registry.get_parser("python").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("r").is_some());
         assert!(registry.get_parser("ruby").is_some());
         assert!(registry.get_parser("rust").is_some());
@@ -491,6 +554,7 @@ mod tests {
         assert!(registry.get_parser("tcl").is_some());
         assert!(registry.get_parser("typescript").is_some());
         assert!(registry.get_parser("verilog").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("zig").is_some());
     }
 
@@ -513,9 +577,11 @@ mod tests {
         assert!(registry.get_parser("C").is_some());
         assert!(registry.get_parser("C++").is_some());
         assert!(registry.get_parser("C#").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("COBOL").is_some());
         assert!(registry.get_parser("Cpp").is_some());
         assert!(registry.get_parser("CSharp").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("FORTRAN").is_some());
         assert!(registry.get_parser("Go").is_some());
         assert!(registry.get_parser("JAVA").is_some());
@@ -530,10 +596,12 @@ mod tests {
         assert!(registry.get_parser("Swift").is_some());
         assert!(registry.get_parser("TCL").is_some());
         assert!(registry.get_parser("TypeScript").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("Dart").is_some());
         assert!(registry.get_parser("Lua").is_some());
         assert!(registry.get_parser("Groovy").is_some());
         assert!(registry.get_parser("Scala").is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.get_parser("Zig").is_some());
     }
 
@@ -556,6 +624,7 @@ mod tests {
     fn test_parser_for_path() {
         let registry = ParserRegistry::new();
         assert!(registry.parser_for_path(&PathBuf::from("test.c")).is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry
             .parser_for_path(&PathBuf::from("test.cob"))
             .is_some());
@@ -565,6 +634,7 @@ mod tests {
         assert!(registry
             .parser_for_path(&PathBuf::from("test.cs"))
             .is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry
             .parser_for_path(&PathBuf::from("test.f90"))
             .is_some());
@@ -605,9 +675,11 @@ mod tests {
         assert!(registry
             .parser_for_path(&PathBuf::from("test.sv"))
             .is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry
             .parser_for_path(&PathBuf::from("test.dart"))
             .is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry
             .parser_for_path(&PathBuf::from("test.zig"))
             .is_some());
@@ -620,6 +692,7 @@ mod tests {
         assert!(registry
             .parser_for_path(&PathBuf::from("build.gradle"))
             .is_some());
+        #[cfg(feature = "extra-languages")]
         assert!(registry.parser_for_path(&PathBuf::from("test.R")).is_some());
         assert!(registry
             .parser_for_path(&PathBuf::from("test.scala"))
@@ -661,9 +734,11 @@ mod tests {
     fn test_can_parse() {
         let registry = ParserRegistry::new();
         assert!(registry.can_parse(Path::new("test.c")));
+        #[cfg(feature = "extra-languages")]
         assert!(registry.can_parse(Path::new("test.cob")));
         assert!(registry.can_parse(Path::new("test.cpp")));
         assert!(registry.can_parse(Path::new("test.cs")));
+        #[cfg(feature = "extra-languages")]
         assert!(registry.can_parse(Path::new("test.f90")));
         assert!(registry.can_parse(Path::new("test.go")));
         assert!(registry.can_parse(Path::new("test.h")));
@@ -678,11 +753,14 @@ mod tests {
         assert!(registry.can_parse(Path::new("test.swift")));
         assert!(registry.can_parse(Path::new("test.tcl")));
         assert!(registry.can_parse(Path::new("test.ts")));
+        #[cfg(feature = "extra-languages")]
         assert!(registry.can_parse(Path::new("test.dart")));
+        #[cfg(feature = "extra-languages")]
         assert!(registry.can_parse(Path::new("test.zig")));
         assert!(registry.can_parse(Path::new("test.lua")));
         assert!(registry.can_parse(Path::new("Service.groovy")));
         assert!(registry.can_parse(Path::new("build.gradle")));
+        #[cfg(feature = "extra-languages")]
         assert!(registry.can_parse(Path::new("test.R")));
         assert!(registry.can_parse(Path::new("test.scala")));
         assert!(!registry.can_parse(Path::new("test.txt")));
@@ -693,51 +771,20 @@ mod tests {
     fn test_all_metrics() {
         let registry = ParserRegistry::new();
         let metrics = registry.all_metrics();
-        assert_eq!(metrics.len(), 38);
         let names: Vec<&str> = metrics.iter().map(|(n, _)| *n).collect();
-        assert_eq!(
-            names,
-            vec![
-                "bash",
-                "c",
-                "clojure",
-                "cobol",
-                "cpp",
-                "css",
-                "csharp",
-                "dart",
-                "dockerfile",
-                "elixir",
-                "elm",
-                "erlang",
-                "fortran",
-                "go",
-                "groovy",
-                "haskell",
-                "hcl",
-                "java",
-                "julia",
-                "kotlin",
-                "lua",
-                "objc",
-                "ocaml",
-                "perl",
-                "php",
-                "python",
-                "r",
-                "ruby",
-                "rust",
-                "scala",
-                "solidity",
-                "swift",
-                "tcl",
-                "toml",
-                "typescript",
-                "verilog",
-                "yaml",
-                "zig",
-            ]
-        );
+        #[cfg_attr(not(feature = "extra-languages"), allow(unused_mut))]
+        let mut expected = vec![
+            "bash", "c", "clojure", "cpp", "css", "csharp", "dockerfile",
+            "elixir", "elm", "erlang", "go", "groovy", "haskell", "hcl", "java",
+            "julia", "kotlin", "lua", "objc", "ocaml", "php", "python", "ruby",
+            "rust", "scala", "solidity", "swift", "tcl", "toml", "typescript",
+            "verilog", "yaml",
+        ];
+        // Gated grammars are appended after the base set (see `all_metrics`).
+        #[cfg(feature = "extra-languages")]
+        expected.extend(["cobol", "dart", "fortran", "perl", "r", "zig"]);
+        assert_eq!(metrics.len(), expected.len());
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -751,6 +798,7 @@ mod tests {
             registry.language_for_path(&PathBuf::from("test.h")),
             Some("c")
         );
+        #[cfg(feature = "extra-languages")]
         assert_eq!(
             registry.language_for_path(&PathBuf::from("test.cob")),
             Some("cobol")
@@ -771,6 +819,7 @@ mod tests {
             registry.language_for_path(&PathBuf::from("test.cs")),
             Some("csharp")
         );
+        #[cfg(feature = "extra-languages")]
         assert_eq!(
             registry.language_for_path(&PathBuf::from("test.f90")),
             Some("fortran")
@@ -831,10 +880,12 @@ mod tests {
             registry.language_for_path(&PathBuf::from("test.sv")),
             Some("verilog")
         );
+        #[cfg(feature = "extra-languages")]
         assert_eq!(
             registry.language_for_path(&PathBuf::from("test.dart")),
             Some("dart")
         );
+        #[cfg(feature = "extra-languages")]
         assert_eq!(
             registry.language_for_path(&PathBuf::from("test.zig")),
             Some("zig")
@@ -851,6 +902,7 @@ mod tests {
             registry.language_for_path(&PathBuf::from("build.gradle")),
             Some("groovy")
         );
+        #[cfg(feature = "extra-languages")]
         assert_eq!(
             registry.language_for_path(&PathBuf::from("test.R")),
             Some("r")

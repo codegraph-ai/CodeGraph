@@ -330,7 +330,7 @@ impl Default for TextIndexBuilder {
 /// Tokenize a string into lowercase tokens.
 /// Splits on non-alphanumeric characters and handles camelCase/snake_case.
 /// Handles acronyms like "VALIDATE" or "HTMLParser" correctly.
-fn tokenize(text: &str) -> Vec<String> {
+pub(crate) fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut prev_was_upper = false;

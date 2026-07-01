@@ -6,6 +6,7 @@
 //! High-level API for generating and caching embeddings.
 
 use super::fastembed_embed::{CodeGraphEmbeddingModel, FastembedEmbedding};
+use super::{Embedder, EmbeddingBackend};
 use crate::error::Result;
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use std::sync::Arc;
 ///
 /// Wraps fastembed with a configurable model and DashMap cache for efficient repeated lookups.
 pub struct VectorEngine {
-    model: Arc<FastembedEmbedding>,
+    model: Arc<dyn Embedder>,
     cache: DashMap<String, Vec<f32>>,
     dimension: usize,
 }
@@ -42,6 +43,33 @@ impl VectorEngine {
             cache: DashMap::new(),
             dimension,
         })
+    }
+
+    /// Create a VectorEngine backed by a static (lookup-table) model loaded from
+    /// a model2vec-format directory (`config.json` + `tokenizer.json` +
+    /// `model.safetensors`). No ONNX — the fast indexing path.
+    pub fn with_static_model(model_dir: &Path) -> Result<Self> {
+        let model = super::static_embed::StaticEmbedding::from_pretrained(model_dir)?;
+        let dimension = model.dimension();
+        log::info!(
+            "VectorEngine ready ({}, {}d, static)",
+            model.model_name(),
+            dimension
+        );
+        Ok(Self {
+            model: Arc::new(model),
+            cache: DashMap::new(),
+            dimension,
+        })
+    }
+
+    /// Build a VectorEngine from an `EmbeddingBackend` selection — the ONNX
+    /// fastembed path or the static model2vec path.
+    pub fn from_backend(cache_dir: PathBuf, backend: &EmbeddingBackend) -> Result<Self> {
+        match backend {
+            EmbeddingBackend::Fastembed(model) => Self::with_model(cache_dir, *model),
+            EmbeddingBackend::Static(dir) => Self::with_static_model(dir),
+        }
     }
 
     /// Generate embedding with caching
@@ -111,8 +139,8 @@ impl VectorEngine {
     }
 
     /// Get model display name (e.g. "Jina Code V2 (768d)")
-    pub fn model_name(&self) -> &'static str {
-        self.model.model_type().display_name()
+    pub fn model_name(&self) -> &str {
+        self.model.model_name()
     }
 
     /// Get cache size

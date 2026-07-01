@@ -185,23 +185,20 @@ pub struct MemoryManager {
     extension_path: Option<PathBuf>,
     /// Cached vector engine (holds model, not DB - safe to keep)
     engine: Arc<RwLock<Option<Arc<VectorEngine>>>>,
-    /// Embedding model selection
-    embedding_model: codegraph_memory::CodeGraphEmbeddingModel,
+    /// Embedding backend selection (fastembed model or static model2vec)
+    embedding_model: codegraph_memory::EmbeddingBackend,
 }
 
 impl MemoryManager {
     /// Create a new MemoryManager
     pub fn new(extension_path: Option<PathBuf>) -> Self {
-        Self::with_model(
-            extension_path,
-            codegraph_memory::CodeGraphEmbeddingModel::default(),
-        )
+        Self::with_model(extension_path, codegraph_memory::EmbeddingBackend::default())
     }
 
-    /// Create a new MemoryManager with a specific embedding model
+    /// Create a new MemoryManager with a specific embedding backend
     pub fn with_model(
         extension_path: Option<PathBuf>,
-        embedding_model: codegraph_memory::CodeGraphEmbeddingModel,
+        embedding_model: codegraph_memory::EmbeddingBackend,
     ) -> Self {
         Self {
             data_dir: Arc::new(RwLock::new(None)),
@@ -209,6 +206,12 @@ impl MemoryManager {
             engine: Arc::new(RwLock::new(None)),
             embedding_model,
         }
+    }
+
+    /// Short telemetry tag for the configured embedding backend
+    /// (`static` / `bge-small` / `jina-code-v2` / `granite-97m`).
+    pub fn embedding_telemetry_id(&self) -> &'static str {
+        self.embedding_model.telemetry_id()
     }
 
     /// Initialize the memory manager with workspace path
@@ -302,7 +305,7 @@ impl MemoryManager {
         // Phase marker: a native crash during the ONNX model load never runs
         // the panic hook, so stamp the phase for the extension to read post-mortem.
         crate::crash_phase::mark("onnx_load");
-        let engine = VectorEngine::with_model(cache_dir, self.embedding_model).map_err(|e| {
+        let engine = VectorEngine::from_backend(cache_dir, &self.embedding_model).map_err(|e| {
             tracing::error!(
                 "[MemoryManager::initialize] VectorEngine initialization failed: {:?}",
                 e

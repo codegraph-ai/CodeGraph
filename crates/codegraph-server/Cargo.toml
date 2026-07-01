@@ -55,13 +55,16 @@ codegraph-ruby.workspace = true
 codegraph-swift.workspace = true
 codegraph-tcl.workspace = true
 codegraph-verilog.workspace = true
-codegraph-cobol.workspace = true
-codegraph-fortran.workspace = true
-codegraph-dart.workspace = true
-codegraph-zig.workspace = true
+# Heavy, zero-telemetry-usage grammars — gated behind `extra-languages`
+# (default-off) to keep the community binary lean. COBOL's parser.c alone is
+# 30.7 MB; none of these appear in any indexed workspace (PostHog, 90d).
+codegraph-cobol = { workspace = true, optional = true }
+codegraph-fortran = { workspace = true, optional = true }
+codegraph-dart = { workspace = true, optional = true }
+codegraph-zig = { workspace = true, optional = true }
 codegraph-lua.workspace = true
 codegraph-groovy.workspace = true
-codegraph-r.workspace = true
+codegraph-r = { workspace = true, optional = true }
 codegraph-scala.workspace = true
 codegraph-bash.workspace = true
 codegraph-elixir.workspace = true
@@ -69,7 +72,7 @@ codegraph-haskell.workspace = true
 codegraph-hcl.workspace = true
 codegraph-julia.workspace = true
 codegraph-ocaml.workspace = true
-codegraph-perl.workspace = true
+codegraph-perl = { workspace = true, optional = true }
 codegraph-toml.workspace = true
 codegraph-yaml.workspace = true
 codegraph-clojure.workspace = true
@@ -85,6 +88,18 @@ codegraph-memory.workspace = true
 
 # CLI
 clap.workspace = true
+
+[features]
+# Off by default → the community binary omits these heavy, unused grammars.
+# Pro / full builds opt in with `--features extra-languages`.
+extra-languages = [
+    "dep:codegraph-cobol",
+    "dep:codegraph-fortran",
+    "dep:codegraph-dart",
+    "dep:codegraph-zig",
+    "dep:codegraph-r",
+    "dep:codegraph-perl",
+]
 
 [dev-dependencies]
 tempfile = "3"

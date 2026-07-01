@@ -46,6 +46,12 @@ anyhow = "1.0"
 # Logging
 log = "0.4"
 
+# Static (lookup-table) embeddings: HuggingFace tokenizer + a safetensors
+# token->vector matrix, mean-pooled. No ONNX — the fast indexing path.
+tokenizers = "0.21"
+safetensors = "0.4"
+half = "2"
+
 # Embeddings - fastembed with BGE-Small-EN-v1.5
 # macOS/Linux: static link ONNX Runtime (ort-download-binaries)
 # Windows: load onnxruntime DLL at runtime (ort-load-dynamic, avoids CRT /MT vs /MD mismatch)
