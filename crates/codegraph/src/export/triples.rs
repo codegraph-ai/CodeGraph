@@ -111,4 +111,103 @@ mod tests {
         let result = format_triple_object(&val);
         assert!(result.contains("\\\""));
     }
+
+    #[test]
+    fn test_format_triple_object_float() {
+        use crate::PropertyValue;
+
+        assert_eq!(
+            format_triple_object(&PropertyValue::Float(3.5)),
+            "\"3.5\"^^<xsd:double>"
+        );
+    }
+
+    #[test]
+    fn test_format_triple_object_null() {
+        use crate::PropertyValue;
+
+        assert_eq!(format_triple_object(&PropertyValue::Null), "\"null\"");
+    }
+
+    #[test]
+    fn test_format_triple_object_string_list() {
+        use crate::PropertyValue;
+
+        assert_eq!(
+            format_triple_object(&PropertyValue::StringList(vec![
+                "a".to_string(),
+                "b".to_string(),
+            ])),
+            "\"[a,b]\""
+        );
+        // An empty list still yields a well-formed bracketed literal.
+        assert_eq!(
+            format_triple_object(&PropertyValue::StringList(vec![])),
+            "\"[]\""
+        );
+    }
+
+    #[test]
+    fn test_format_triple_object_string_list_escapes() {
+        use crate::PropertyValue;
+
+        // Backslashes and quotes in list elements are escaped after joining.
+        let val = PropertyValue::StringList(vec!["x\"".to_string(), "y\\".to_string()]);
+        let result = format_triple_object(&val);
+        assert!(result.contains("\\\""), "quote should be escaped: {result}");
+        assert!(
+            result.contains("\\\\"),
+            "backslash should be escaped: {result}"
+        );
+    }
+
+    #[test]
+    fn test_format_triple_object_int_list() {
+        use crate::PropertyValue;
+
+        assert_eq!(
+            format_triple_object(&PropertyValue::IntList(vec![1, 2, 3])),
+            "\"[1,2,3]\"^^<xsd:array>"
+        );
+        assert_eq!(
+            format_triple_object(&PropertyValue::IntList(vec![])),
+            "\"[]\"^^<xsd:array>"
+        );
+    }
+
+    #[test]
+    fn test_format_triple_object_string_escapes_backslash() {
+        use crate::PropertyValue;
+
+        // The backslash branch of the String escape (only quotes were pinned before).
+        let val = PropertyValue::String("path\\to".to_string());
+        assert_eq!(format_triple_object(&val), "\"path\\\\to\"");
+    }
+
+    #[test]
+    fn test_export_triples_emits_node_and_edge_properties() {
+        use crate::{EdgeType, NodeType, PropertyMap, PropertyValue};
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let mut node_props = PropertyMap::new();
+        node_props.insert("name".to_string(), PropertyValue::String("f".to_string()));
+        node_props.insert("arity".to_string(), PropertyValue::Int(2));
+        let a = graph.add_node(NodeType::Function, node_props).unwrap();
+        let b = graph
+            .add_node(NodeType::Function, PropertyMap::new())
+            .unwrap();
+
+        let mut edge_props = PropertyMap::new();
+        edge_props.insert("weight".to_string(), PropertyValue::Float(1.5));
+        graph.add_edge(a, b, EdgeType::Calls, edge_props).unwrap();
+
+        let triples = graph.export_triples().unwrap();
+        // Node property triple with the xsd:integer annotation.
+        assert!(triples.contains("<node:0> <prop:arity> \"2\"^^<xsd:integer> ."));
+        // Node type triple.
+        assert!(triples.contains("<node:0> <rdf:type>"));
+        // Edge triple plus an edge-property triple keyed by edge id.
+        assert!(triples.contains("<node:0> <edge:Calls> <node:1> ."));
+        assert!(triples.contains("<edge:0> <prop:weight> \"1.5\"^^<xsd:double> ."));
+    }
 }
