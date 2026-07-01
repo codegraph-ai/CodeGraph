@@ -366,6 +366,51 @@ mod tests {
     }
 
     #[test]
+    fn test_dfs_incoming_direction() {
+        // Mirror of the bfs incoming test: dfs walking incoming edges from the
+        // tail must reach both ancestors. bfs exercised Direction::Incoming but
+        // dfs only ever ran Outgoing, leaving its direction arg unpinned.
+        let (graph, a, b, c) = chain();
+        let result = dfs(&graph, c, Direction::Incoming, None).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&a));
+        assert!(result.contains(&b));
+    }
+
+    #[test]
+    fn test_dfs_cycle_terminates_and_dedups() {
+        // dfs mirror of the bfs cycle test: the start node is pre-marked
+        // visited, so the back edge to `a` does not re-add it and traversal
+        // terminates. dfs's visited-set dedup on a cycle was previously untested.
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, a, vec![]).unwrap();
+        let result = dfs(&graph, a, Direction::Outgoing, None).unwrap();
+        assert_eq!(result, vec![b]);
+    }
+
+    #[test]
+    fn test_bfs_max_depth_zero_returns_empty() {
+        // The depth guard is `depth >= max`, so max_depth Some(0) fires on the
+        // very first pop (depth 0 >= 0) before any neighbor is expanded. Prior
+        // tests only used Some(1), never the depth==max boundary at zero.
+        let (graph, a, _b, _c) = chain();
+        assert!(bfs(&graph, a, Direction::Outgoing, Some(0))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_dfs_max_depth_zero_returns_empty() {
+        let (graph, a, _b, _c) = chain();
+        assert!(dfs(&graph, a, Direction::Outgoing, Some(0))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn test_scc_no_cycle_is_empty() {
         let (graph, _a, _b, _c) = chain();
         assert!(find_strongly_connected_components(&graph)
@@ -413,6 +458,18 @@ mod tests {
         let (graph, a, b, c) = chain();
         let paths = find_all_paths(&graph, a, c, None).unwrap();
         assert_eq!(paths, vec![vec![a, b, c]]);
+    }
+
+    #[test]
+    fn test_find_all_paths_start_equals_end() {
+        // When start == end, find_paths_recursive hits the `current == end`
+        // target check on the very first call (current_path == [start]) and
+        // returns a single length-1 path without traversing any edge. Every
+        // prior test used distinct start/end, so this immediate-hit branch
+        // (ordered before neighbor exploration) was never exercised.
+        let (graph, a, _b, _c) = chain();
+        let paths = find_all_paths(&graph, a, a, None).unwrap();
+        assert_eq!(paths, vec![vec![a]]);
     }
 
     #[test]
