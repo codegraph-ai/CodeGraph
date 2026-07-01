@@ -92,6 +92,47 @@ mod tests {
     }
 
     #[test]
+    fn module_default_serializes_exact_wire_format() {
+        let m = ModuleEntity::new("rt", "/rt.rs", "rust");
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "name": "rt",
+                "path": "/rt.rs",
+                "language": "rust",
+                "line_count": 0,
+                "doc_comment": null,
+                "attributes": []
+            }),
+            "default ModuleEntity wire format pins snake_case line_count/doc_comment, \
+             explicit-null doc_comment (no skip_serializing_if), and empty attributes array"
+        );
+    }
+
+    #[test]
+    fn module_populated_serializes_exact_wire_format() {
+        let m = ModuleEntity::new("app", "/src/app.py", "python")
+            .with_line_count(250)
+            .with_doc("app module")
+            .with_attributes(vec!["# type: ignore".to_string()]);
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "name": "app",
+                "path": "/src/app.py",
+                "language": "python",
+                "line_count": 250,
+                "doc_comment": "app module",
+                "attributes": ["# type: ignore"]
+            }),
+            "populated ModuleEntity wire format pins the Some arm of doc_comment and \
+             a non-empty attributes array so a rename of line_count/doc_comment is caught"
+        );
+    }
+
+    #[test]
     fn accepts_string_and_str_inputs() {
         let m = ModuleEntity::new(String::from("m"), "/m.rs", String::from("rust"))
             .with_doc(String::from("d"));
