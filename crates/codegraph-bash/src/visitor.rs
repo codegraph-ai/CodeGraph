@@ -253,4 +253,145 @@ mod tests {
         assert_eq!(visitor.imports.len(), 1);
         assert_eq!(visitor.imports[0].imported, "./lib.sh");
     }
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = b"greet() {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+
+        assert_eq!(f.visibility, "public");
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 3);
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.parameters.is_empty());
+        assert!(f.return_type.is_none());
+        assert!(f.parent_class.is_none());
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_function_signature_is_first_line() {
+        let source = b"greet() {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert_eq!(f.signature, "greet() {");
+    }
+
+    #[test]
+    fn test_function_keyword_form() {
+        let source = b"function do_work {\n    echo hi\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "do_work");
+    }
+
+    #[test]
+    fn test_doc_comment_extracted() {
+        let source = b"# greets the user\ngreet() {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert_eq!(f.doc_comment.as_deref(), Some("# greets the user"));
+    }
+
+    #[test]
+    fn test_doc_comment_absent() {
+        let source = b"greet() {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_body_prefix_present() {
+        let source = b"greet() {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.body_prefix.as_deref().unwrap().contains("echo hi"));
+    }
+
+    #[test]
+    fn test_complexity_baseline() {
+        let source = b"greet() {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert_eq!(f.complexity.as_ref().unwrap().cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_complexity_if_branch() {
+        let source = b"greet() {\n    if [ -n \"$1\" ]; then\n        echo hi\n    fi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_loop() {
+        let source = b"greet() {\n    for x in 1 2 3; do\n        echo $x\n    done\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_case() {
+        let source =
+            b"greet() {\n    case $1 in\n        a) echo a ;;\n        *) echo x ;;\n    esac\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_dot_import() {
+        let source = b". ./lib.sh\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "./lib.sh");
+    }
+
+    #[test]
+    fn test_import_quotes_stripped() {
+        let source = b"source \"./lib.sh\"\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "./lib.sh");
+    }
+
+    #[test]
+    fn test_call_tracked_inside_function() {
+        let source = b"greet() {\n    echo hi\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "greet" && c.callee == "echo"));
+    }
+
+    #[test]
+    fn test_call_not_tracked_outside_function() {
+        let source = b"echo hi\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_source_excluded_from_calls() {
+        let source = b"greet() {\n    source ./lib.sh\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert!(!visitor.calls.iter().any(|c| c.callee == "source"));
+    }
+
+    #[test]
+    fn test_multiple_functions() {
+        let source = b"a() {\n    echo 1\n}\nb() {\n    echo 2\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "a");
+        assert_eq!(visitor.functions[1].name, "b");
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
 }
