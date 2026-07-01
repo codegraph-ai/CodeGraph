@@ -120,4 +120,39 @@ mod tests {
     fn test_trait_object_safe() {
         fn _accept_trait_object(_backend: &dyn StorageBackend) {}
     }
+
+    /// Round-trip the `Put` variant through serde JSON to exercise the derived
+    /// `Serialize`/`Deserialize` impls (never hit elsewhere - `write_batch`
+    /// only constructs and matches on these values, never serializes them).
+    #[test]
+    fn test_batch_operation_put_serde_round_trip() {
+        let op = BatchOperation::Put {
+            key: vec![1, 2, 3],
+            value: vec![4, 5, 6],
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let decoded: BatchOperation = serde_json::from_str(&json).unwrap();
+        match decoded {
+            BatchOperation::Put { key, value } => {
+                assert_eq!(key, vec![1, 2, 3]);
+                assert_eq!(value, vec![4, 5, 6]);
+            }
+            BatchOperation::Delete { .. } => panic!("expected Put variant"),
+        }
+    }
+
+    /// Round-trip the `Delete` variant through serde JSON to exercise the other
+    /// derived enum arm.
+    #[test]
+    fn test_batch_operation_delete_serde_round_trip() {
+        let op = BatchOperation::Delete {
+            key: vec![7, 8, 9],
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let decoded: BatchOperation = serde_json::from_str(&json).unwrap();
+        match decoded {
+            BatchOperation::Delete { key } => assert_eq!(key, vec![7, 8, 9]),
+            BatchOperation::Put { .. } => panic!("expected Delete variant"),
+        }
+    }
 }
