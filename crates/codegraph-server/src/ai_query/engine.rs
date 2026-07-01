@@ -3999,4 +3999,110 @@ mod tests {
         assert!(without.starts_with("getUserById"), "got: {without}");
         assert!(!without.contains("get user by id"));
     }
+
+    #[test]
+    fn glob_to_anchored_regex_converts_glob_wildcards() {
+        // Plain glob: `*` -> `.*`, `?` -> `.`, both ends anchored, `.` escaped.
+        assert_eq!(QueryEngine::glob_to_anchored_regex("get*"), "^get.*$");
+        assert_eq!(QueryEngine::glob_to_anchored_regex("f?o"), "^f.o$");
+        assert_eq!(
+            QueryEngine::glob_to_anchored_regex("a.b"),
+            r"^a\.b$",
+            "a literal dot must be escaped in glob mode"
+        );
+        // Path separators are escaped too.
+        assert_eq!(QueryEngine::glob_to_anchored_regex("a/b"), r"^a\/b$");
+    }
+
+    #[test]
+    fn glob_to_anchored_regex_preserves_and_anchors_regex() {
+        // `.*` triggers regex mode; an un-anchored pattern is wrapped once.
+        assert_eq!(
+            QueryEngine::glob_to_anchored_regex("get.*User"),
+            "^(?:get.*User)$"
+        );
+        // A fully anchored regex is left untouched.
+        assert_eq!(
+            QueryEngine::glob_to_anchored_regex("^foo\\d+$"),
+            "^foo\\d+$"
+        );
+        // Only a start anchor: append `$`.
+        assert_eq!(QueryEngine::glob_to_anchored_regex("^foo|bar"), "^foo|bar$");
+        // Only an end anchor: prepend `^`.
+        assert_eq!(QueryEngine::glob_to_anchored_regex("foo|bar$"), "^foo|bar$");
+    }
+
+    #[test]
+    fn count_params_from_signature_handles_self_and_generics() {
+        assert_eq!(QueryEngine::count_params_from_signature("fn foo()"), 0);
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(a: i32)"),
+            1
+        );
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(a: i32, b: String)"),
+            2
+        );
+        // A top-level comma inside generics must not inflate the count.
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(m: HashMap<String, i32>)"),
+            1
+        );
+        // self receivers are not counted as parameters.
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(&self, a: i32)"),
+            1
+        );
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(&mut self)"),
+            0
+        );
+        // No parens at all -> 0.
+        assert_eq!(QueryEngine::count_params_from_signature("weird"), 0);
+    }
+
+    #[test]
+    fn extract_return_type_from_signature_rust_and_ts() {
+        // Rust arrow form, with a trailing brace stripped.
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("fn foo(a: i32) -> User {"),
+            "User"
+        );
+        // TypeScript/Java colon-after-paren form.
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("function foo(a: number): boolean"),
+            "boolean"
+        );
+        // No return annotation -> empty string.
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("fn foo(a: i32)"),
+            ""
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_covers_identical_orthogonal_and_zero() {
+        // Identical vectors -> 1.0.
+        assert!((cosine_similarity(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-6);
+        // Orthogonal vectors -> 0.0.
+        assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+        // A zero-norm operand short-circuits to 0.0 (no NaN from divide-by-zero).
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    #[tokio::test]
+    async fn type_matches_normalizes_primitive_aliases() {
+        let (engine, _) = create_test_engine().await;
+        // Primitive alias tables collapse to a shared canonical form.
+        assert!(engine.type_matches("boolean", "bool"));
+        assert!(engine.type_matches("i64", "integer"));
+        assert!(engine.type_matches("&str", "string"));
+        assert!(engine.type_matches("()", "void"));
+        // Generic prefix: bare base matches an instantiated generic.
+        assert!(engine.type_matches("Result<T, E>", "Result"));
+        // Case-insensitive base-type match across generics.
+        assert!(engine.type_matches("myvec<i32>", "MyVec<u8>"));
+        // Genuinely different types do not match.
+        assert!(!engine.type_matches("User", "Account"));
+    }
 }
