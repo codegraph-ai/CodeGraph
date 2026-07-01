@@ -534,4 +534,131 @@ body {
         assert!(visitor.functions.is_empty());
         assert!(visitor.imports.is_empty());
     }
+
+    #[test]
+    fn test_id_selector_preserved() {
+        let source = b"#header {\n    height: 60px;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "#header");
+    }
+
+    #[test]
+    fn test_attribute_selector_preserved() {
+        let source = b"input[type=\"text\"] {\n    border: 1px;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "input[type=\"text\"]");
+    }
+
+    #[test]
+    fn test_universal_selector_preserved() {
+        let source = b"* {\n    margin: 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "*");
+    }
+
+    #[test]
+    fn test_descendant_combinator_selector_kept_verbatim() {
+        let source = b".nav a {\n    color: blue;\n}";
+        let visitor = parse_and_visit(source);
+
+        // A descendant combinator is one selector node, whitespace preserved between parts
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, ".nav a");
+    }
+
+    #[test]
+    fn test_child_combinator_selector_kept_verbatim() {
+        let source = b".nav > a {\n    color: blue;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, ".nav > a");
+    }
+
+    #[test]
+    fn test_two_media_blocks_each_contribute_a_rule() {
+        let source = br#"
+@media (max-width: 768px) {
+    .a { padding: 0; }
+}
+@media (min-width: 769px) {
+    .b { padding: 8px; }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let names: Vec<_> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec![".a", ".b"]);
+    }
+
+    #[test]
+    fn test_import_before_keyframes_recorded() {
+        let source = br#"
+@import "reset.css";
+@keyframes spin {
+    from { transform: rotate(0); }
+    to { transform: rotate(360deg); }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        // the import is kept; the keyframes block contributes no functions
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "reset.css");
+        assert!(visitor.functions.is_empty());
+    }
+
+    #[test]
+    fn test_import_order_preserved_across_forms() {
+        let source = br#"
+@import "a.css";
+@import url("b.css");
+@import 'c.css';
+"#;
+        let visitor = parse_and_visit(source);
+        let paths: Vec<_> = visitor
+            .imports
+            .iter()
+            .map(|i| i.imported.as_str())
+            .collect();
+        assert_eq!(paths, vec!["a.css", "b.css", "c.css"]);
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max_chars() {
+        // Build a block whose text exceeds BODY_PREFIX_MAX_CHARS (1024 bytes)
+        let mut source = Vec::from(&b".big {\n"[..]);
+        for _ in 0..200 {
+            source.extend_from_slice(b"    color: red;\n");
+        }
+        source.extend_from_slice(b"}");
+        let visitor = parse_and_visit(&source);
+
+        let body = visitor.functions[0]
+            .body_prefix
+            .as_ref()
+            .expect("expected body_prefix");
+        assert_eq!(
+            body.len(),
+            codegraph_parser_api::BODY_PREFIX_MAX_CHARS,
+            "body_prefix should be truncated to the max byte length"
+        );
+    }
+
+    #[test]
+    fn test_media_query_condition_not_extracted_as_rule() {
+        // The @media condition itself must never become a function; only the
+        // nested rule_set does.
+        let source = br#"@media screen and (max-width: 768px) {
+    .container { padding: 0; }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, ".container");
+    }
 }
