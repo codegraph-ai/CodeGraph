@@ -524,6 +524,77 @@ impl GitMiner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    /// Run a git command in `dir`, panicking on failure.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Commit the current index with `subject` and return nothing; identity and
+    /// gpgsign are configured by `init_repo`.
+    fn commit(dir: &Path, subject: &str) {
+        git(dir, &["commit", "-q", "-m", subject]);
+    }
+
+    /// Build a temp repo whose churn/coupling profile is deterministic:
+    /// - `a.txt` is touched by 6 commits (a hotspot),
+    /// - `b.txt` by 3 commits (co-changing with `a.txt` each time),
+    /// - `c.txt` by 1 commit (standalone).
+    ///
+    /// Returns the temp dir (kept alive by the caller) and a `GitMiner`.
+    fn init_repo() -> (TempDir, GitMiner) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+        git(path, &["init", "-q"]);
+        git(path, &["config", "user.name", "Test User"]);
+        git(path, &["config", "user.email", "test@example.com"]);
+        git(path, &["config", "commit.gpgsign", "false"]);
+
+        // Commit 1: a + b together.
+        fs::write(path.join("a.txt"), "a1\n").unwrap();
+        fs::write(path.join("b.txt"), "b1\n").unwrap();
+        git(path, &["add", "a.txt", "b.txt"]);
+        commit(path, "feat: add a and b");
+
+        // Commits 2 and 3: a + b together.
+        for n in 2..=3 {
+            fs::write(path.join("a.txt"), format!("a{}\n", n)).unwrap();
+            fs::write(path.join("b.txt"), format!("b{}\n", n)).unwrap();
+            git(path, &["add", "a.txt", "b.txt"]);
+            commit(path, &format!("fix: touch a and b #{}", n));
+        }
+
+        // Commits 4, 5, 6: a alone.
+        for n in 4..=6 {
+            fs::write(path.join("a.txt"), format!("a{}\n", n)).unwrap();
+            git(path, &["add", "a.txt"]);
+            commit(path, &format!("refactor: touch a #{}", n));
+        }
+
+        // Commit 7: c alone.
+        fs::write(path.join("c.txt"), "c1\n").unwrap();
+        git(path, &["add", "c.txt"]);
+        commit(path, "feat: add c");
+
+        git(path, &["branch", "-M", "main"]);
+
+        let miner = GitMiner::new(path).unwrap();
+        (dir, miner)
+    }
 
     #[test]
     fn test_mining_config_default() {
@@ -533,5 +604,214 @@ mod tests {
         assert!(config.mine_breaking_changes);
         assert_eq!(config.max_commits, 500);
         assert!(config.min_confidence >= 0.0 && config.min_confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_mining_result_default() {
+        let result = MiningResult::default();
+        assert_eq!(result.commits_processed, 0);
+        assert_eq!(result.memories_created, 0);
+        assert_eq!(result.commits_skipped, 0);
+        assert!(result.memory_ids.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_new_rejects_non_repository() {
+        let dir = TempDir::new().unwrap();
+        let result = GitMiner::new(dir.path());
+        assert!(matches!(result, Err(GitMiningError::NotARepository(_))));
+    }
+
+    #[test]
+    fn test_collect_relevant_commits_returns_all() {
+        let (_dir, miner) = init_repo();
+        let config = MiningConfig::default();
+        let commits = miner.collect_relevant_commits(&config).unwrap();
+        assert_eq!(commits.len(), 7);
+        // Newest commit is first in git log order.
+        assert_eq!(commits[0].subject, "feat: add c");
+    }
+
+    #[test]
+    fn test_collect_relevant_commits_respects_max() {
+        let (_dir, miner) = init_repo();
+        let config = MiningConfig {
+            max_commits: 3,
+            ..MiningConfig::default()
+        };
+        let commits = miner.collect_relevant_commits(&config).unwrap();
+        assert_eq!(commits.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_detect_hotspots_threshold_filters() {
+        let (_dir, miner) = init_repo();
+        // Threshold 3 keeps a.txt (6) and b.txt (3); c.txt (1) is excluded.
+        let hotspots = miner.detect_hotspots(3).await.unwrap();
+        let paths: Vec<&str> = hotspots.iter().map(|h| h.file_path.as_str()).collect();
+        assert!(paths.contains(&"a.txt"));
+        assert!(paths.contains(&"b.txt"));
+        assert!(!paths.contains(&"c.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_detect_hotspots_sorted_descending() {
+        let (_dir, miner) = init_repo();
+        let hotspots = miner.detect_hotspots(1).await.unwrap();
+        // a.txt has the most changes and must sort first.
+        assert_eq!(hotspots[0].file_path, "a.txt");
+        assert_eq!(hotspots[0].change_count, 6);
+        for pair in hotspots.windows(2) {
+            assert!(pair[0].change_count >= pair[1].change_count);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detect_hotspots_unique_commits_count() {
+        let (_dir, miner) = init_repo();
+        let hotspots = miner.detect_hotspots(1).await.unwrap();
+        let a = hotspots.iter().find(|h| h.file_path == "a.txt").unwrap();
+        assert_eq!(a.change_count, 6);
+        assert_eq!(a.unique_commits, 6);
+        let b = hotspots.iter().find(|h| h.file_path == "b.txt").unwrap();
+        assert_eq!(b.change_count, 3);
+        assert_eq!(b.unique_commits, 3);
+    }
+
+    #[tokio::test]
+    async fn test_detect_hotspots_recent_changes_capped_at_5() {
+        let (_dir, miner) = init_repo();
+        let hotspots = miner.detect_hotspots(1).await.unwrap();
+        let a = hotspots.iter().find(|h| h.file_path == "a.txt").unwrap();
+        // a.txt changed in 6 commits but recent_changes is capped at 5.
+        assert_eq!(a.recent_changes.len(), 5);
+        let c = hotspots.iter().find(|h| h.file_path == "c.txt").unwrap();
+        assert_eq!(c.recent_changes, vec!["feat: add c".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_detect_hotspots_high_threshold_excludes_all_but_top() {
+        let (_dir, miner) = init_repo();
+        let hotspots = miner.detect_hotspots(6).await.unwrap();
+        assert_eq!(hotspots.len(), 1);
+        assert_eq!(hotspots[0].file_path, "a.txt");
+    }
+
+    #[tokio::test]
+    async fn test_detect_hotspots_empty_when_threshold_exceeds_max() {
+        let (_dir, miner) = init_repo();
+        let hotspots = miner.detect_hotspots(100).await.unwrap();
+        assert!(hotspots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_detect_coupling_pair_detected() {
+        let (_dir, miner) = init_repo();
+        let couplings = miner.detect_coupling(0.0).await.unwrap();
+        // Only a.txt and b.txt ever change together (3 times).
+        let ab = couplings
+            .iter()
+            .find(|c| c.file_a == "a.txt" && c.file_b == "b.txt")
+            .expect("a/b coupling present");
+        assert_eq!(ab.co_change_count, 3);
+        // Pairs are ordered lexicographically, so file_a < file_b.
+        assert!(ab.file_a < ab.file_b);
+    }
+
+    #[tokio::test]
+    async fn test_detect_coupling_strength_computed() {
+        let (_dir, miner) = init_repo();
+        let couplings = miner.detect_coupling(0.0).await.unwrap();
+        let ab = couplings
+            .iter()
+            .find(|c| c.file_a == "a.txt" && c.file_b == "b.txt")
+            .unwrap();
+        // co(3) / min(changes_a=6, changes_b=3) = 1.0
+        assert!((ab.coupling_strength - 1.0).abs() < f32::EPSILON);
+        // total_changes is the max of the two files' change counts.
+        assert_eq!(ab.total_changes, 6);
+    }
+
+    #[tokio::test]
+    async fn test_detect_coupling_min_filter_excludes() {
+        let (_dir, miner) = init_repo();
+        // Strength is 1.0, so a threshold above it drops the pair.
+        let couplings = miner.detect_coupling(1.1).await.unwrap();
+        assert!(couplings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_detect_coupling_only_ab_pair() {
+        let (_dir, miner) = init_repo();
+        let couplings = miner.detect_coupling(0.0).await.unwrap();
+        // c.txt only ever changes alone, so it forms no pair.
+        assert_eq!(couplings.len(), 1);
+        assert!(!couplings
+            .iter()
+            .any(|c| c.file_a == "c.txt" || c.file_b == "c.txt"));
+    }
+
+    #[test]
+    fn test_should_process_pattern_respects_bug_fix_flag() {
+        let (_dir, miner) = init_repo();
+        let pattern = CommitPattern::BugFix { issue_ref: None };
+        let mut config = MiningConfig::default();
+        assert!(miner.should_process_pattern(&pattern, &config));
+        config.mine_bug_fixes = false;
+        assert!(!miner.should_process_pattern(&pattern, &config));
+    }
+
+    #[test]
+    fn test_should_process_pattern_each_toggled_kind() {
+        let (_dir, miner) = init_repo();
+        let cases: Vec<(CommitPattern, fn(&mut MiningConfig))> = vec![
+            (CommitPattern::ArchitecturalDecision, |c| {
+                c.mine_arch_decisions = false
+            }),
+            (CommitPattern::BreakingChange, |c| {
+                c.mine_breaking_changes = false
+            }),
+            (CommitPattern::Feature, |c| c.mine_features = false),
+            (CommitPattern::Deprecation, |c| c.mine_deprecations = false),
+            (
+                CommitPattern::Revert {
+                    reverted_hash: None,
+                },
+                |c| c.mine_reverts = false,
+            ),
+        ];
+        for (pattern, disable) in cases {
+            let mut config = MiningConfig::default();
+            assert!(
+                miner.should_process_pattern(&pattern, &config),
+                "{:?} should process when enabled",
+                pattern
+            );
+            disable(&mut config);
+            assert!(
+                !miner.should_process_pattern(&pattern, &config),
+                "{:?} should be skipped when disabled",
+                pattern
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_process_pattern_non_memory_kinds_never_process() {
+        let (_dir, miner) = init_repo();
+        let config = MiningConfig::default();
+        for pattern in [
+            CommitPattern::Refactor,
+            CommitPattern::Documentation,
+            CommitPattern::Test,
+            CommitPattern::Other,
+        ] {
+            assert!(
+                !miner.should_process_pattern(&pattern, &config),
+                "{:?} must never create a memory",
+                pattern
+            );
+        }
     }
 }
