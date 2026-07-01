@@ -812,4 +812,276 @@ mod tests {
         assert!(outgoing.contains(&info.classes[0]));
         assert!(outgoing.contains(&info.classes[1]));
     }
+
+    #[test]
+    fn free_function_line_signature_visibility_path_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        ir.add_function(
+            FunctionEntity::new("run", 4, 12)
+                .with_signature("def run(int a)")
+                .with_visibility("private"),
+        );
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(4))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(12))
+        );
+        assert_eq!(
+            node.properties.get("signature"),
+            Some(&PropertyValue::String("def run(int a)".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("private".to_string()))
+        );
+        // The mapper stamps the file path on every function node.
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Service.groovy".to_string()))
+        );
+    }
+
+    #[test]
+    fn free_function_is_abstract_flag() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        ir.add_function(FunctionEntity::new("shape", 1, 3).abstract_fn());
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("is_abstract"),
+            Some(&PropertyValue::Bool(true))
+        );
+        // async/static default to false when only is_abstract is set.
+        assert_eq!(
+            node.properties.get("is_async"),
+            Some(&PropertyValue::Bool(false))
+        );
+        assert_eq!(
+            node.properties.get("is_static"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn method_writes_full_flag_and_complexity_prop_set() {
+        // Unlike the scala/dart/solidity mappers, the groovy class-method loop
+        // writes the SAME broad prop set as free functions: is_async, is_static,
+        // is_abstract and the complexity subprops all survive for methods.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 4,
+            branches: 1,
+            ..Default::default()
+        };
+        let method = FunctionEntity::new("load", 3, 9)
+            .async_fn()
+            .static_fn()
+            .with_complexity(metrics);
+        ir.add_class(ClassEntity::new("Repo", 1, 20).with_methods(vec![method]));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(name_of(&graph, info.functions[0]), "Repo.load");
+        assert_eq!(
+            node.properties.get("is_async"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get("is_static"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get("is_abstract"),
+            Some(&PropertyValue::Bool(false))
+        );
+        assert_eq!(
+            node.properties.get("complexity"),
+            Some(&PropertyValue::Int(4))
+        );
+        assert_eq!(
+            node.properties.get("complexity_branches"),
+            Some(&PropertyValue::Int(1))
+        );
+    }
+
+    #[test]
+    fn method_line_path_visibility_bounds() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        let method = FunctionEntity::new("save", 6, 14)
+            .with_signature("void save()")
+            .with_visibility("protected");
+        ir.add_class(ClassEntity::new("Repo", 1, 20).with_methods(vec![method]));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(6))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(14))
+        );
+        assert_eq!(
+            node.properties.get("signature"),
+            Some(&PropertyValue::String("void save()".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("protected".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Service.groovy".to_string()))
+        );
+    }
+
+    #[test]
+    fn class_line_visibility_path_and_default_abstract_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        ir.add_class(ClassEntity::new("Bare", 2, 18).with_visibility("public"));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.classes[0]).unwrap();
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(2))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(18))
+        );
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("public".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Service.groovy".to_string()))
+        );
+        // is_abstract defaults to false for a plain class.
+        assert_eq!(
+            node.properties.get("is_abstract"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn module_without_doc_omits_doc_prop() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        // Module present but with no doc_comment -> the file node skips `doc`.
+        ir.set_module(ModuleEntity::new(
+            "my.service",
+            "src/Service.groovy",
+            "groovy",
+        ));
+
+        let (graph, info) = build(&ir);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("my.service".to_string()))
+        );
+        assert!(file.properties.get("doc").is_none());
+    }
+
+    #[test]
+    fn import_reuses_in_file_function_node() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        ir.add_function(FunctionEntity::new("helper", 1, 5));
+        ir.add_import(ImportRelation::new("Service", "helper"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+        // The import reused the function node rather than creating a Module.
+        assert_eq!(info.imports[0], info.functions[0]);
+
+        let node = graph.get_node(info.imports[0]).unwrap();
+        assert_eq!(node.node_type, NodeType::Function);
+        assert!(node.properties.get("is_external").is_none());
+    }
+
+    #[test]
+    fn import_targeting_module_name_reuses_file_node_as_self_loop() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        ir.set_module(ModuleEntity::new(
+            "my.service",
+            "src/Service.groovy",
+            "groovy",
+        ));
+        // Import whose target equals the module name resolves to the file node.
+        ir.add_import(ImportRelation::new("Service", "my.service"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+        assert_eq!(info.imports[0], info.file_id);
+
+        let edge_ids = graph.get_edges_between(info.file_id, info.file_id).unwrap();
+        assert_eq!(edge_ids.len(), 1);
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+    }
+
+    #[test]
+    fn call_relation_wires_method_to_function() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        ir.add_function(FunctionEntity::new("util", 1, 3));
+        let method = FunctionEntity::new("save", 6, 10);
+        ir.add_class(ClassEntity::new("Repo", 5, 20).with_methods(vec![method]));
+        // Caller is the qualified method name, callee is the free function.
+        ir.add_call(CallRelation::new("Repo.save", "util", 8));
+
+        let (graph, info) = build(&ir);
+        let method_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "Repo.save")
+            .unwrap();
+        let util_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "util")
+            .unwrap();
+
+        let call_edges: Vec<_> = graph
+            .get_edges_between(method_id, util_id)
+            .unwrap()
+            .into_iter()
+            .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Calls)
+            .collect();
+        assert_eq!(call_edges.len(), 1);
+        assert_eq!(
+            graph
+                .get_edge(call_edges[0])
+                .unwrap()
+                .properties
+                .get("call_site_line"),
+            Some(&PropertyValue::Int(8))
+        );
+    }
+
+    #[test]
+    fn empty_path_stem_file_node_omits_doc_and_line_count_zero() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.groovy"));
+        ir.add_class(ClassEntity::new("A", 1, 4));
+
+        // No module -> file node comes from the path stem and never has a doc prop.
+        let (graph, info) = build(&ir);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert!(file.properties.get("doc").is_none());
+        assert_eq!(
+            file.properties.get("path"),
+            Some(&PropertyValue::String("Service.groovy".to_string()))
+        );
+        assert_eq!(info.line_count, 0);
+    }
 }
