@@ -221,3 +221,105 @@ pub(crate) fn analyze_file_complexity(
         recommendations,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{Node, PropertyMap};
+
+    #[test]
+    fn complexity_grade_covers_all_tiers() {
+        // Boundary values for each grade band.
+        assert_eq!(complexity_grade(1), 'A');
+        assert_eq!(complexity_grade(5), 'A');
+        assert_eq!(complexity_grade(6), 'B');
+        assert_eq!(complexity_grade(10), 'B');
+        assert_eq!(complexity_grade(11), 'C');
+        assert_eq!(complexity_grade(20), 'C');
+        assert_eq!(complexity_grade(21), 'D');
+        assert_eq!(complexity_grade(50), 'D');
+        assert_eq!(complexity_grade(51), 'F');
+        assert_eq!(complexity_grade(1000), 'F');
+    }
+
+    #[test]
+    fn complexity_grade_zero_falls_through_to_f() {
+        // 0 is below the 1..=5 'A' band, so it lands in the catch-all 'F'.
+        assert_eq!(complexity_grade(0), 'F');
+    }
+
+    #[test]
+    fn file_grade_covers_all_tiers() {
+        // avg is truncated to u32 before matching, so 5.9 -> 5 -> 'A'.
+        assert_eq!(file_grade(0.0), 'A');
+        assert_eq!(file_grade(5.9), 'A');
+        assert_eq!(file_grade(6.0), 'B');
+        assert_eq!(file_grade(10.9), 'B');
+        assert_eq!(file_grade(11.0), 'C');
+        assert_eq!(file_grade(15.9), 'C');
+        assert_eq!(file_grade(16.0), 'D');
+        assert_eq!(file_grade(25.9), 'D');
+        assert_eq!(file_grade(26.0), 'F');
+        assert_eq!(file_grade(100.0), 'F');
+    }
+
+    fn function_node(props: PropertyMap) -> Node {
+        Node::new(0, NodeType::Function, props)
+    }
+
+    #[test]
+    fn get_complexity_from_node_defaults_when_absent() {
+        // No complexity property -> complexity 1, grade 'A', zeroed details.
+        let mut props = PropertyMap::new();
+        props.insert("line_start", 10i64);
+        props.insert("line_end", 20i64);
+        let node = function_node(props);
+
+        let (complexity, details, grade) = get_complexity_from_node(&node);
+        assert_eq!(complexity, 1);
+        assert_eq!(grade, 'A');
+        // lines_of_code = end - start + 1 = 20 - 10 + 1 = 11.
+        assert_eq!(details.lines_of_code, 11);
+        assert_eq!(details.complexity_branches, 0);
+        assert_eq!(details.complexity_loops, 0);
+    }
+
+    #[test]
+    fn get_complexity_from_node_reads_stored_metrics() {
+        let mut props = PropertyMap::new();
+        props.insert("line_start", 1i64);
+        props.insert("line_end", 30i64);
+        props.insert("complexity", 12i64);
+        props.insert("complexity_branches", 4i64);
+        props.insert("complexity_loops", 2i64);
+        props.insert("complexity_logical_ops", 3i64);
+        props.insert("complexity_nesting", 5i64);
+        props.insert("complexity_exceptions", 1i64);
+        props.insert("complexity_early_returns", 2i64);
+        let node = function_node(props);
+
+        let (complexity, details, grade) = get_complexity_from_node(&node);
+        assert_eq!(complexity, 12);
+        // No stored grade -> derived from complexity_grade(12) -> 'C'.
+        assert_eq!(grade, 'C');
+        assert_eq!(details.complexity_branches, 4);
+        assert_eq!(details.complexity_loops, 2);
+        assert_eq!(details.complexity_logical_ops, 3);
+        assert_eq!(details.complexity_nesting, 5);
+        assert_eq!(details.complexity_exceptions, 1);
+        assert_eq!(details.complexity_early_returns, 2);
+        assert_eq!(details.lines_of_code, 30);
+    }
+
+    #[test]
+    fn get_complexity_from_node_prefers_stored_grade() {
+        // An explicit complexity_grade overrides the derived grade.
+        let mut props = PropertyMap::new();
+        props.insert("complexity", 3i64);
+        props.insert("complexity_grade", "F");
+        let node = function_node(props);
+
+        let (_, _, grade) = get_complexity_from_node(&node);
+        assert_eq!(grade, 'F');
+    }
+}
