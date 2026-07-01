@@ -177,7 +177,8 @@ mod tests {
     use super::*;
     use codegraph::{Direction, PropertyValue};
     use codegraph_parser_api::{
-        ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity, TraitEntity,
+        ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity, Parameter,
+        TraitEntity,
     };
 
     fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
@@ -191,6 +192,10 @@ mod tests {
             Some(PropertyValue::String(s)) => s.clone(),
             _ => String::new(),
         }
+    }
+
+    fn prop(graph: &CodeGraph, id: NodeId, key: &str) -> Option<PropertyValue> {
+        graph.get_node(id).unwrap().properties.get(key).cloned()
     }
 
     #[test]
@@ -414,5 +419,257 @@ mod tests {
             .get_edges_between(info.file_id, info.imports[0])
             .unwrap();
         assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn function_optional_props_present() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let func = FunctionEntity::new("view", 1, 4)
+            .with_doc("renders the view")
+            .with_body_prefix("view model =")
+            .with_return_type("Html Msg")
+            .with_parameters(vec![
+                Parameter::new("model"),
+                Parameter::new("flags").with_type("Flags"),
+            ]);
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(
+            prop(&graph, id, "doc"),
+            Some(PropertyValue::String("renders the view".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "body_prefix"),
+            Some(PropertyValue::String("view model =".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "return_type"),
+            Some(PropertyValue::String("Html Msg".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "parameters"),
+            Some(PropertyValue::StringList(vec![
+                "model".to_string(),
+                "flags".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn function_optional_props_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        ir.add_function(FunctionEntity::new("init", 1, 2));
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(prop(&graph, id, "doc"), None);
+        assert_eq!(prop(&graph, id, "body_prefix"), None);
+        assert_eq!(prop(&graph, id, "return_type"), None);
+        // Empty parameter list yields no parameters prop.
+        assert_eq!(prop(&graph, id, "parameters"), None);
+    }
+
+    #[test]
+    fn all_eight_complexity_subprops_stamped() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 25,
+            branches: 8,
+            loops: 3,
+            logical_operators: 4,
+            max_nesting_depth: 5,
+            exception_handlers: 2,
+            early_returns: 6,
+        };
+        ir.add_function(FunctionEntity::new("reduce", 1, 40).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        // cyclomatic 25 falls in the D band.
+        assert_eq!(prop(&graph, id, "complexity"), Some(PropertyValue::Int(25)));
+        assert_eq!(
+            prop(&graph, id, "complexity_grade"),
+            Some(PropertyValue::String("D".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_branches"),
+            Some(PropertyValue::Int(8))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_loops"),
+            Some(PropertyValue::Int(3))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_logical_ops"),
+            Some(PropertyValue::Int(4))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_nesting"),
+            Some(PropertyValue::Int(5))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_exceptions"),
+            Some(PropertyValue::Int(2))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_early_returns"),
+            Some(PropertyValue::Int(6))
+        );
+    }
+
+    #[test]
+    fn complexity_grade_band_a() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 3,
+            ..Default::default()
+        };
+        ir.add_function(FunctionEntity::new("noop", 1, 2).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(
+            prop(&graph, info.functions[0], "complexity_grade"),
+            Some(PropertyValue::String("A".to_string()))
+        );
+    }
+
+    #[test]
+    fn complexity_grade_band_f() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 60,
+            ..Default::default()
+        };
+        ir.add_function(FunctionEntity::new("giant", 1, 200).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(
+            prop(&graph, info.functions[0], "complexity_grade"),
+            Some(PropertyValue::String("F".to_string()))
+        );
+    }
+
+    #[test]
+    fn function_boolean_flags_stamped() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let func = FunctionEntity::new("effect", 1, 3)
+            .async_fn()
+            .static_fn()
+            .abstract_fn();
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(
+            prop(&graph, id, "is_async"),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            prop(&graph, id, "is_static"),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            prop(&graph, id, "is_abstract"),
+            Some(PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn class_doc_present_on_type_node() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        ir.add_class(ClassEntity::new("Model", 1, 5).with_doc("app model"));
+
+        let (graph, info) = build(&ir);
+        let id = info.classes[0];
+        assert_eq!(graph.get_node(id).unwrap().node_type, NodeType::Type);
+        assert_eq!(
+            prop(&graph, id, "doc"),
+            Some(PropertyValue::String("app model".to_string()))
+        );
+    }
+
+    #[test]
+    fn class_type_node_omits_unread_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        // attributes/body_prefix/type_parameters are set but the elm class loop
+        // only reads name/path/visibility/line bounds/doc.
+        let class = ClassEntity::new("Msg", 2, 8)
+            .with_attributes(vec!["deriving".to_string()])
+            .with_body_prefix("type Msg =");
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let id = info.classes[0];
+        assert_eq!(prop(&graph, id, "doc"), None);
+        assert_eq!(prop(&graph, id, "attributes"), None);
+        assert_eq!(prop(&graph, id, "body_prefix"), None);
+        assert_eq!(prop(&graph, id, "is_abstract"), None);
+        assert_eq!(prop(&graph, id, "line_start"), Some(PropertyValue::Int(2)));
+        assert_eq!(prop(&graph, id, "line_end"), Some(PropertyValue::Int(8)));
+    }
+
+    #[test]
+    fn import_reuses_in_file_function_node() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        ir.add_function(FunctionEntity::new("decode", 1, 3));
+        // The import target matches an already-mapped function name, so the
+        // mapper reuses that node instead of creating an external Module.
+        ir.add_import(ImportRelation::new("Main", "decode"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+        let reused = info.imports[0];
+        assert_eq!(reused, info.functions[0]);
+        // Reused node keeps its Function type and gets no is_external stamp.
+        assert_eq!(
+            graph.get_node(reused).unwrap().node_type,
+            NodeType::Function
+        );
+        assert_eq!(prop(&graph, reused, "is_external"), None);
+
+        // Both a Contains and an Imports edge now connect file -> node.
+        let edge_ids = graph.get_edges_between(info.file_id, reused).unwrap();
+        assert_eq!(edge_ids.len(), 2);
+        let types: Vec<EdgeType> = edge_ids
+            .iter()
+            .map(|&e| graph.get_edge(e).unwrap().edge_type)
+            .collect();
+        assert!(types.contains(&EdgeType::Contains));
+        assert!(types.contains(&EdgeType::Imports));
+    }
+
+    #[test]
+    fn multiple_functions_and_classes_contained_by_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        ir.add_function(FunctionEntity::new("update", 1, 3));
+        ir.add_function(FunctionEntity::new("view", 4, 6));
+        ir.add_class(ClassEntity::new("Model", 7, 9));
+        ir.add_class(ClassEntity::new("Msg", 10, 12));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.functions.len(), 2);
+        assert_eq!(info.classes.len(), 2);
+        // file + 2 functions + 2 types.
+        assert_eq!(graph.node_count(), 5);
+
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        for id in info.functions.iter().chain(info.classes.iter()) {
+            assert!(neighbors.contains(id));
+        }
+    }
+
+    #[test]
+    fn module_without_doc_omits_doc_prop() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let mut module = ModuleEntity::new("Main", "src/Main.elm", "elm");
+        module.line_count = 10;
+        ir.set_module(module);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(prop(&graph, info.file_id, "doc"), None);
     }
 }
