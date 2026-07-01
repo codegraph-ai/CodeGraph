@@ -529,6 +529,7 @@ impl<'a> ObjcVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
     use tree_sitter::Parser;
 
     fn parse_and_visit(source: &[u8]) -> ObjcVisitor<'_> {
@@ -1008,5 +1009,221 @@ mod tests {
         let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"one"));
         assert!(names.contains(&"two"));
+    }
+
+    #[test]
+    fn test_method_body_prefix_truncated() {
+        // A body longer than BODY_PREFIX_MAX_CHARS is truncated to exactly that many bytes.
+        let filler = "    x = x + 1;\n".repeat(200);
+        let source = format!(
+            "@implementation MyClass\n- (void)big {{\n{}}}\n@end\n",
+            filler
+        );
+        let visitor = parse_and_visit(source.as_bytes());
+        let big = visitor.functions.iter().find(|f| f.name == "big").unwrap();
+        let body = big.body_prefix.as_ref().unwrap();
+        assert_eq!(body.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_method_complexity_baseline_one() {
+        // A straight-line method with no branches keeps cyclomatic complexity 1.
+        let source = br#"
+@implementation MyClass
+- (void)plain {
+    int y = 1;
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "plain")
+            .unwrap();
+        assert_eq!(m.complexity.as_ref().unwrap().cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_method_complexity_else_branch() {
+        // An if/else raises complexity above a lone if (else_clause adds a branch).
+        let source = br#"
+@implementation MyClass
+- (void)pick:(int)x {
+    if (x > 0) {
+        return;
+    } else {
+        return;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "pick").unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_method_complexity_while() {
+        let source = br#"
+@implementation MyClass
+- (void)spin:(int)n {
+    while (n > 0) {
+        n--;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "spin").unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_method_complexity_do_while() {
+        let source = br#"
+@implementation MyClass
+- (void)repeat:(int)n {
+    do {
+        n--;
+    } while (n > 0);
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "repeat")
+            .unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_call_default_metadata() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"Hello");
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let call = &visitor.calls[0];
+        assert_eq!(call.caller, "greet");
+        assert_eq!(call.callee, "NSLog");
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+    }
+
+    #[test]
+    fn test_multiple_calls_in_body() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"one");
+    NSLog(@"two");
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.calls.len(), 2);
+        assert!(visitor.calls.iter().all(|c| c.caller == "greet"));
+    }
+
+    #[test]
+    fn test_nested_call_attributed_to_method() {
+        // A call inside an if block is still attributed to the enclosing method.
+        let source = br#"
+@implementation MyClass
+- (void)guarded:(int)x {
+    if (x > 0) {
+        NSLog(@"positive");
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller, "guarded");
+        assert_eq!(visitor.calls[0].callee, "NSLog");
+    }
+
+    #[test]
+    fn test_class_method_in_interface_abstract_and_static() {
+        // A `+` class-method declaration under @interface is abstract and static.
+        let source = br#"
+@interface MyClass : NSObject
++ (instancetype)make;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let make = &visitor.functions[0];
+        assert_eq!(make.name, "make");
+        assert!(make.is_abstract);
+        assert!(make.is_static);
+    }
+
+    #[test]
+    fn test_two_method_defs_source_order_lines() {
+        let source = br#"
+@implementation MyClass
+- (void)first {
+    return;
+}
+- (void)second {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let first = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "first")
+            .unwrap();
+        let second = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "second")
+            .unwrap();
+        assert!(second.line_start > first.line_end);
+    }
+
+    #[test]
+    fn test_protocol_multiple_methods_parented() {
+        let source = br#"
+@protocol MyProtocol
+- (void)alpha;
+- (void)beta;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+        assert!(visitor
+            .functions
+            .iter()
+            .all(|f| f.parent_class == Some("MyProtocol".to_string()) && f.is_abstract));
+    }
+
+    #[test]
+    fn test_implementation_without_interface_extracts_methods() {
+        // A bare @implementation (no matching @interface) still extracts its methods.
+        let source = br#"
+@implementation Orphan
+- (void)work {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let work = &visitor.functions[0];
+        assert_eq!(work.name, "work");
+        assert_eq!(work.parent_class, Some("Orphan".to_string()));
+        assert!(!work.is_abstract);
     }
 }
