@@ -49,3 +49,48 @@ pub fn metadata_string() -> String {
         rustc = RUSTC_VERSION,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constants_have_expected_shape() {
+        assert_eq!(LICENSE, "Apache-2.0");
+        assert!(AUTHOR.contains("anvanster@gmail.com"));
+        assert!(REPOSITORY.starts_with("https://github.com/"));
+        assert!(!VERSION.is_empty(), "CARGO_PKG_VERSION is always set");
+        assert!(!NAME.is_empty(), "CARGO_PKG_NAME is always set");
+    }
+
+    #[test]
+    fn metadata_string_embeds_all_fields() {
+        let s = metadata_string();
+        assert!(s.contains(NAME));
+        assert!(s.contains(VERSION));
+        assert!(s.contains(GIT_HASH_SHORT));
+        assert!(s.contains(AUTHOR));
+        assert!(s.contains(LICENSE));
+        assert!(s.contains(REPOSITORY));
+        assert!(s.contains(BUILD_TIMESTAMP));
+        assert!(s.contains(RUSTC_VERSION));
+    }
+
+    #[test]
+    fn metadata_string_has_five_lines_in_order() {
+        let s = metadata_string();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 5, "name/author/license/repo/built");
+        assert!(lines[0].starts_with(&format!("{NAME} v{VERSION}")));
+        assert!(lines[1].starts_with("Author: "));
+        assert!(lines[2].starts_with("License: "));
+        assert!(lines[3].starts_with("Repository: "));
+        assert!(lines[4].starts_with("Built: "));
+    }
+
+    #[test]
+    fn print_metadata_does_not_panic() {
+        // Exercises the stdout path; output isn't captured, just must not panic.
+        print_metadata();
+    }
+}
