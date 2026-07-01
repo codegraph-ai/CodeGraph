@@ -588,6 +588,7 @@ fn is_fortran_intrinsic(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     /// Parse `source` and run the visitor over the whole tree, returning the
     /// populated visitor. The visitor only borrows `source` (not the tree), so
@@ -1032,5 +1033,127 @@ mod tests {
         assert!(is_fortran_intrinsic("sqrt"));
         assert!(is_fortran_intrinsic("allocate"));
         assert!(!is_fortran_intrinsic("myfunc"));
+    }
+
+    // --- body_prefix & line offsets ---
+
+    #[test]
+    fn test_subroutine_body_prefix_truncated() {
+        // Build a subroutine whose body text exceeds BODY_PREFIX_MAX_CHARS so the
+        // prefix is truncated to exactly the cap.
+        let big = "x".repeat(BODY_PREFIX_MAX_CHARS + 200);
+        let src = format!("subroutine s()\n  {} = 1\nend subroutine s\n", big);
+        let visitor = parse(src.as_bytes());
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(bp.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_program_unit_line_start_offset_by_blank_lines() {
+        // Two leading blank lines push the module's line_start to 3.
+        let visitor = parse(b"\n\nmodule m\nend module m\n");
+        assert_eq!(visitor.program_units[0].line_start, 3);
+    }
+
+    // --- complexity: elseif and do-while ---
+
+    #[test]
+    fn test_complexity_elseif_adds_branch() {
+        // if + elseif => baseline 1 + branch(if) + branch(elseif) = 3.
+        let visitor = parse(
+            b"subroutine s(i)\n  integer :: i\n  if (i > 0) then\n    i = 1\n  else if (i < 0) then\n    i = 2\n  end if\nend subroutine s\n",
+        );
+        assert_eq!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity,
+            3
+        );
+    }
+
+    #[test]
+    fn test_complexity_do_while_is_a_loop() {
+        let visitor = parse(
+            b"subroutine s(i)\n  integer :: i\n  do while (i < 10)\n    i = i + 1\n  end do\nend subroutine s\n",
+        );
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity >= 2);
+        assert!(c.loops >= 1);
+    }
+
+    // --- call metadata & attribution ---
+
+    #[test]
+    fn test_call_default_metadata() {
+        let visitor = parse(b"subroutine outer()\n  call inner()\nend subroutine outer\n");
+        let call = &visitor.calls[0];
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+        assert_eq!(call.call_site_line, 2);
+    }
+
+    #[test]
+    fn test_call_nested_in_loop_attributed_to_subroutine() {
+        let visitor = parse(
+            b"subroutine outer()\n  integer :: i\n  do i = 1, 3\n    call inner()\n  end do\nend subroutine outer\n",
+        );
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller.to_lowercase(), "outer");
+        assert_eq!(visitor.calls[0].callee.to_lowercase(), "inner");
+    }
+
+    #[test]
+    fn test_top_level_call_caller_falls_back_to_program() {
+        // A call directly in a program body (no enclosing subroutine/function)
+        // uses the program unit as the caller.
+        let visitor = parse(b"program main\n  call setup()\nend program main\n");
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller.to_lowercase(), "main");
+    }
+
+    // --- imports ---
+
+    #[test]
+    fn test_use_symbols_always_empty() {
+        // The visitor never populates the symbols vector, even with an only-list.
+        let visitor = parse(b"program main\n  use mymod, only: foo, bar\nend program main\n");
+        assert!(visitor.imports[0].symbols.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_use_statements_recorded() {
+        let visitor = parse(b"module m\n  use aa\n  use bb\nend module m\n");
+        let imported: Vec<String> = visitor
+            .imports
+            .iter()
+            .map(|i| i.imported.to_lowercase())
+            .collect();
+        assert_eq!(imported, vec!["aa", "bb"]);
+    }
+
+    #[test]
+    fn test_include_double_quoted_path() {
+        let visitor = parse(b"program main\n  include \"defs.inc\"\nend program main\n");
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "defs.inc");
+        assert!(visitor.imports[0].is_wildcard);
+    }
+
+    #[test]
+    fn test_function_parent_class_is_enclosing_module() {
+        let visitor = parse(
+            b"module m\ncontains\n  function f() result(r)\n    integer :: r\n    r = 1\n  end function f\nend module m\n",
+        );
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(
+            visitor.functions[0]
+                .parent_class
+                .as_deref()
+                .map(str::to_lowercase),
+            Some("m".to_string())
+        );
     }
 }
