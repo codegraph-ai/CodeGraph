@@ -390,6 +390,121 @@ mod imp {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Mutex;
+
+        /// Serializes the env-mutating tests so a concurrent test never observes
+        /// a half-applied `CODEGRAPH_ENGINE_IDLE_SECS`/`HOME` value.
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        // parse_attach ---------------------------------------------------------
+
+        #[test]
+        fn parse_attach_valid_frame_returns_workspace_and_no_pending() {
+            let (ws, pending) = parse_attach(r#"{"cg_attach":{"workspace":"/abs/project"}}"#);
+            assert_eq!(ws, Some(PathBuf::from("/abs/project")));
+            assert!(pending.is_none());
+        }
+
+        #[test]
+        fn parse_attach_plain_request_is_returned_as_pending() {
+            let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+            let (ws, pending) = parse_attach(line);
+            assert!(ws.is_none());
+            assert_eq!(pending.as_deref(), Some(line));
+        }
+
+        #[test]
+        fn parse_attach_non_json_line_is_returned_as_pending() {
+            let (ws, pending) = parse_attach("not json at all");
+            assert!(ws.is_none());
+            assert_eq!(pending.as_deref(), Some("not json at all"));
+        }
+
+        #[test]
+        fn parse_attach_json_without_cg_attach_key_is_pending() {
+            let line = r#"{"other":{"workspace":"/x"}}"#;
+            let (ws, pending) = parse_attach(line);
+            assert!(ws.is_none());
+            assert_eq!(pending.as_deref(), Some(line));
+        }
+
+        #[test]
+        fn parse_attach_cg_attach_without_workspace_field_is_pending() {
+            let line = r#"{"cg_attach":{"other":"x"}}"#;
+            let (ws, pending) = parse_attach(line);
+            assert!(ws.is_none());
+            assert_eq!(pending.as_deref(), Some(line));
+        }
+
+        #[test]
+        fn parse_attach_non_string_workspace_is_pending() {
+            // `workspace` present but numeric — `as_str()` fails, so it is not an
+            // attach frame and the whole line is dispatched as a request.
+            let line = r#"{"cg_attach":{"workspace":42}}"#;
+            let (ws, pending) = parse_attach(line);
+            assert!(ws.is_none());
+            assert_eq!(pending.as_deref(), Some(line));
+        }
+
+        // idle_timeout_secs ----------------------------------------------------
+
+        #[test]
+        fn idle_timeout_secs_defaults_when_unset() {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("CODEGRAPH_ENGINE_IDLE_SECS");
+            std::env::remove_var("CODEGRAPH_ENGINE_IDLE_SECS");
+            assert_eq!(idle_timeout_secs(), 1800);
+            if let Some(v) = prev {
+                std::env::set_var("CODEGRAPH_ENGINE_IDLE_SECS", v);
+            }
+        }
+
+        #[test]
+        fn idle_timeout_secs_parses_valid_override() {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("CODEGRAPH_ENGINE_IDLE_SECS");
+            std::env::set_var("CODEGRAPH_ENGINE_IDLE_SECS", "42");
+            assert_eq!(idle_timeout_secs(), 42);
+            match prev {
+                Some(v) => std::env::set_var("CODEGRAPH_ENGINE_IDLE_SECS", v),
+                None => std::env::remove_var("CODEGRAPH_ENGINE_IDLE_SECS"),
+            }
+        }
+
+        #[test]
+        fn idle_timeout_secs_falls_back_on_unparseable_value() {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("CODEGRAPH_ENGINE_IDLE_SECS");
+            std::env::set_var("CODEGRAPH_ENGINE_IDLE_SECS", "not-a-number");
+            assert_eq!(idle_timeout_secs(), 1800);
+            match prev {
+                Some(v) => std::env::set_var("CODEGRAPH_ENGINE_IDLE_SECS", v),
+                None => std::env::remove_var("CODEGRAPH_ENGINE_IDLE_SECS"),
+            }
+        }
+
+        // model_cache_dir ------------------------------------------------------
+
+        #[test]
+        fn model_cache_dir_joins_codegraph_fastembed_cache_under_home() {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            std::env::set_var("HOME", "/tmp/cg-home-fixture");
+            let dir = model_cache_dir();
+            assert_eq!(
+                dir,
+                PathBuf::from("/tmp/cg-home-fixture/.codegraph/fastembed_cache")
+            );
+            match prev {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
