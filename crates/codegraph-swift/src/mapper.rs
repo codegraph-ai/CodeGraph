@@ -367,8 +367,8 @@ mod tests {
     use super::*;
     use codegraph::PropertyValue;
     use codegraph_parser_api::{
-        CallRelation, ClassEntity, FunctionEntity, ImplementationRelation, ImportRelation,
-        InheritanceRelation, ModuleEntity, TraitEntity,
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImplementationRelation,
+        ImportRelation, InheritanceRelation, ModuleEntity, Parameter, TraitEntity,
     };
     use std::path::{Path, PathBuf};
 
@@ -629,5 +629,290 @@ mod tests {
         let barkable = info.traits[0];
         let edge = edge_between(&graph, dog, barkable);
         assert!(matches!(edge.edge_type, EdgeType::Implements));
+    }
+
+    #[test]
+    fn module_doc_comment_stamped_on_file_node() {
+        // A module with a doc comment stamps `doc` on the file node; the
+        // line_count flows through to FileInfo.
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.set_module(
+            ModuleEntity::new("Greeter", "test.swift", "swift")
+                .with_line_count(42)
+                .with_doc("Module docs"),
+        );
+        let (graph, info) = map(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("Greeter"));
+        assert_eq!(file.properties.get_string("doc"), Some("Module docs"));
+        assert_eq!(info.line_count, 42);
+    }
+
+    #[test]
+    fn function_optional_props_present() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_function(
+            FunctionEntity::new("greet", 1, 3)
+                .with_doc("says hi")
+                .with_return_type("String")
+                .with_parameters(vec![Parameter::new("name").with_type("String")])
+                .with_attributes(vec!["@objc".to_string()])
+                .with_body_prefix("return"),
+        );
+        let (graph, info) = map(&ir);
+
+        let f = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(f.properties.get_string("doc"), Some("says hi"));
+        assert_eq!(f.properties.get_string("return_type"), Some("String"));
+        assert_eq!(
+            f.properties.get_string_list_compat("parameters"),
+            Some(vec!["name".to_string()])
+        );
+        assert_eq!(
+            f.properties.get_string_list_compat("attributes"),
+            Some(vec!["@objc".to_string()])
+        );
+        assert_eq!(f.properties.get_string("body_prefix"), Some("return"));
+    }
+
+    #[test]
+    fn function_optional_props_absent() {
+        // A bare function omits the optional props entirely (not empty values).
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_function(FunctionEntity::new("bare", 1, 2));
+        let (graph, info) = map(&ir);
+
+        let f = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(f.properties.get("doc"), None);
+        assert_eq!(f.properties.get("return_type"), None);
+        assert_eq!(f.properties.get("parameters"), None);
+        assert_eq!(f.properties.get("attributes"), None);
+        assert_eq!(f.properties.get("body_prefix"), None);
+        assert_eq!(f.properties.get("parent_class"), None);
+    }
+
+    #[test]
+    fn function_complexity_sub_props_stamped() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        let complexity = ComplexityMetrics::new()
+            .with_branches(12)
+            .with_loops(2)
+            .with_logical_operators(1)
+            .with_nesting_depth(4)
+            .with_exception_handlers(1)
+            .with_early_returns(3)
+            .finalize();
+        ir.add_function(FunctionEntity::new("complex", 1, 40).with_complexity(complexity));
+        let (graph, info) = map(&ir);
+
+        let f = graph.get_node(info.functions[0]).unwrap();
+        // 1 + 12 + 2 + 1 + 1 = 17 -> grade C
+        assert!(matches!(
+            f.properties.get("complexity"),
+            Some(PropertyValue::Int(17))
+        ));
+        assert_eq!(f.properties.get_string("complexity_grade"), Some("C"));
+        assert!(matches!(
+            f.properties.get("complexity_branches"),
+            Some(PropertyValue::Int(12))
+        ));
+        assert!(matches!(
+            f.properties.get("complexity_loops"),
+            Some(PropertyValue::Int(2))
+        ));
+        assert!(matches!(
+            f.properties.get("complexity_logical_ops"),
+            Some(PropertyValue::Int(1))
+        ));
+        assert!(matches!(
+            f.properties.get("complexity_nesting"),
+            Some(PropertyValue::Int(4))
+        ));
+        assert!(matches!(
+            f.properties.get("complexity_exceptions"),
+            Some(PropertyValue::Int(1))
+        ));
+        assert!(matches!(
+            f.properties.get("complexity_early_returns"),
+            Some(PropertyValue::Int(3))
+        ));
+    }
+
+    #[test]
+    fn function_flags_stamped() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_function(
+            FunctionEntity::new("flagged", 1, 2)
+                .static_fn()
+                .abstract_fn()
+                .test_fn(),
+        );
+        let (graph, info) = map(&ir);
+
+        let f = graph.get_node(info.functions[0]).unwrap();
+        assert!(matches!(
+            f.properties.get("is_static"),
+            Some(PropertyValue::Bool(true))
+        ));
+        assert!(matches!(
+            f.properties.get("is_abstract"),
+            Some(PropertyValue::Bool(true))
+        ));
+        assert!(matches!(
+            f.properties.get("is_test"),
+            Some(PropertyValue::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn class_optional_props_present_and_abstract() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        let class = ClassEntity::new("Widget", 1, 30)
+            .abstract_class()
+            .with_doc("a widget")
+            .with_attributes(vec!["@MainActor".to_string()])
+            .with_type_parameters(vec!["T".to_string()])
+            .with_body_prefix("var x");
+        ir.add_class(class);
+        let (graph, info) = map(&ir);
+
+        let c = graph.get_node(info.classes[0]).unwrap();
+        assert!(matches!(
+            c.properties.get("is_abstract"),
+            Some(PropertyValue::Bool(true))
+        ));
+        assert_eq!(c.properties.get_string("doc"), Some("a widget"));
+        assert_eq!(
+            c.properties.get_string_list_compat("attributes"),
+            Some(vec!["@MainActor".to_string()])
+        );
+        assert_eq!(
+            c.properties.get_string_list_compat("type_parameters"),
+            Some(vec!["T".to_string()])
+        );
+        assert_eq!(c.properties.get_string("body_prefix"), Some("var x"));
+    }
+
+    #[test]
+    fn class_optional_props_absent() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_class(ClassEntity::new("Plain", 1, 3));
+        let (graph, info) = map(&ir);
+
+        let c = graph.get_node(info.classes[0]).unwrap();
+        assert_eq!(c.properties.get("doc"), None);
+        assert_eq!(c.properties.get("attributes"), None);
+        assert_eq!(c.properties.get("type_parameters"), None);
+        assert_eq!(c.properties.get("body_prefix"), None);
+        assert!(matches!(
+            c.properties.get("is_abstract"),
+            Some(PropertyValue::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn method_optional_doc_and_body_prefix() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        let class = ClassEntity::new("Widget", 1, 30).with_methods(vec![FunctionEntity::new(
+            "render", 5, 9,
+        )
+        .with_doc("draws")
+        .with_body_prefix("let a")]);
+        ir.add_class(class);
+        let (graph, info) = map(&ir);
+
+        let m = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(m.properties.get_string("name"), Some("Widget::render"));
+        assert_eq!(m.properties.get_string("doc"), Some("draws"));
+        assert_eq!(m.properties.get_string("body_prefix"), Some("let a"));
+        assert_eq!(m.properties.get_string("is_method"), Some("true"));
+    }
+
+    #[test]
+    fn trait_doc_present_and_absent() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_trait(TraitEntity::new("Documented", 1, 3).with_doc("a protocol"));
+        ir.add_trait(TraitEntity::new("Bare", 4, 6));
+        let (graph, info) = map(&ir);
+
+        let documented = graph.get_node(info.traits[0]).unwrap();
+        assert_eq!(documented.properties.get_string("doc"), Some("a protocol"));
+        let bare = graph.get_node(info.traits[1]).unwrap();
+        assert_eq!(bare.properties.get("doc"), None);
+    }
+
+    #[test]
+    fn import_reuses_in_file_node_without_external_flag() {
+        // When an import's name matches an already-mapped class, the mapper
+        // reuses that node (no is_external stamped) and adds an Imports edge
+        // alongside the existing Contains edge.
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_class(ClassEntity::new("Helper", 1, 3));
+        ir.add_import(ImportRelation::new("test", "Helper"));
+        let (graph, info) = map(&ir);
+
+        // file + class only: no new Module node was created.
+        assert_eq!(graph.node_count(), 2);
+        let reused = graph.get_node(info.imports[0]).unwrap();
+        assert!(matches!(reused.node_type, NodeType::Class));
+        assert_eq!(reused.properties.get("is_external"), None);
+        // both a Contains and an Imports edge exist file -> Helper.
+        let ids = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn bare_import_has_empty_edge_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_import(ImportRelation::new("test", "Foundation"));
+        let (graph, info) = map(&ir);
+
+        let edge = edge_between(&graph, info.file_id, info.imports[0]);
+        assert_eq!(edge.properties.get("alias"), None);
+        assert_eq!(edge.properties.get("is_wildcard"), None);
+        assert_eq!(edge.properties.get("symbols"), None);
+    }
+
+    #[test]
+    fn wildcard_import_stamps_edge_prop() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_import(ImportRelation::new("test", "Glob").wildcard());
+        let (graph, info) = map(&ir);
+
+        let edge = edge_between(&graph, info.file_id, info.imports[0]);
+        assert_eq!(edge.properties.get_string("is_wildcard"), Some("true"));
+    }
+
+    #[test]
+    fn indirect_call_sets_is_direct_false() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 8));
+        ir.add_call(CallRelation::new("caller", "callee", 3).indirect());
+        let (graph, info) = map(&ir);
+
+        let edge = edge_between(&graph, info.functions[0], info.functions[1]);
+        assert!(matches!(
+            edge.properties.get("is_direct"),
+            Some(PropertyValue::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn duplicate_unresolved_calls_are_deduped() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_call(CallRelation::new("caller", "external_fn", 2));
+        ir.add_call(CallRelation::new("caller", "external_fn", 3));
+        let (graph, info) = map(&ir);
+
+        let caller = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            caller.properties.get_string_list_compat("unresolved_calls"),
+            Some(vec!["external_fn".to_string()])
+        );
     }
 }
