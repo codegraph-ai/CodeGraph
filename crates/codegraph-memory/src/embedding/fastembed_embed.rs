@@ -469,4 +469,88 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn default_is_bge_small() {
+        // The #[default] attribute sits on BgeSmall — the fast, storage-stable
+        // 384d model that existing databases were embedded with.
+        assert_eq!(
+            CodeGraphEmbeddingModel::default(),
+            CodeGraphEmbeddingModel::BgeSmall
+        );
+    }
+
+    #[test]
+    fn display_names_are_distinct_and_nonempty() {
+        let names = [
+            CodeGraphEmbeddingModel::BgeSmall.display_name(),
+            CodeGraphEmbeddingModel::JinaCodeV2.display_name(),
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2.display_name(),
+        ];
+        for (i, a) in names.iter().enumerate() {
+            assert!(!a.is_empty(), "display_name must not be empty");
+            for (j, b) in names.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "display_name must be unique across variants");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_mapping_targets_expected_fastembed_models() {
+        // The exact fastembed enum mapping is load-bearing: swapping it would
+        // silently change which weights get downloaded for a stored model tag.
+        assert_eq!(
+            CodeGraphEmbeddingModel::BgeSmall.to_fastembed_builtin(),
+            Some(EmbeddingModel::BGESmallENV15)
+        );
+        assert_eq!(
+            CodeGraphEmbeddingModel::JinaCodeV2.to_fastembed_builtin(),
+            Some(EmbeddingModel::JinaEmbeddingsV2BaseCode)
+        );
+        assert_eq!(
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2.to_fastembed_builtin(),
+            None
+        );
+    }
+
+    #[test]
+    fn serde_uses_kebab_case_names() {
+        // The persisted form must stay kebab-case: config files and stored
+        // model tags key off these exact strings.
+        assert_eq!(
+            serde_json::to_string(&CodeGraphEmbeddingModel::BgeSmall).unwrap(),
+            "\"bge-small\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CodeGraphEmbeddingModel::JinaCodeV2).unwrap(),
+            "\"jina-code-v2\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CodeGraphEmbeddingModel::Granite97mMultilingualR2).unwrap(),
+            "\"granite97m-multilingual-r2\""
+        );
+    }
+
+    #[test]
+    fn serde_round_trips_every_variant() {
+        for model in [
+            CodeGraphEmbeddingModel::BgeSmall,
+            CodeGraphEmbeddingModel::JinaCodeV2,
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2,
+        ] {
+            let json = serde_json::to_string(&model).unwrap();
+            let back: CodeGraphEmbeddingModel = serde_json::from_str(&json).unwrap();
+            assert_eq!(model, back, "serde round-trip must preserve the variant");
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_model_name() {
+        // An unrecognised model string is an error, not a silent fallback to
+        // the default — a typo in config should surface loudly.
+        let err = serde_json::from_str::<CodeGraphEmbeddingModel>("\"bge-large\"");
+        assert!(err.is_err());
+    }
 }
