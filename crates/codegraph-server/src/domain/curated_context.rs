@@ -348,3 +348,180 @@ fn get_edges(
     }
     edges
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{NodeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+
+    /// Add a node carrying the given key/value properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, &str)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), PropertyValue::String(v.to_string()));
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// Wrap a built graph in the Arc<RwLock<>> a QueryEngine owns and build the
+    /// text/call indexes so symbol_search and dependency walks resolve.
+    async fn engine_for(g: CodeGraph) -> (Arc<RwLock<CodeGraph>>, QueryEngine) {
+        let graph = Arc::new(RwLock::new(g));
+        let engine = QueryEngine::new(graph.clone());
+        engine.build_indexes().await;
+        (graph, engine)
+    }
+
+    // --- get_edges (pure helper) ---
+
+    #[test]
+    fn get_edges_outgoing_reports_only_forward_edge() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::Function, &[("name", "a")]);
+        let b = add_node(&mut g, NodeType::Function, &[("name", "b")]);
+        edge(&mut g, a, b, EdgeType::Calls);
+
+        let out = get_edges(&g, a, Direction::Outgoing);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], (a, b, EdgeType::Calls));
+
+        // b has no outgoing edges.
+        assert!(get_edges(&g, b, Direction::Outgoing).is_empty());
+    }
+
+    #[test]
+    fn get_edges_incoming_reports_only_backward_edge() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::Function, &[("name", "a")]);
+        let b = add_node(&mut g, NodeType::Function, &[("name", "b")]);
+        edge(&mut g, a, b, EdgeType::Calls);
+
+        let inc = get_edges(&g, b, Direction::Incoming);
+        assert_eq!(inc.len(), 1);
+        assert_eq!(inc[0], (a, b, EdgeType::Calls));
+    }
+
+    #[test]
+    fn get_edges_missing_node_returns_empty() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        assert!(get_edges(&g, 999, Direction::Outgoing).is_empty());
+    }
+
+    // --- get_curated_context ---
+
+    #[tokio::test]
+    async fn no_matching_symbols_returns_error() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result =
+            get_curated_context(&graph, &engine, &mem, "nonexistentquery", None, 4000, 5).await;
+
+        let err = result.expect_err("empty graph should yield error");
+        assert_eq!(err.query, "nonexistentquery");
+        assert!(err.error.contains("nonexistentquery"));
+        assert!(!err.suggestion.is_empty());
+    }
+
+    #[tokio::test]
+    async fn matching_symbol_populated_with_inline_source() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "processData"),
+                ("path", "/src/a.rs"),
+                ("source", "fn processData() {}"),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "process", None, 4000, 5)
+            .await
+            .expect("match should produce a result");
+
+        assert_eq!(result.query, "process");
+        assert_eq!(result.symbols.len(), 1);
+        let sym = &result.symbols[0];
+        assert_eq!(sym.name, "processData");
+        assert_eq!(sym.file, "/src/a.rs");
+        assert_eq!(sym.code.as_deref(), Some("fn processData() {}"));
+        assert_eq!(result.metadata.symbols_included, 1);
+        assert!(result.metadata.symbols_found >= 1);
+        // Memory manager is uninitialized, so no memories are enriched.
+        assert!(result.memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn calls_edge_surfaces_dependency() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let primary = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "handleRequest"),
+                ("path", "/src/a.rs"),
+                ("source", "fn handleRequest() { helper(); }"),
+            ],
+        );
+        let dep = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "helper"),
+                ("path", "/src/b.rs"),
+                ("source", "fn helper() {}"),
+            ],
+        );
+        edge(&mut g, primary, dep, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "handle", None, 4000, 5)
+            .await
+            .expect("match should produce a result");
+
+        assert_eq!(result.dependencies.len(), 1);
+        let d = &result.dependencies[0];
+        assert_eq!(d.name, "helper");
+        assert_eq!(d.file, "/src/b.rs");
+        assert_eq!(d.relationship, "calls");
+        assert_eq!(result.metadata.dependencies_included, 1);
+    }
+
+    #[tokio::test]
+    async fn anchor_path_sorts_anchor_file_first() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "handleAlpha"), ("path", "/src/a.rs")],
+        );
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "handleBeta"), ("path", "/src/b.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result =
+            get_curated_context(&graph, &engine, &mem, "handle", Some("/src/b.rs"), 4000, 5)
+                .await
+                .expect("matches should produce a result");
+
+        assert_eq!(result.symbols.len(), 2);
+        // The anchor file's symbol is promoted to the front regardless of score.
+        assert_eq!(result.symbols[0].file, "/src/b.rs");
+    }
+}
