@@ -936,4 +936,78 @@ Actual content here.
         let ids = backtick_identifiers("use `std::collections::HashMap` here");
         assert!(ids.contains(&"std::collections::HashMap".to_string()));
     }
+
+    #[test]
+    fn cosine_similarity_identical_vectors_is_one() {
+        let v = [1.0, 2.0, 3.0];
+        assert!((cosine_similarity(&v, &v) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal_is_zero() {
+        assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_opposite_is_minus_one() {
+        assert!((cosine_similarity(&[1.0, 2.0], &[-1.0, -2.0]) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_length_mismatch_is_zero() {
+        // Differing lengths short-circuit to 0.0 before any dot product.
+        assert_eq!(cosine_similarity(&[1.0, 2.0, 3.0], &[1.0, 2.0]), 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_zero_magnitude_is_zero() {
+        // A zero vector gives denom == 0.0, taking the guarded 0.0 branch
+        // rather than dividing by zero.
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn doc_point_distance_is_one_minus_cosine() {
+        // distance() = 1.0 - cosine_similarity: 0.0 for identical, 1.0 for
+        // orthogonal, 2.0 for opposite.
+        let a = DocPoint {
+            id: "a".into(),
+            vector: vec![1.0, 0.0],
+        };
+        let same = DocPoint {
+            id: "b".into(),
+            vector: vec![1.0, 0.0],
+        };
+        let orth = DocPoint {
+            id: "c".into(),
+            vector: vec![0.0, 1.0],
+        };
+        let opp = DocPoint {
+            id: "d".into(),
+            vector: vec![-1.0, 0.0],
+        };
+        assert!(a.distance(&same).abs() < 1e-6);
+        assert!((a.distance(&orth) - 1.0).abs() < 1e-6);
+        assert!((a.distance(&opp) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn heading_node_is_leaf_tracks_children() {
+        let leaf = HeadingNode {
+            level: 2,
+            title: "Leaf".into(),
+            body: String::new(),
+            children: Vec::new(),
+        };
+        assert!(leaf.is_leaf());
+
+        let parent = HeadingNode {
+            level: 1,
+            title: "Parent".into(),
+            body: String::new(),
+            children: vec![leaf],
+        };
+        assert!(!parent.is_leaf());
+    }
 }
