@@ -548,4 +548,110 @@ mod tests {
         assert!(visitor.imports.is_empty());
         assert!(visitor.calls.is_empty());
     }
+
+    #[test]
+    fn test_line_numbers_one_indexed() {
+        // First physical line is line 1; a 3-line function spans 1..=3.
+        let source = b"function greet()\n  print(\"hi\")\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].line_start, 1);
+        assert_eq!(visitor.functions[0].line_end, 3);
+    }
+
+    #[test]
+    fn test_default_flags_are_false() {
+        let source = b"function plain()\nend";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+    }
+
+    #[test]
+    fn test_return_type_is_none() {
+        // Lua has no static return types, so return_type is always None.
+        let source = b"function f()\n  return 1\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].return_type, None);
+    }
+
+    #[test]
+    fn test_complexity_while_adds_branch() {
+        let source = b"function spin()\n  while true do\n    break\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_repeat_adds_branch() {
+        let source = b"function again()\n  repeat\n    x = 1\n  until x\nend";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_generic_for_adds_branch() {
+        let source = b"function iter(t)\n  for k, v in pairs(t) do\n    print(k)\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_logical_operator() {
+        let source = b"function both(a, b)\n  return a and b\nend";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_elseif_adds_branch() {
+        let source =
+            b"function pick(x)\n  if x then\n    return 1\n  elseif x then\n    return 2\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        // if branch + elseif branch push complexity above a single-branch body.
+        assert!(c.cyclomatic_complexity > 2);
+    }
+
+    #[test]
+    fn test_call_metadata() {
+        let source = b"function outer()\n  inner()\nend";
+        let visitor = parse_and_visit(source);
+
+        let call = &visitor.calls[0];
+        assert_eq!(call.call_site_line, 2);
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_local_var_function_body_prefix() {
+        let source = b"local adder = function(a, b)\n  return a + b\nend";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_multiple_functions_in_source_order() {
+        let source = b"function first()\nend\nfunction second()\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "first");
+        assert_eq!(visitor.functions[1].name, "second");
+    }
 }
