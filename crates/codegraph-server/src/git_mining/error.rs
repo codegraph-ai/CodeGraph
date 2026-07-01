@@ -123,11 +123,33 @@ mod tests {
 
         // Variants without a `#[from]`/`#[source]` field terminate the chain.
         assert!(GitMiningError::GitNotAvailable.source().is_none());
+        assert!(GitMiningError::NotARepository(PathBuf::from("/tmp/nope"))
+            .source()
+            .is_none());
         assert!(GitMiningError::CommandFailed("boom".to_string())
+            .source()
+            .is_none());
+        assert!(GitMiningError::ParseError("bad ref".to_string())
             .source()
             .is_none());
         assert!(GitMiningError::MemoryError("flattened".to_string())
             .source()
             .is_none());
+    }
+
+    #[test]
+    fn io_error_source_preserves_wrapped_message() {
+        use std::error::Error;
+
+        // The `#[from]` source must be the original io::Error, not a
+        // kind-only reconstruction: its Display message survives the downcast.
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "no such file");
+        let err: GitMiningError = io_err.into();
+        let downcast = err
+            .source()
+            .and_then(|s| s.downcast_ref::<io::Error>())
+            .expect("IoError source should downcast to io::Error");
+        assert_eq!(downcast.kind(), io::ErrorKind::NotFound);
+        assert_eq!(downcast.to_string(), "no such file");
     }
 }
