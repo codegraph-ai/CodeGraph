@@ -697,7 +697,9 @@ mod tests {
         // `.pl` resolves through the perl entry appended to the fan-out; the
         // other extra extensions above already cover their appended entries.
         #[cfg(feature = "extra-languages")]
-        assert!(registry.parser_for_path(&PathBuf::from("test.pl")).is_some());
+        assert!(registry
+            .parser_for_path(&PathBuf::from("test.pl"))
+            .is_some());
         assert!(registry
             .parser_for_path(&PathBuf::from("test.scala"))
             .is_some());

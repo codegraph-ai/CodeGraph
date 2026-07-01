@@ -458,6 +458,47 @@ mod tests {
     }
 
     #[test]
+    fn test_diff_name_status_rename_reports_new_path_and_delete() {
+        let (dir, executor, _first, second) = init_repo();
+        let path = dir.path();
+        // Ensure rename detection is on regardless of ambient global git config,
+        // since diff_name_status relies on git's default `--name-status` behaviour.
+        git(path, &["config", "diff.renames", "true"]);
+
+        // Third commit: rename a.txt -> c.txt (content unchanged) and delete b.txt.
+        git(path, &["mv", "a.txt", "c.txt"]);
+        git(path, &["rm", "-q", "b.txt"]);
+        git(path, &["commit", "-q", "-m", "refactor: rename a, drop b"]);
+        let third = git(path, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let changes = executor.diff_name_status(&second, &third).unwrap();
+
+        // Rename branch: status 'R', path is the NEW name (c.txt), never the old one.
+        assert!(
+            changes
+                .iter()
+                .any(|(s, p)| *s == 'R' && p == std::path::Path::new("c.txt")),
+            "rename should report the new path c.txt, got {:?}",
+            changes
+        );
+        assert!(
+            !changes
+                .iter()
+                .any(|(_, p)| p == std::path::Path::new("a.txt")),
+            "old rename path a.txt must not leak through, got {:?}",
+            changes
+        );
+        // Delete branch: status 'D' for the dropped file.
+        assert!(
+            changes
+                .iter()
+                .any(|(s, p)| *s == 'D' && p == std::path::Path::new("b.txt")),
+            "deletion should report D for b.txt, got {:?}",
+            changes
+        );
+    }
+
+    #[test]
     fn test_git_dir_resolves_to_existing_dot_git() {
         let (_dir, executor, _first, _second) = init_repo();
         let git_dir = executor.git_dir().unwrap();
