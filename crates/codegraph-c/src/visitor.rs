@@ -943,6 +943,19 @@ mod tests {
         visitor
     }
 
+    fn parse_and_visit_with_calls(source: &[u8]) -> CVisitor<'_> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_c::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+
+        let mut visitor = CVisitor::new(source);
+        visitor.set_extract_calls(true);
+        visitor.visit_node(tree.root_node());
+        visitor
+    }
+
     #[test]
     fn test_visitor_basics() {
         let visitor = CVisitor::new(b"int main() {}");
@@ -1175,5 +1188,143 @@ mod tests {
             "Expected complexity > 1, got {}",
             cx.cyclomatic_complexity
         );
+    }
+
+    #[test]
+    fn test_visitor_line_numbers_one_indexed() {
+        // Function starts on the third physical line (two leading newlines).
+        let source = b"\n\nint greet(void) {\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let func = &visitor.functions[0];
+        assert_eq!(func.line_start, 3);
+        assert_eq!(func.line_end, 5);
+        assert!(func.line_end >= func.line_start);
+    }
+
+    #[test]
+    fn test_visitor_function_default_flags() {
+        let source = b"int add(int a, int b) { return a + b; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let func = &visitor.functions[0];
+        assert!(!func.is_async);
+        assert!(!func.is_test);
+        assert!(!func.is_abstract);
+        assert!(!func.is_static);
+        assert_eq!(func.visibility, "public");
+        assert!(func.doc_comment.is_none());
+        assert!(func.parent_class.is_none());
+        assert!(func.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_visitor_signature_first_line_only() {
+        // A multi-line declaration keeps only the first physical line in signature.
+        let source = b"int compute(\n    int a,\n    int b) {\n    return a + b;\n}\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let func = &visitor.functions[0];
+        assert_eq!(func.signature, "int compute(");
+        // Both parameters are still captured despite the split signature.
+        assert_eq!(func.parameters.len(), 2);
+    }
+
+    #[test]
+    fn test_visitor_body_prefix_populated() {
+        let source = b"int greet(void) {\n    int x = 1;\n    return x;\n}\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let body = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(body.contains("int x = 1"));
+    }
+
+    #[test]
+    fn test_visitor_void_return_type_none() {
+        let source = b"void doThing(void) {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        // "void" is a non-empty type, so it is captured (not None).
+        assert_eq!(visitor.functions[0].return_type, Some("void".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_call_tracking_with_caller() {
+        let source = b"void caller(void) {\n    do_work();\n}\n";
+        let visitor = parse_and_visit_with_calls(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "do_work")
+            .expect("do_work call should be recorded");
+        assert_eq!(call.caller, Some("caller".to_string()));
+        assert_eq!(call.line, 2);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+    }
+
+    #[test]
+    fn test_visitor_calls_disabled_by_default() {
+        // Without set_extract_calls, no calls are recorded.
+        let source = b"void caller(void) {\n    do_work();\n}\n";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_visitor_entry_point_via_module_init() {
+        let source = b"module_init(my_driver_init);\n";
+        let visitor = parse_and_visit_with_calls(source);
+
+        assert!(visitor.entry_points.contains(&"my_driver_init".to_string()));
+        // The macro itself is not recorded as a normal call.
+        assert!(!visitor.calls.iter().any(|c| c.callee == "module_init"));
+    }
+
+    #[test]
+    fn test_visitor_exported_symbol_via_export_macro() {
+        let source = b"EXPORT_SYMBOL_GPL(my_public_api);\n";
+        let visitor = parse_and_visit_with_calls(source);
+
+        assert!(visitor
+            .exported_symbols
+            .contains(&"my_public_api".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_callback_argument_recorded_as_call() {
+        // A bare identifier argument that looks like a function name is
+        // recorded as a callback call target.
+        let source = b"void setup(void) {\n    request_irq(irq, ice_misc_intr, flags);\n}\n";
+        let visitor = parse_and_visit_with_calls(source);
+
+        assert!(visitor.calls.iter().any(|c| c.callee == "request_irq"));
+        assert!(visitor.calls.iter().any(|c| c.callee == "ice_misc_intr"));
+    }
+
+    #[test]
+    fn test_visitor_field_expression_call_uses_field_name() {
+        // obj->handler() records the callee as the field name "handler".
+        let source = b"void run(struct ops *o) {\n    o->handler();\n}\n";
+        let visitor = parse_and_visit_with_calls(source);
+
+        assert!(visitor.calls.iter().any(|c| c.callee == "handler"));
+    }
+
+    #[test]
+    fn test_visitor_multiple_functions_source_order() {
+        let source = b"int first(void) { return 1; }\nint second(void) { return 2; }\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "first");
+        assert_eq!(visitor.functions[1].name, "second");
     }
 }
