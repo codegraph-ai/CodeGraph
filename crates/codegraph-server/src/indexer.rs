@@ -774,4 +774,248 @@ mod tests {
         assert!(!set.is_match("/repo/src/keys.go"));
         assert!(!set.is_match("/repo/src/auth.py"));
     }
+
+    // ---- Indexer runtime tests (hash_content, index_file, index_directory,
+    // index_workspace) ----
+
+    fn indexer_for() -> Indexer {
+        let parsers = Arc::new(ParserRegistry::new());
+        let index_state = Arc::new(Mutex::new(crate::index_state::IndexState::new("")));
+        Indexer::new(parsers, index_state)
+    }
+
+    fn empty_graph() -> Arc<RwLock<CodeGraph>> {
+        Arc::new(RwLock::new(CodeGraph::in_memory().unwrap()))
+    }
+
+    async fn node_count_for_path(graph: &Arc<RwLock<CodeGraph>>, path: &Path) -> usize {
+        let g = graph.read().await;
+        let path_str = path.to_string_lossy().to_string();
+        g.query()
+            .property("path", path_str)
+            .execute()
+            .map(|ids| ids.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn hash_content_empty_is_fnv_offset_basis() {
+        // FNV-1a with no bytes returns the untouched 64-bit offset basis.
+        assert_eq!(Indexer::hash_content(&[]), 0xcbf29ce484222325);
+    }
+
+    #[test]
+    fn hash_content_is_deterministic_and_content_sensitive() {
+        let a = Indexer::hash_content(b"fn main() {}");
+        let b = Indexer::hash_content(b"fn main() {}");
+        let c = Indexer::hash_content(b"fn main() {} ");
+        assert_eq!(a, b, "same bytes must hash identically");
+        assert_ne!(a, c, "one extra byte must change the hash");
+    }
+
+    #[tokio::test]
+    async fn index_file_parses_new_file_and_populates_graph() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("foo.py");
+        std::fs::write(&file, "def foo():\n    return 1\n").unwrap();
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        let parsed = indexer.index_file(&graph, &file).await.unwrap();
+        assert!(parsed, "a brand-new file must report parsed=true");
+        assert!(
+            node_count_for_path(&graph, &file).await > 0,
+            "parsing must add at least one node for the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_file_skips_unchanged_file_on_second_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("foo.py");
+        std::fs::write(&file, "def foo():\n    return 1\n").unwrap();
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        assert!(indexer.index_file(&graph, &file).await.unwrap());
+        // Second call with identical content hits the cached-hash short-circuit.
+        assert!(
+            !indexer.index_file(&graph, &file).await.unwrap(),
+            "unchanged content must report parsed=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_file_reparses_after_content_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("foo.py");
+        std::fs::write(&file, "def foo():\n    return 1\n").unwrap();
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        assert!(indexer.index_file(&graph, &file).await.unwrap());
+        // Change the content - hash differs, so it must reparse.
+        std::fs::write(
+            &file,
+            "def foo():\n    return 2\n\ndef bar():\n    return 3\n",
+        )
+        .unwrap();
+        assert!(
+            indexer.index_file(&graph, &file).await.unwrap(),
+            "changed content must report parsed=true"
+        );
+        assert!(node_count_for_path(&graph, &file).await > 0);
+    }
+
+    #[tokio::test]
+    async fn index_file_returns_err_for_missing_file() {
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        let missing = Path::new("/definitely/not/here/nope.py");
+        let err = indexer.index_file(&graph, missing).await.unwrap_err();
+        assert!(
+            err.starts_with("Read error:"),
+            "unreadable path must surface a read error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_directory_counts_files_by_language() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.py"), "def a(): pass\n").unwrap();
+        std::fs::write(tmp.path().join("b.py"), "def b(): pass\n").unwrap();
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (total, parsed, skipped, by_lang, errors) = indexer
+            .index_directory(&graph, tmp.path(), &IndexConfig::default(), 0, counter)
+            .await;
+        assert_eq!(total, 2);
+        assert_eq!(parsed, 2);
+        assert_eq!(skipped, 0);
+        assert_eq!(by_lang.get("python").copied().unwrap_or(0), 2);
+        assert!(errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn index_directory_skips_excluded_dirs_and_hidden_and_unsupported() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Supported source file at the root.
+        std::fs::write(tmp.path().join("keep.py"), "def keep(): pass\n").unwrap();
+        // Excluded build dir with a source file inside — must not be walked.
+        std::fs::create_dir(tmp.path().join("node_modules")).unwrap();
+        std::fs::write(
+            tmp.path().join("node_modules").join("skip.py"),
+            "def skip(): pass\n",
+        )
+        .unwrap();
+        // Hidden file — skipped by the leading-dot rule.
+        std::fs::write(tmp.path().join(".hidden.py"), "def h(): pass\n").unwrap();
+        // Unsupported extension — no parser, ignored entirely.
+        std::fs::write(tmp.path().join("data.unknownext"), "noise\n").unwrap();
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (total, parsed, _skipped, by_lang, _errors) = indexer
+            .index_directory(&graph, tmp.path(), &IndexConfig::default(), 0, counter)
+            .await;
+        assert_eq!(total, 1, "only keep.py should be counted");
+        assert_eq!(parsed, 1);
+        assert_eq!(by_lang.get("python").copied().unwrap_or(0), 1);
+    }
+
+    #[tokio::test]
+    async fn index_directory_honors_max_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("deep.py"), "def deep(): pass\n").unwrap();
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // max_depth 0: the root is depth 0 (walked), but recursing into `sub`
+        // happens at depth 1 which exceeds the cap and returns early.
+        let config = IndexConfig {
+            max_depth: 0,
+            ..IndexConfig::default()
+        };
+        let (total, _parsed, _skipped, _by_lang, _errors) = indexer
+            .index_directory(&graph, tmp.path(), &config, 0, counter)
+            .await;
+        assert_eq!(total, 0, "the nested file below max_depth must be skipped");
+    }
+
+    #[tokio::test]
+    async fn index_directory_honors_max_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(
+                tmp.path().join(format!("f{i}.py")),
+                format!("def f{i}(): pass\n"),
+            )
+            .unwrap();
+        }
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = IndexConfig {
+            max_files: 2,
+            ..IndexConfig::default()
+        };
+        let (total, _parsed, _skipped, _by_lang, _errors) = indexer
+            .index_directory(&graph, tmp.path(), &config, 0, counter)
+            .await;
+        assert_eq!(total, 2, "must stop after max_files are indexed");
+    }
+
+    #[tokio::test]
+    async fn index_directory_skips_oversized_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("big.py"), "x = 1\n".repeat(1000)).unwrap();
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = IndexConfig {
+            max_file_size_bytes: 10, // smaller than the file
+            ..IndexConfig::default()
+        };
+        let (total, parsed, _skipped, _by_lang, _errors) = indexer
+            .index_directory(&graph, tmp.path(), &config, 0, counter)
+            .await;
+        assert_eq!(total, 0);
+        assert_eq!(parsed, 0);
+    }
+
+    #[tokio::test]
+    async fn index_workspace_aggregates_across_folders_and_reindexes_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder_a = tmp.path().join("a");
+        let folder_b = tmp.path().join("b");
+        std::fs::create_dir(&folder_a).unwrap();
+        std::fs::create_dir(&folder_b).unwrap();
+        std::fs::write(folder_a.join("one.py"), "def one(): pass\n").unwrap();
+        std::fs::write(folder_b.join("two.py"), "def two(): pass\n").unwrap();
+
+        let indexer = indexer_for();
+        let graph = empty_graph();
+        let folders = vec![folder_a.clone(), folder_b.clone()];
+        let config = IndexConfig::default();
+
+        let result = indexer.index_workspace(&graph, &folders, &config).await;
+        assert_eq!(result.total_files, 2);
+        assert_eq!(result.files_parsed, 2);
+        assert_eq!(result.files_skipped, 0);
+        assert_eq!(result.by_language.get("python").copied().unwrap_or(0), 2);
+
+        // A second run over the same unchanged workspace must hash-skip both.
+        let again = indexer.index_workspace(&graph, &folders, &config).await;
+        assert_eq!(again.total_files, 2);
+        assert_eq!(again.files_parsed, 0);
+        assert_eq!(again.files_skipped, 2);
+    }
 }
