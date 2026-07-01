@@ -849,4 +849,124 @@ mod tests {
         let complexity = f.complexity.as_ref().expect("complexity computed");
         assert!(complexity.cyclomatic_complexity > 1);
     }
+
+    #[test]
+    fn parameters_are_extracted_by_name() {
+        let source = b"void greet(String name) {\n  print(name);\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert!(
+            f.parameters.iter().any(|p| p.name == "name"),
+            "expected a parameter named 'name', got {:?}",
+            f.parameters
+        );
+    }
+
+    #[test]
+    fn return_type_is_extracted() {
+        let source = b"int answer() {\n  return 42;\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert_eq!(f.return_type.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn doc_comment_attached_to_function() {
+        let source = b"/// Adds one.\nint inc(int n) {\n  return n + 1;\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert!(
+            f.doc_comment
+                .as_deref()
+                .is_some_and(|d| d.contains("Adds one")),
+            "expected doc comment, got {:?}",
+            f.doc_comment
+        );
+    }
+
+    #[test]
+    fn getter_extracted_with_getter_attribute() {
+        let source = b"class Box {\n  int get size => 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let g = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "size")
+            .expect("getter extracted");
+        assert!(g.attributes.contains(&"getter".to_string()));
+        assert_eq!(g.parent_class.as_deref(), Some("Box"));
+    }
+
+    #[test]
+    fn underscore_prefixed_class_is_private() {
+        let source = b"class _Hidden {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].visibility, "private");
+    }
+
+    #[test]
+    fn export_statement_produces_no_import() {
+        let source = b"export 'src/util.dart';";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn multiple_imports_are_all_recorded() {
+        let source = b"import 'dart:io';\nimport 'dart:async';";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 2);
+        assert!(visitor.imports.iter().any(|i| i.imported == "dart:io"));
+        assert!(visitor.imports.iter().any(|i| i.imported == "dart:async"));
+    }
+
+    #[test]
+    fn class_implements_multiple_interfaces() {
+        let source = b"class Service implements Runnable, Closeable {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.implementations.len(), 2);
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|r| r.trait_name == "Runnable"));
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|r| r.trait_name == "Closeable"));
+    }
+
+    #[test]
+    fn top_level_function_without_body_is_abstract() {
+        // A bodyless top-level function signature (rare, but the grammar allows
+        // a trailing declaration) has no function_body sibling, so is_abstract.
+        let source = b"int compute();";
+        let visitor = parse_and_visit(source);
+
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "compute")
+            .expect("function signature extracted");
+        assert!(f.is_abstract);
+        assert!(f.complexity.is_none());
+    }
+
+    #[test]
+    fn empty_source_yields_nothing() {
+        let visitor = parse_and_visit(b"");
+
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
 }
