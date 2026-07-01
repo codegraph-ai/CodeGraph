@@ -276,7 +276,8 @@ impl<'a> SolidityVisitor<'a> {
                         class.methods.push(func);
                     }
                 }
-                "fallback_receive_definition" | "receive_function_definition"
+                "fallback_receive_definition"
+                | "receive_function_definition"
                 | "fallback_function_definition" => {
                     if let Some(func) = self.extract_special_fn(child) {
                         class.methods.push(func);
@@ -313,7 +314,9 @@ impl<'a> SolidityVisitor<'a> {
         let return_type = self.extract_return_type(node);
         let doc_comment = self.extract_natspec(node);
         let body_prefix = self.get_body_prefix(node);
-        let complexity = self.get_body_node(node).map(|b| self.calculate_complexity(b));
+        let complexity = self
+            .get_body_node(node)
+            .map(|b| self.calculate_complexity(b));
 
         // A function is abstract if it has no body (ends with `;`) or is marked `virtual`
         let has_body = self.get_body_node(node).is_some();
@@ -344,9 +347,14 @@ impl<'a> SolidityVisitor<'a> {
         let visibility = self.extract_visibility(node);
         let doc_comment = self.extract_natspec(node);
         let body_prefix = self.get_body_prefix(node);
-        let complexity = self.get_body_node(node).map(|b| self.calculate_complexity(b));
+        let complexity = self
+            .get_body_node(node)
+            .map(|b| self.calculate_complexity(b));
 
-        let class_name = self.current_class.clone().unwrap_or_else(|| "unknown".to_string());
+        let class_name = self
+            .current_class
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
 
         Some(FunctionEntity {
             name: "constructor".to_string(),
@@ -377,7 +385,9 @@ impl<'a> SolidityVisitor<'a> {
         let parameters = self.extract_parameters(node);
         let doc_comment = self.extract_natspec(node);
         let body_prefix = self.get_body_prefix(node);
-        let complexity = self.get_body_node(node).map(|b| self.calculate_complexity(b));
+        let complexity = self
+            .get_body_node(node)
+            .map(|b| self.calculate_complexity(b));
 
         Some(FunctionEntity {
             name: name.clone(),
@@ -712,10 +722,7 @@ impl<'a> SolidityVisitor<'a> {
         }
 
         match node.kind() {
-            "if_statement"
-            | "for_statement"
-            | "while_statement"
-            | "do_while_statement"
+            "if_statement" | "for_statement" | "while_statement" | "do_while_statement"
             | "try_statement" => {
                 builder.exit_scope();
             }
@@ -803,7 +810,12 @@ library SafeMath {
         let tree = parser.parse(source_bytes, None).unwrap();
 
         fn dump(node: tree_sitter::Node, source: &[u8], indent: usize) {
-            let text = node.utf8_text(source).unwrap_or("").chars().take(40).collect::<String>();
+            let text = node
+                .utf8_text(source)
+                .unwrap_or("")
+                .chars()
+                .take(40)
+                .collect::<String>();
             let text = text.replace('\n', "\\n");
             println!(
                 "{}{} [{}-{}] {:?}",
@@ -823,15 +835,46 @@ library SafeMath {
 
         let visitor = parse_and_visit(source_bytes);
         println!("\n=== Extracted ===");
-        println!("Classes: {:?}", visitor.classes.iter().map(|c| &c.name).collect::<Vec<_>>());
-        println!("Traits: {:?}", visitor.traits.iter().map(|t| &t.name).collect::<Vec<_>>());
-        println!("Imports: {:?}", visitor.imports.iter().map(|i| &i.imported).collect::<Vec<_>>());
-        println!("Functions: {:?}", visitor.functions.iter().map(|f| &f.name).collect::<Vec<_>>());
+        println!(
+            "Classes: {:?}",
+            visitor.classes.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        println!(
+            "Traits: {:?}",
+            visitor.traits.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        println!(
+            "Imports: {:?}",
+            visitor
+                .imports
+                .iter()
+                .map(|i| &i.imported)
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "Functions: {:?}",
+            visitor
+                .functions
+                .iter()
+                .map(|f| &f.name)
+                .collect::<Vec<_>>()
+        );
         for c in &visitor.classes {
-            println!("  {} methods: {:?}", c.name, c.methods.iter().map(|m| &m.name).collect::<Vec<_>>());
+            println!(
+                "  {} methods: {:?}",
+                c.name,
+                c.methods.iter().map(|m| &m.name).collect::<Vec<_>>()
+            );
         }
         for t in &visitor.traits {
-            println!("  {} methods: {:?}", t.name, t.required_methods.iter().map(|m| &m.name).collect::<Vec<_>>());
+            println!(
+                "  {} methods: {:?}",
+                t.name,
+                t.required_methods
+                    .iter()
+                    .map(|m| &m.name)
+                    .collect::<Vec<_>>()
+            );
         }
     }
 
