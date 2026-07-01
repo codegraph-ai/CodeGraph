@@ -90,4 +90,33 @@ mod tests {
         let back: ModuleEntity = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
     }
+
+    #[test]
+    fn accepts_string_and_str_inputs() {
+        let m = ModuleEntity::new(String::from("m"), "/m.rs", String::from("rust"))
+            .with_doc(String::from("d"));
+        assert_eq!(m.name, "m");
+        assert_eq!(m.language, "rust");
+        assert_eq!(m.doc_comment, Some("d".to_string()));
+    }
+
+    #[test]
+    fn with_attributes_replaces_rather_than_appends() {
+        let m = ModuleEntity::new("m", "/m.rs", "rust")
+            .with_attributes(vec!["a".to_string()])
+            .with_attributes(vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(m.attributes, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn equality_considers_all_fields() {
+        let base = ModuleEntity::new("m", "/m.rs", "rust");
+        assert_eq!(base, ModuleEntity::new("m", "/m.rs", "rust"));
+        assert_ne!(
+            base,
+            ModuleEntity::new("m", "/m.rs", "rust").with_line_count(1)
+        );
+        assert_ne!(base, ModuleEntity::new("m", "/m.rs", "rust").with_doc("d"));
+        assert_ne!(base, ModuleEntity::new("m", "/other.rs", "rust"));
+    }
 }

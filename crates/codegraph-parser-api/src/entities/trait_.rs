@@ -112,4 +112,35 @@ mod tests {
         let back: TraitEntity = serde_json::from_str(&json).unwrap();
         assert_eq!(t, back);
     }
+
+    #[test]
+    fn accepts_string_and_str_inputs() {
+        let t = TraitEntity::new(String::from("T"), 1, 2)
+            .with_visibility(String::from("crate"))
+            .with_doc(String::from("d"));
+        assert_eq!(t.name, "T");
+        assert_eq!(t.visibility, "crate");
+        assert_eq!(t.doc_comment, Some("d".to_string()));
+    }
+
+    #[test]
+    fn with_methods_replaces_rather_than_appends() {
+        let t = TraitEntity::new("T", 1, 2)
+            .with_methods(vec![FunctionEntity::new("a", 1, 1)])
+            .with_methods(vec![FunctionEntity::new("b", 2, 2)]);
+        assert_eq!(t.required_methods.len(), 1);
+        assert_eq!(t.required_methods[0].name, "b");
+    }
+
+    #[test]
+    fn equality_considers_all_fields() {
+        let base = TraitEntity::new("T", 1, 2);
+        assert_eq!(base, TraitEntity::new("T", 1, 2));
+        assert_ne!(base, TraitEntity::new("T", 1, 3));
+        assert_ne!(base, TraitEntity::new("T", 1, 2).with_visibility("private"));
+        assert_ne!(
+            base,
+            TraitEntity::new("T", 1, 2).with_parent_traits(vec!["P".to_string()])
+        );
+    }
 }

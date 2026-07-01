@@ -78,4 +78,50 @@ mod tests {
         assert_eq!(c.field_name, Some("ndo_open".to_string()));
         assert!(!c.is_direct);
     }
+
+    #[test]
+    fn accepts_string_and_str_inputs() {
+        let c = CallRelation::new(String::from("a"), "b", 1);
+        assert_eq!(c.caller, "a");
+        assert_eq!(c.callee, "b");
+    }
+
+    #[test]
+    fn indirect_then_vtable_stays_indirect() {
+        let c = CallRelation::new("a", "b", 1)
+            .indirect()
+            .with_vtable("S".to_string(), "f".to_string());
+        assert!(!c.is_direct);
+        assert_eq!(c.struct_type, Some("S".to_string()));
+    }
+
+    #[test]
+    fn equality_considers_all_fields() {
+        let base = CallRelation::new("a", "b", 5);
+        assert_eq!(base, CallRelation::new("a", "b", 5));
+        assert_ne!(base, CallRelation::new("a", "b", 6));
+        assert_ne!(base, CallRelation::new("a", "b", 5).indirect());
+        assert_ne!(
+            base,
+            CallRelation::new("a", "b", 5).with_vtable("S".into(), "f".into())
+        );
+    }
+
+    #[test]
+    fn hashes_by_value_in_set() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(CallRelation::new("a", "b", 5));
+        assert!(!set.insert(CallRelation::new("a", "b", 5)));
+        assert!(set.insert(CallRelation::new("a", "b", 5).indirect()));
+    }
+
+    #[test]
+    fn round_trips_through_json() {
+        let c = CallRelation::new("register", "ndo_open", 42)
+            .with_vtable("net_device_ops".to_string(), "ndo_open".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        let back: CallRelation = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+    }
 }

@@ -46,4 +46,45 @@ mod tests {
         let back: TypeReference = serde_json::from_str(&json).unwrap();
         assert_eq!(t, back);
     }
+
+    #[test]
+    fn accepts_string_and_str_inputs() {
+        let t = TypeReference::new(String::from("f"), "T", 1);
+        assert_eq!(t.referrer, "f");
+        assert_eq!(t.type_name, "T");
+    }
+
+    #[test]
+    fn line_zero_is_allowed() {
+        let t = TypeReference::new("f", "T", 0);
+        assert_eq!(t.line_number, 0);
+    }
+
+    #[test]
+    fn equality_considers_all_fields() {
+        let a = TypeReference::new("f", "T", 5);
+        let b = TypeReference::new("f", "T", 5);
+        let diff_line = TypeReference::new("f", "T", 6);
+        let diff_type = TypeReference::new("f", "U", 5);
+        let diff_referrer = TypeReference::new("g", "T", 5);
+        assert_eq!(a, b);
+        assert_ne!(a, diff_line);
+        assert_ne!(a, diff_type);
+        assert_ne!(a, diff_referrer);
+    }
+
+    #[test]
+    fn hashes_by_value_in_set() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(TypeReference::new("f", "T", 5));
+        assert!(!set.insert(TypeReference::new("f", "T", 5)));
+        assert!(set.insert(TypeReference::new("f", "T", 6)));
+    }
+
+    #[test]
+    fn clone_produces_equal_value() {
+        let t = TypeReference::new("buildGraph", "DependencyGraphParams", 12);
+        assert_eq!(t.clone(), t);
+    }
 }
