@@ -612,4 +612,224 @@ mod tests {
         assert_eq!(visitor.classes.len(), 1);
         assert_eq!(visitor.classes[0].base_classes, vec!["NSObject"]);
     }
+
+    #[test]
+    fn test_no_superclass_empty_base_classes() {
+        // A category-less interface with no `: Super` still parses; base_classes empty.
+        let source = br#"
+@interface Standalone
+- (void)ping;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].name, "Standalone");
+        assert!(visitor.classes[0].base_classes.is_empty());
+    }
+
+    #[test]
+    fn test_class_metadata() {
+        let source = br#"
+@interface MyClass : NSObject
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let class = &visitor.classes[0];
+        assert_eq!(class.visibility, "public");
+        assert!(!class.is_abstract);
+        assert!(!class.is_interface);
+        // @interface starts on line 2 (leading newline), single line span.
+        assert_eq!(class.line_start, 2);
+        assert_eq!(class.line_end, 3);
+    }
+
+    #[test]
+    fn test_instance_method_not_static() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let greet = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greet")
+            .unwrap();
+        assert!(!greet.is_static);
+    }
+
+    #[test]
+    fn test_class_method_is_static() {
+        let source = br#"
+@implementation MyClass
++ (instancetype)sharedInstance {
+    return nil;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let shared = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "sharedInstance")
+            .unwrap();
+        assert!(shared.is_static);
+    }
+
+    #[test]
+    fn test_interface_method_is_abstract() {
+        // A `method_declaration` (no body) under @interface is abstract with no complexity/body.
+        let source = br#"
+@interface MyClass : NSObject
+- (void)greet;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let greet = &visitor.functions[0];
+        assert_eq!(greet.name, "greet");
+        assert!(greet.is_abstract);
+        assert!(greet.complexity.is_none());
+        assert!(greet.body_prefix.is_none());
+        // Signature is the declaration line with the trailing `;` trimmed.
+        assert_eq!(greet.signature, "- (void)greet");
+    }
+
+    #[test]
+    fn test_implementation_method_not_abstract() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let greet = &visitor.functions[0];
+        assert!(!greet.is_abstract);
+        assert!(greet.complexity.is_some());
+        assert!(greet.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_method_parent_class() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].parent_class,
+            Some("MyClass".to_string())
+        );
+    }
+
+    #[test]
+    fn test_protocol_method_parent_class() {
+        let source = br#"
+@protocol MyProtocol
+- (void)doSomething;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let m = &visitor.functions[0];
+        assert_eq!(m.name, "doSomething");
+        assert!(m.is_abstract);
+        assert_eq!(m.parent_class, Some("MyProtocol".to_string()));
+    }
+
+    #[test]
+    fn test_method_complexity_branching() {
+        let source = br#"
+@implementation MyClass
+- (void)decide:(int)x {
+    if (x > 0) {
+        return;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let decide = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "decide")
+            .unwrap();
+        let complexity = decide.complexity.as_ref().unwrap();
+        assert!(complexity.cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_call_extraction() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"Hello");
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(!visitor.calls.is_empty());
+        let call = &visitor.calls[0];
+        assert_eq!(call.caller, "greet");
+        assert_eq!(call.callee, "NSLog");
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_system_import_cleaned() {
+        let source = br#"
+#import <Foundation/Foundation.h>
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "Foundation/Foundation.h");
+        assert_eq!(imp.importer, "main");
+        assert!(!imp.is_wildcard);
+        assert!(imp.alias.is_none());
+    }
+
+    #[test]
+    fn test_quoted_import_cleaned() {
+        let source = br#"
+#import "MyHelper.h"
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "MyHelper.h");
+    }
+
+    #[test]
+    fn test_multiple_classes() {
+        let source = br#"
+@interface Alpha : NSObject
+@end
+
+@interface Beta : NSObject
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 2);
+        let names: Vec<&str> = visitor.classes.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Alpha"));
+        assert!(names.contains(&"Beta"));
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.traits.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
 }
