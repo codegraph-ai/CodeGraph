@@ -124,6 +124,29 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_zero_max_file_size() {
+        // The max_file_size == 0 guard (distinct from the num_threads guard)
+        // returns its own error message.
+        let mut config = ParserConfig::default();
+        config.max_file_size = 0;
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "max_file_size must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_file_extensions() {
+        // An empty extension list is invalid - nothing would ever be parsed.
+        let mut config = ParserConfig::default();
+        config.file_extensions.clear();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "file_extensions cannot be empty"
+        );
+    }
+
+    #[test]
     fn test_should_parse_extension() {
         let config = ParserConfig::default();
         assert!(config.should_parse_extension(".py"));
