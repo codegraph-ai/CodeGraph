@@ -294,6 +294,55 @@ impl GitExecutor {
 mod tests {
     use super::*;
     use std::env;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Run a git command in `dir`, panicking on failure.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Build a temp repo with two linear commits and return the executor plus
+    /// the two commit hashes (oldest first).
+    fn init_repo() -> (TempDir, GitExecutor, String, String) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+        git(path, &["init", "-q"]);
+        git(path, &["config", "user.name", "Test User"]);
+        git(path, &["config", "user.email", "test@example.com"]);
+        git(path, &["config", "commit.gpgsign", "false"]);
+
+        fs::write(path.join("a.txt"), "hello\n").unwrap();
+        git(path, &["add", "a.txt"]);
+        git(path, &["commit", "-q", "-m", "feat: add a"]);
+        let first = git(path, &["rev-parse", "HEAD"]).trim().to_string();
+
+        fs::write(path.join("a.txt"), "hello world\n").unwrap();
+        fs::write(path.join("b.txt"), "second\n").unwrap();
+        git(path, &["add", "a.txt", "b.txt"]);
+        git(
+            path,
+            &["commit", "-q", "-m", "fix: bug in a\n\nDetailed body here."],
+        );
+        let second = git(path, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // Normalize branch name so current_branch is deterministic.
+        git(path, &["branch", "-M", "main"]);
+
+        let executor = GitExecutor::new(path).unwrap();
+        (dir, executor, first, second)
+    }
 
     #[test]
     fn test_git_executor_creation() {
@@ -304,5 +353,132 @@ mod tests {
         if let Ok(executor) = result {
             assert!(executor.repo_path().exists());
         }
+    }
+
+    #[test]
+    fn test_new_rejects_non_repository() {
+        let dir = TempDir::new().unwrap();
+        let result = GitExecutor::new(dir.path());
+        assert!(matches!(result, Err(GitMiningError::NotARepository(_))));
+    }
+
+    #[test]
+    fn test_log_returns_all_subjects() {
+        let (_dir, executor, _first, _second) = init_repo();
+        let out = executor.log("%s", None, None).unwrap();
+        assert!(out.contains("feat: add a"));
+        assert!(out.contains("fix: bug in a"));
+    }
+
+    #[test]
+    fn test_log_limit_returns_only_newest() {
+        let (_dir, executor, _first, _second) = init_repo();
+        let out = executor.log("%s", Some(1), None).unwrap();
+        assert!(out.contains("fix: bug in a"));
+        assert!(!out.contains("feat: add a"));
+    }
+
+    #[test]
+    fn test_log_path_filter_restricts_to_touching_commits() {
+        let (_dir, executor, _first, _second) = init_repo();
+        // b.txt only exists in the second commit.
+        let out = executor.log("%s", None, Some(Path::new("b.txt"))).unwrap();
+        assert!(out.contains("fix: bug in a"));
+        assert!(!out.contains("feat: add a"));
+    }
+
+    #[test]
+    fn test_log_grep_is_case_insensitive() {
+        let (_dir, executor, _first, _second) = init_repo();
+        let hit = executor.log_grep("FIX", "%s", None).unwrap();
+        assert!(hit.contains("fix: bug in a"));
+        assert!(!hit.contains("feat: add a"));
+
+        let miss = executor.log_grep("nonexistent-token", "%s", None).unwrap();
+        assert!(miss.trim().is_empty());
+    }
+
+    #[test]
+    fn test_show_files_lists_changed_paths() {
+        let (_dir, executor, first, second) = init_repo();
+
+        let first_files = executor.show_files(&first).unwrap();
+        assert_eq!(first_files, vec!["a.txt".to_string()]);
+
+        let second_files = executor.show_files(&second).unwrap();
+        assert!(second_files.contains(&"a.txt".to_string()));
+        assert!(second_files.contains(&"b.txt".to_string()));
+        assert_eq!(second_files.len(), 2);
+    }
+
+    #[test]
+    fn test_show_files_bad_hash_errors() {
+        let (_dir, executor, _first, _second) = init_repo();
+        let result = executor.show_files("deadbeefdeadbeef");
+        assert!(matches!(result, Err(GitMiningError::CommandFailed(_))));
+    }
+
+    #[test]
+    fn test_show_stat_includes_file_names() {
+        let (_dir, executor, _first, second) = init_repo();
+        let stat = executor.show_stat(&second).unwrap();
+        assert!(stat.contains("a.txt"));
+        assert!(stat.contains("b.txt"));
+    }
+
+    #[test]
+    fn test_show_message_returns_full_body() {
+        let (_dir, executor, _first, second) = init_repo();
+        let msg = executor.show_message(&second).unwrap();
+        assert!(msg.starts_with("fix: bug in a"));
+        assert!(msg.contains("Detailed body here."));
+    }
+
+    #[test]
+    fn test_current_branch_is_main() {
+        let (_dir, executor, _first, _second) = init_repo();
+        assert_eq!(executor.current_branch().unwrap(), "main");
+    }
+
+    #[test]
+    fn test_head_commit_matches_second() {
+        let (_dir, executor, _first, second) = init_repo();
+        let head = executor.head_commit().unwrap();
+        assert_eq!(head, second);
+        assert_eq!(head.len(), 40);
+    }
+
+    #[test]
+    fn test_diff_name_status_reports_add_and_modify() {
+        let (_dir, executor, first, second) = init_repo();
+        let changes = executor.diff_name_status(&first, &second).unwrap();
+        assert!(changes.contains(&('M', std::path::PathBuf::from("a.txt"))));
+        assert!(changes.contains(&('A', std::path::PathBuf::from("b.txt"))));
+        assert_eq!(changes.len(), 2);
+    }
+
+    #[test]
+    fn test_git_dir_resolves_to_existing_dot_git() {
+        let (_dir, executor, _first, _second) = init_repo();
+        let git_dir = executor.git_dir().unwrap();
+        assert!(git_dir.ends_with(".git"));
+        assert!(git_dir.exists());
+    }
+
+    #[test]
+    fn test_blame_includes_author() {
+        let (_dir, executor, _first, _second) = init_repo();
+        let blame = executor.blame(Path::new("a.txt"), None).unwrap();
+        assert!(blame.contains("Test User"));
+
+        // Line-range restricted blame still succeeds for the single line.
+        let ranged = executor.blame(Path::new("a.txt"), Some((1, 1))).unwrap();
+        assert!(ranged.contains("Test User"));
+    }
+
+    #[test]
+    fn test_repo_path_matches_construction() {
+        let (dir, executor, _first, _second) = init_repo();
+        assert_eq!(executor.repo_path(), dir.path());
     }
 }
