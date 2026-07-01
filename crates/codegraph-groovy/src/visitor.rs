@@ -632,4 +632,173 @@ class B {
         assert_eq!(visitor.classes[0].name, "A");
         assert_eq!(visitor.classes[1].name, "B");
     }
+
+    #[test]
+    fn test_method_line_numbers() {
+        // Method line_start/line_end are 1-indexed and the body spans two rows.
+        let source = br#"class Svc {
+    def work() {
+        println "x"
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert_eq!(method.line_start, 2);
+        assert_eq!(method.line_end, 4);
+    }
+
+    #[test]
+    fn test_method_default_flags() {
+        // A plain method is not async, not a test, not static, not abstract.
+        let source = br#"
+class Svc {
+    def plain() {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert!(!method.is_async);
+        assert!(!method.is_test);
+        assert!(!method.is_static);
+        assert!(!method.is_abstract);
+    }
+
+    #[test]
+    fn test_method_return_type() {
+        // The `type` field carries the declared return type (here `String`).
+        let source = br#"
+class Svc {
+    String name() { return "x" }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert_eq!(method.return_type.as_deref(), Some("String"));
+    }
+
+    #[test]
+    fn test_method_doc_comment() {
+        // A /** ... */ block comment preceding a top-level function is attached.
+        let source = br#"/** Does a thing. */
+def documented() {}
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let doc = visitor.functions[0].doc_comment.as_deref().unwrap();
+        assert!(doc.contains("Does a thing"));
+    }
+
+    #[test]
+    fn test_test_annotation_detection() {
+        // A method carrying the @Test annotation is flagged is_test.
+        let source = br#"
+class SpecTest {
+    @Test
+    def shouldWork() {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert!(method.is_test);
+    }
+
+    #[test]
+    fn test_parameter_type_extraction() {
+        // A typed parameter records both name and type.
+        let source = br#"
+class Svc {
+    def register(String email) {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let param = &visitor.classes[0].methods[0].parameters[0];
+        assert_eq!(param.name, "email");
+        assert_eq!(param.type_annotation.as_deref(), Some("String"));
+    }
+
+    #[test]
+    fn test_complexity_while_raises() {
+        let source = br#"
+class Svc {
+    def loopy(int n) {
+        while (n > 0) {
+            n--
+        }
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert!(method.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_switch_raises() {
+        let source = br#"
+class Svc {
+    def choose(int x) {
+        switch (x) {
+            case 1:
+                return 1
+            default:
+                return 0
+        }
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert!(method.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_logical_operator_raises() {
+        let source = br#"
+class Svc {
+    def guard(boolean a, boolean b) {
+        if (a && b) {
+            return 1
+        }
+        return 0
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        // if + && together exceed a lone-if complexity.
+        assert!(method.complexity.as_ref().unwrap().cyclomatic_complexity > 2);
+    }
+
+    #[test]
+    fn test_complexity_ternary_raises() {
+        let source = br#"
+class Svc {
+    def pick(int x) {
+        return x > 0 ? 1 : 0
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert!(method.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_catch_raises() {
+        let source = br#"
+class Svc {
+    def risky() {
+        try {
+            doThing()
+        } catch (Exception e) {
+            handle(e)
+        }
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        assert!(method.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
 }
