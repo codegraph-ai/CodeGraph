@@ -346,4 +346,146 @@ mod tests {
         assert!(names.contains(&"version"));
         assert!(names.contains(&"edition"));
     }
+
+    #[test]
+    fn pair_line_numbers_are_one_indexed_with_leading_blank_lines() {
+        // Two blank lines, then the pair on physical line 3.
+        let src = "\n\nname = \"a\"\n";
+        let v = visit(src);
+        assert_eq!(v.functions.len(), 1);
+        assert_eq!(v.functions[0].line_start, 3);
+        assert_eq!(v.functions[0].line_end, 3);
+    }
+
+    #[test]
+    fn two_distinct_sections_each_emit_a_class() {
+        let src = "[a]\nx = 1\n\n[b]\ny = 2\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 2);
+        let names: Vec<&str> = v.classes.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+    }
+
+    #[test]
+    fn pairs_are_attributed_to_their_own_section() {
+        let src = "[a]\nx = 1\n[b]\ny = 2\n";
+        let v = visit(src);
+        let fx = v.functions.iter().find(|f| f.name == "a.x").expect("a.x");
+        let fy = v.functions.iter().find(|f| f.name == "b.y").expect("b.y");
+        assert_eq!(fx.parent_class.as_deref(), Some("a"));
+        assert_eq!(fy.parent_class.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn empty_section_still_emits_a_class() {
+        // `[empty]` header on line 1 with no pairs; the next header flushes it.
+        let src = "[empty]\n[next]\nk = 1\n";
+        let v = visit(src);
+        let empty = v
+            .classes
+            .iter()
+            .find(|c| c.name == "empty")
+            .expect("empty section class");
+        assert_eq!(empty.line_start, 1);
+        assert_eq!(empty.line_end, 1);
+        // No pair belongs to the empty section.
+        assert!(v
+            .functions
+            .iter()
+            .all(|f| f.parent_class.as_deref() != Some("empty")));
+    }
+
+    #[test]
+    fn inline_table_value_is_captured_in_signature() {
+        let src = "point = { x = 1, y = 2 }\n";
+        let v = visit(src);
+        assert_eq!(v.functions.len(), 1);
+        let sig = &v.functions[0].signature;
+        assert!(sig.starts_with("point = {"), "inline table sig: {sig}");
+        assert!(sig.contains("x = 1"));
+    }
+
+    #[test]
+    fn array_value_is_captured_in_signature() {
+        let src = "ports = [8000, 8001, 8002]\n";
+        let v = visit(src);
+        assert_eq!(v.functions.len(), 1);
+        assert_eq!(v.functions[0].signature, "ports = [8000, 8001, 8002]");
+    }
+
+    #[test]
+    fn scalar_value_types_are_preserved_verbatim() {
+        let src = "port = 8080\nratio = 1.5\nenabled = true\n";
+        let v = visit(src);
+        let port = v.functions.iter().find(|f| f.name == "port").unwrap();
+        let ratio = v.functions.iter().find(|f| f.name == "ratio").unwrap();
+        let enabled = v.functions.iter().find(|f| f.name == "enabled").unwrap();
+        assert_eq!(port.signature, "port = 8080");
+        assert_eq!(ratio.signature, "ratio = 1.5");
+        assert_eq!(enabled.signature, "enabled = true");
+    }
+
+    #[test]
+    fn value_exactly_at_cap_is_not_truncated() {
+        // A string value whose full text (quotes included) is exactly 120 chars
+        // must NOT get an ellipsis — truncation triggers only above 120.
+        let inner = "x".repeat(118); // "..." + 118 + "..." quotes = 120 chars
+        let src = format!("key = \"{inner}\"\n");
+        let v = visit(&src);
+        assert_eq!(v.functions.len(), 1);
+        let sig = &v.functions[0].signature;
+        assert!(
+            !sig.ends_with("..."),
+            "exactly-120-char value should not be truncated: len {}",
+            sig.len()
+        );
+    }
+
+    #[test]
+    fn comment_lines_do_not_emit_entities() {
+        let src = "# a header comment\nname = \"a\"\n# trailing comment\n";
+        let v = visit(src);
+        assert_eq!(v.functions.len(), 1, "only the pair, not the comments");
+        assert_eq!(v.functions[0].name, "name");
+    }
+
+    #[test]
+    fn top_level_pair_before_a_table_is_not_parented() {
+        // `version` precedes any `[table]`, so it stays section-less; the pair
+        // after the header is parented.
+        let src = "version = \"0.1.0\"\n[deps]\nserde = \"1\"\n";
+        let v = visit(src);
+        let version = v.functions.iter().find(|f| f.name == "version").unwrap();
+        assert_eq!(version.parent_class, None);
+        let serde = v.functions.iter().find(|f| f.name == "deps.serde").unwrap();
+        assert_eq!(serde.parent_class.as_deref(), Some("deps"));
+    }
+
+    #[test]
+    fn array_of_tables_pairs_are_prefixed_with_section() {
+        let src = "[[bin]]\nname = \"server\"\n";
+        let v = visit(src);
+        let f = v
+            .functions
+            .iter()
+            .find(|f| f.name == "bin.name")
+            .expect("prefixed array-of-tables key");
+        assert_eq!(f.parent_class.as_deref(), Some("bin"));
+        assert_eq!(f.signature, "name = \"server\"");
+    }
+
+    #[test]
+    fn dotted_section_name_is_preserved_and_prefixes_keys() {
+        let src = "[tool.black]\nline-length = 88\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 1);
+        assert_eq!(v.classes[0].name, "tool.black");
+        let f = v
+            .functions
+            .iter()
+            .find(|f| f.name == "tool.black.line-length")
+            .expect("dotted section prefix");
+        assert_eq!(f.parent_class.as_deref(), Some("tool.black"));
+    }
 }
