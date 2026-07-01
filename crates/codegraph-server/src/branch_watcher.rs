@@ -393,3 +393,128 @@ async fn handle_branch_switch(
 
     Ok((modified_count, deleted_count))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    /// Run a git command in `dir`, panicking on failure. Used to build fixtures.
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("failed to spawn git");
+        assert!(
+            status.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    /// Initialize a git repo in `dir` with a single committed file so that
+    /// `rev-parse HEAD` and `--abbrev-ref HEAD` both succeed.
+    fn init_repo_with_commit(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "test@example.com"]);
+        git(dir, &["config", "user.name", "Test"]);
+        std::fs::write(dir.join("file.txt"), "hello").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "initial"]);
+    }
+
+    #[test]
+    fn resolve_git_head_returns_none_when_not_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        // A bare temp dir has no `.git` entry at all.
+        assert!(resolve_git_head(dir.path()).is_none());
+    }
+
+    #[test]
+    fn resolve_git_head_normal_repo_points_at_git_head() {
+        let dir = tempfile::tempdir().unwrap();
+        // Synthetic `.git` directory is enough to hit the `is_dir` branch.
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+
+        let head = resolve_git_head(dir.path()).expect("should resolve HEAD");
+        assert_eq!(head, git_dir.join("HEAD"));
+        assert_eq!(head.file_name().unwrap(), "HEAD");
+        assert_eq!(head.parent().unwrap(), git_dir);
+    }
+
+    #[test]
+    fn resolve_git_head_real_repo_head_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let head = resolve_git_head(dir.path()).expect("should resolve HEAD");
+        assert_eq!(head.file_name().unwrap(), "HEAD");
+        assert!(head.exists(), "resolved HEAD file should exist on disk");
+    }
+
+    #[test]
+    fn resolve_git_head_worktree_resolves_into_worktrees_dir() {
+        let main = tempfile::tempdir().unwrap();
+        init_repo_with_commit(main.path());
+
+        // Create a linked worktree; its `.git` is a file, not a directory.
+        let wt_parent = tempfile::tempdir().unwrap();
+        let wt_path = wt_parent.path().join("wt");
+        git(
+            main.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "feature",
+            ],
+        );
+        assert!(
+            wt_path.join(".git").is_file(),
+            "worktree .git must be a file"
+        );
+
+        let head = resolve_git_head(&wt_path).expect("should resolve worktree HEAD");
+        assert_eq!(head.file_name().unwrap(), "HEAD");
+        assert!(head.exists(), "worktree HEAD file should exist");
+        assert!(
+            head.to_string_lossy().contains("worktrees"),
+            "worktree HEAD should live under the shared .git/worktrees dir, got {}",
+            head.display()
+        );
+    }
+
+    #[test]
+    fn resolve_git_head_bogus_git_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        // `.git` is a file (worktree branch) but points nowhere valid, and the
+        // temp dir is outside any repo, so `git rev-parse --git-dir` fails.
+        std::fs::write(dir.path().join(".git"), "gitdir: /nonexistent/path").unwrap();
+        assert!(resolve_git_head(dir.path()).is_none());
+    }
+
+    #[tokio::test]
+    async fn read_branch_state_none_when_not_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_branch_state(dir.path()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_branch_state_returns_branch_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let state = read_branch_state(dir.path())
+            .await
+            .expect("should read branch state from a committed repo");
+        assert!(!state.branch.is_empty(), "branch name should be populated");
+        // A full commit hash is 40 hex chars.
+        assert_eq!(state.commit.len(), 40, "commit should be a full SHA-1 hash");
+        assert!(state.commit.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}
