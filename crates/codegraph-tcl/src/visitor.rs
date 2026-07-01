@@ -2311,4 +2311,203 @@ proc add {a b} {
             f.parameters
         );
     }
+
+    // ── Import relation shape ───────────────────────────────────────────
+
+    #[test]
+    fn test_source_import_is_wildcard_file_relation() {
+        let source = b"source lib/helpers.tcl";
+        let visitor = parse_and_visit(source);
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported.contains("helpers.tcl"))
+            .expect("source should record an import");
+        assert_eq!(imp.importer, "file");
+        assert!(
+            imp.is_wildcard,
+            "a `source` pulls in the whole file, so it is recorded as a wildcard import"
+        );
+        assert!(imp.alias.is_none());
+        assert!(imp.symbols.is_empty());
+    }
+
+    #[test]
+    fn test_quoted_only_source_yields_no_import() {
+        // A lone `source "path"` (quoted arg, no preceding bare command) parses
+        // into an ERROR node, so visit_source_command is never reached and no
+        // import is recorded - a grammar quirk, unlike the bare `source path`.
+        let source = b"source \"lib/quoted.tcl\"";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.imports.is_empty(),
+            "quoted-only source ERROR-parses and records no import, got {:?}",
+            visitor
+                .imports
+                .iter()
+                .map(|i| &i.imported)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_package_require_is_non_wildcard_file_relation() {
+        let source = b"package require http 2.9";
+        let visitor = parse_and_visit(source);
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "http")
+            .expect("package require should record an import of the package name");
+        assert_eq!(imp.importer, "file");
+        assert!(
+            !imp.is_wildcard,
+            "a package require names a specific package, not a wildcard"
+        );
+    }
+
+    #[test]
+    fn test_eda_read_records_file_import() {
+        let source = b"read_verilog design.v";
+        let visitor = parse_and_visit(source);
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported.contains("design.v"))
+            .expect("read_verilog should record a design-file import");
+        assert_eq!(imp.importer, "file");
+        assert!(!imp.is_wildcard);
+    }
+
+    // ── Complexity: loop keywords and untracked constructs ──────────────
+
+    #[test]
+    fn test_complexity_foreach_braced_list_counts_loop() {
+        // `foreach x {a b c} {...}` (braced literal list) parses cleanly, unlike
+        // the `foreach x $var {...}` form which ERROR-parses the whole proc.
+        let source = b"proc iter {} {\n    foreach x {a b c} {\n        puts $x\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("proc should have complexity");
+        assert!(c.loops >= 1, "foreach should count as a loop, got {:?}", c);
+        assert!(c.cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_foreach_braced_list_recorded_as_call() {
+        let source = b"proc iter {} {\n    foreach x {a b c} {\n        puts $x\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.calls.iter().any(|c| c.callee == "foreach"),
+            "foreach keyword should be recorded as a call, got: {:?}",
+            visitor.calls.iter().map(|c| &c.callee).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_foreach_var_list_error_parses_and_drops_body() {
+        // Contrast case: with a `$var` list argument the whole proc body lands in
+        // an ERROR node, so foreach is neither counted nor recorded as a call.
+        let source = b"proc iter {items} {\n    foreach x $items {\n        puts $x\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(
+            !visitor.calls.iter().any(|c| c.callee == "foreach"),
+            "foreach over a $var list is not tracked (ERROR parse), got: {:?}",
+            visitor.calls.iter().map(|c| &c.callee).collect::<Vec<_>>()
+        );
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(c.loops, 0, "no loop counted for the ERROR-parsed body");
+        }
+    }
+
+    #[test]
+    fn test_complexity_logical_operators_never_counted() {
+        // walk_complexity has no arm that increments logical_operators, so an
+        // `if` guard with && / || contributes nothing to that metric - a latent gap.
+        let source = b"proc test {a b} {\n    if {$a && $b || $a} {\n        puts yes\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(
+                c.logical_operators, 0,
+                "TclVisitor never accounts for &&/|| in complexity, got {:?}",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_complexity_switch_adds_no_branches() {
+        // `switch` is not one of walk_complexity's branch keywords, so even a
+        // multi-case switch contributes zero branches.
+        let source =
+            b"proc sel {x} {\n    switch $x {\n        a {puts 1}\n        b {puts 2}\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(
+                c.branches, 0,
+                "switch cases are not counted as branches, got {:?}",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_complexity_max_nesting_depth_grows_with_braced_bodies() {
+        // Each braced_word body descends one nesting level; a proc body with a
+        // foreach whose body is itself braced reaches depth >= 2.
+        let source = b"proc deep {} {\n    foreach x {a b c} {\n        puts $x\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert!(
+                c.max_nesting_depth >= 2,
+                "nested braced bodies should raise max_nesting_depth, got {:?}",
+                c
+            );
+        }
+    }
+
+    // ── Doc comment attachment ──────────────────────────────────────────
+
+    #[test]
+    fn test_two_leading_comments_attach_joined_in_order() {
+        // extract_preceding_comment walks prev_siblings and joins them with '\n'
+        // after reversing, so stacked comments appear in source order. This form
+        // (two comment lines directly above the proc) parses cleanly enough for
+        // the comments to be prev_siblings of the proc node.
+        let source = b"# first line\n# second line\nproc doc {} {\n    puts hi\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let doc = visitor.functions[0]
+            .doc_comment
+            .as_ref()
+            .expect("two stacked comments should attach as a doc comment");
+        let first = doc.find("first line").expect("has first line");
+        let second = doc.find("second line").expect("has second line");
+        assert!(
+            first < second,
+            "comments should be joined in source order, got {:?}",
+            doc
+        );
+    }
+
+    // ── Proc entity edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn test_proc_with_no_params_has_empty_parameters() {
+        let source = b"proc noop {} {\n    puts hi\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(
+            visitor.functions[0].parameters.is_empty(),
+            "empty brace list yields no parameters, got {:?}",
+            visitor.functions[0].parameters
+        );
+    }
 }
