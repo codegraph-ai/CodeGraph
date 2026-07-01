@@ -307,4 +307,34 @@ mod tests {
         engine.clear_cache();
         assert_eq!(engine.cache_size(), 0);
     }
+
+    #[test]
+    fn similarity_opposite_vectors_returns_negative_one() {
+        let (engine, _) = engine_with(2);
+        // Anti-parallel unit vectors: dot = -1, norms = 1, so cosine = -1.0.
+        assert!((engine.similarity(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn similarity_left_zero_vector_returns_zero() {
+        let (engine, _) = engine_with(3);
+        // Existing coverage exercises the right-operand zero (norm_b == 0); this
+        // pins the left-operand branch of `norm_a == 0.0 || norm_b == 0.0` so a
+        // zero first argument yields 0.0 rather than a NaN from divide-by-zero.
+        assert_eq!(engine.similarity(&[0.0, 0.0, 0.0], &[1.0, 2.0, 3.0]), 0.0);
+        // Both zero also short-circuits to 0.0.
+        assert_eq!(engine.similarity(&[0.0, 0.0, 0.0], &[0.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn default_cache_dir_ends_with_codegraph_fastembed_cache() {
+        // The default cache dir always resolves under a `.codegraph/fastembed_cache`
+        // suffix regardless of which home var (HOME/USERPROFILE) or fallback (".")
+        // supplies the base, so pin the stable trailing components.
+        let dir = default_cache_dir();
+        assert!(
+            dir.ends_with(PathBuf::from(".codegraph").join("fastembed_cache")),
+            "unexpected cache dir: {dir:?}"
+        );
+    }
 }
