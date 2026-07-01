@@ -329,3 +329,137 @@ fn unwrap_mcp_content(response: &serde_json::Value) -> Option<serde_json::Value>
     let text = first.get("text")?.as_str()?;
     serde_json::from_str(text).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn setup(fixture: &str, layout: WorkspaceLayout) -> Setup {
+        Setup {
+            fixture: fixture.to_string(),
+            workspace_layout: layout,
+            pre_index: true,
+            init_git: false,
+        }
+    }
+
+    #[test]
+    fn unwrap_mcp_content_parses_inner_json() {
+        let response = json!({
+            "content": [{ "type": "text", "text": "{\"key\": 42}" }]
+        });
+        let inner = unwrap_mcp_content(&response).expect("should unwrap");
+        assert_eq!(inner, json!({ "key": 42 }));
+    }
+
+    #[test]
+    fn unwrap_mcp_content_none_without_wrapper() {
+        // A bare payload (no `content` array) is not an MCP envelope.
+        let response = json!({ "result": "direct" });
+        assert!(unwrap_mcp_content(&response).is_none());
+    }
+
+    #[test]
+    fn unwrap_mcp_content_none_when_content_not_array() {
+        let response = json!({ "content": "not-an-array" });
+        assert!(unwrap_mcp_content(&response).is_none());
+    }
+
+    #[test]
+    fn unwrap_mcp_content_none_when_text_not_json() {
+        // `text` present but not parseable as JSON -> None (caller falls
+        // back to the raw response).
+        let response = json!({
+            "content": [{ "type": "text", "text": "plain error message" }]
+        });
+        assert!(unwrap_mcp_content(&response).is_none());
+    }
+
+    #[test]
+    fn is_warmup_response_detects_status_field() {
+        let response = json!({ "status": "embeddings_in_progress" });
+        assert!(is_warmup_response(&response));
+    }
+
+    #[test]
+    fn is_warmup_response_detects_message_substring() {
+        let response = json!({ "message": "Embeddings are building, retry soon" });
+        assert!(is_warmup_response(&response));
+    }
+
+    #[test]
+    fn is_warmup_response_detects_wrapped_status() {
+        // The warmup signal arrives inside the MCP text envelope.
+        let response = json!({
+            "content": [{ "type": "text", "text": "{\"status\": \"embeddings_in_progress\"}" }]
+        });
+        assert!(is_warmup_response(&response));
+    }
+
+    #[test]
+    fn is_warmup_response_false_for_normal_payload() {
+        let response = json!({ "status": "ok", "message": "done" });
+        assert!(!is_warmup_response(&response));
+    }
+
+    #[test]
+    fn resolve_fixture_path_uses_file_name_only() {
+        // A nested fixture path is flattened to its file_name under the
+        // workspace root (single-file layout copies only the file).
+        let s = setup("lang/rust/sample.rs", WorkspaceLayout::SingleFile);
+        let ws = Path::new("/tmp/ws");
+        let resolved = resolve_fixture_path(&s, ws).expect("resolve");
+        assert_eq!(resolved, PathBuf::from("/tmp/ws/sample.rs"));
+    }
+
+    #[test]
+    fn make_workspace_single_file_copies_named_file() {
+        let fixtures = tempfile::tempdir().unwrap();
+        std::fs::write(fixtures.path().join("sample.rs"), "fn main() {}").unwrap();
+        let s = setup("sample.rs", WorkspaceLayout::SingleFile);
+
+        let ws = make_workspace(&s, fixtures.path()).expect("make_workspace");
+        let copied = ws.path().join("sample.rs");
+        assert!(copied.exists());
+        assert_eq!(std::fs::read_to_string(copied).unwrap(), "fn main() {}");
+    }
+
+    #[test]
+    fn make_workspace_missing_fixture_errors() {
+        let fixtures = tempfile::tempdir().unwrap();
+        let s = setup("does-not-exist.rs", WorkspaceLayout::SingleFile);
+        let err = make_workspace(&s, fixtures.path()).unwrap_err();
+        assert!(err.to_string().contains("fixture not found"));
+    }
+
+    #[test]
+    fn make_workspace_multi_file_copies_directory_tree() {
+        let fixtures = tempfile::tempdir().unwrap();
+        let proj = fixtures.path().join("proj");
+        std::fs::create_dir_all(proj.join("sub")).unwrap();
+        std::fs::write(proj.join("a.rs"), "a").unwrap();
+        std::fs::write(proj.join("sub").join("b.rs"), "b").unwrap();
+        let s = setup("proj", WorkspaceLayout::MultiFile);
+
+        let ws = make_workspace(&s, fixtures.path()).expect("make_workspace");
+        assert_eq!(std::fs::read_to_string(ws.path().join("a.rs")).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(ws.path().join("sub").join("b.rs")).unwrap(), "b");
+    }
+
+    #[test]
+    fn copy_dir_recursive_preserves_nested_structure() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("deep/nest")).unwrap();
+        std::fs::write(src.path().join("top.txt"), "top").unwrap();
+        std::fs::write(src.path().join("deep/nest/leaf.txt"), "leaf").unwrap();
+
+        copy_dir_recursive(src.path(), dst.path()).expect("copy");
+        assert_eq!(std::fs::read_to_string(dst.path().join("top.txt")).unwrap(), "top");
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("deep/nest/leaf.txt")).unwrap(),
+            "leaf"
+        );
+    }
+}
