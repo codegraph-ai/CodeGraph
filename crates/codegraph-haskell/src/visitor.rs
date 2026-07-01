@@ -971,4 +971,239 @@ mod tests {
         assert_eq!(dirs.len(), 1);
         assert!(!dirs[0].is_interface);
     }
+
+    #[test]
+    fn test_import_importer_defaults_to_main() {
+        // Every ImportRelation is attributed to the synthetic "main" importer.
+        let source = b"module M where\nimport Data.List\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].importer, "main");
+    }
+
+    #[test]
+    fn test_or_operator_raises_complexity() {
+        // `||` inside an infix expression is counted as a logical operator, just
+        // like `&&`.
+        let source = concat!(
+            "module M where\n",
+            "outOfRange :: Int -> Bool\n",
+            "outOfRange x = x < 0 || x > 10\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "outOfRange")
+            .expect("outOfRange extracted");
+        let c = f.complexity.as_ref().expect("complexity computed");
+        assert!(
+            c.cyclomatic_complexity > 1,
+            "|| should raise cyclomatic complexity, got {}",
+            c.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_call_default_metadata() {
+        // A call harvested from an `apply` node is direct with no struct/field
+        // metadata, and its call_site_line points at the application.
+        let source = concat!(
+            "module M where\n",
+            "helper :: Int -> Int\n",
+            "helper y = y\n",
+            "compute :: Int -> Int\n",
+            "compute x = helper x\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.caller == "compute" && c.callee == "helper")
+            .expect("compute -> helper call recorded");
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+        // compute's definition (and the `helper x` application) is on line 5.
+        assert_eq!(call.call_site_line, 5);
+    }
+
+    #[test]
+    fn test_leading_blank_lines_offset_line_numbers() {
+        // Blank lines before the module header push declaration line numbers down.
+        let source = b"\n\nmodule M where\nfoo :: Int -> Int\nfoo n = n\n";
+        let visitor = parse_and_visit(source);
+        let foo = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "foo")
+            .expect("foo extracted");
+        // module=3, signature=4, definition=5 (1-indexed).
+        assert_eq!(foo.line_start, 5);
+    }
+
+    #[test]
+    fn test_multiple_functions_preserve_source_order() {
+        // Several top-level functions (each with a pattern argument) are emitted
+        // in source order.
+        let source = concat!(
+            "module M where\n",
+            "a :: Int -> Int\na x = x\n",
+            "b :: Int -> Int\nb x = x\n",
+            "c :: Int -> Int\nc x = x\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_nullary_binding_not_extracted_as_function() {
+        // A definition with no argument patterns parses as a `bind` node, which
+        // visit_declarations does not handle, so it is never emitted as a
+        // FunctionEntity - only functions with a `patterns` field are extracted.
+        let source = b"module M where\nanswer :: Int\nanswer = 42\n";
+        let visitor = parse_and_visit(source);
+        assert!(
+            !visitor.functions.iter().any(|f| f.name == "answer"),
+            "nullary binding is not extracted as a function"
+        );
+        // The type signature is still recorded for potential class-method promotion.
+        assert!(visitor.seen_signatures.contains_key("answer"));
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        // An oversized function body is truncated to BODY_PREFIX_MAX_CHARS.
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        let big = "x".repeat(BODY_PREFIX_MAX_CHARS * 2);
+        let source = format!(
+            "module M where\nbig :: Int -> String\nbig n = \"{}\"\n",
+            big
+        );
+        let visitor = parse_and_visit(source.as_bytes());
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "big")
+            .expect("big extracted");
+        let bp = f.body_prefix.as_ref().expect("body_prefix present");
+        assert_eq!(bp.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_data_type_has_no_doc_comment_or_body_prefix() {
+        // A plain data declaration has no doc comment and no body_prefix.
+        let source = b"module M where\ndata Point = Point Int Int\n";
+        let visitor = parse_and_visit(source);
+        let point = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Point")
+            .expect("Point extracted");
+        assert!(point.doc_comment.is_none());
+        assert!(point.body_prefix.is_none());
+        assert!(point.methods.is_empty());
+        assert!(point.fields.is_empty());
+    }
+
+    #[test]
+    fn test_instance_method_qualified_name_format() {
+        // instance methods use the `TypeClass.InstanceType_method` name format.
+        let source = concat!(
+            "module M where\n",
+            "class Greet a where\n",
+            "  hello :: a -> String\n",
+            "data Person = Person\n",
+            "instance Greet Person where\n",
+            "  hello p = \"hi\"\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let inst = visitor
+            .functions
+            .iter()
+            .find(|f| f.name.starts_with("Greet.") && !f.is_abstract)
+            .expect("instance method extracted");
+        assert_eq!(inst.name, "Greet.Person_hello");
+        assert_eq!(inst.parent_class.as_deref(), Some("Greet"));
+    }
+
+    #[test]
+    fn test_instance_method_parameters_extracted() {
+        // instance-method argument patterns are captured as parameters.
+        let source = concat!(
+            "module M where\n",
+            "class Greet a where\n",
+            "  hello :: a -> String\n",
+            "data Person = Person\n",
+            "instance Greet Person where\n",
+            "  hello p = \"hi\"\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let inst = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "Greet.Person_hello")
+            .expect("instance method extracted");
+        let names: Vec<&str> = inst.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["p"]);
+    }
+
+    #[test]
+    fn test_nested_call_in_case_attributed_to_function() {
+        // A call buried inside a case alternative is still attributed to the
+        // enclosing function via the recursive body walk.
+        let source = concat!(
+            "module M where\n",
+            "helper :: Int -> Int\n",
+            "helper y = y\n",
+            "compute :: Int -> Int\n",
+            "compute x = case x of\n",
+            "  0 -> helper 1\n",
+            "  _ -> x\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("nested helper call recorded");
+        assert_eq!(call.caller, "compute");
+    }
+
+    #[test]
+    fn test_guards_do_not_raise_complexity() {
+        // Regression pin for a dead grammar arm: the complexity visitor matches
+        // `guard`/`guard_equation`, but tree-sitter-haskell names guard clauses
+        // `guards` (wrapped in per-equation `match` nodes). The guard conditions
+        // here (`>`, `<`) are not `&&`/`||`, so none of the complexity arms fire
+        // and the multi-guard function keeps the baseline complexity of 1.
+        let source = concat!(
+            "module M where\n",
+            "sign :: Int -> Int\n",
+            "sign n\n",
+            "  | n > 0 = 1\n",
+            "  | n < 0 = 0\n",
+            "  | otherwise = 0\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let sign = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "sign")
+            .expect("sign extracted");
+        let c = sign.complexity.as_ref().expect("complexity computed");
+        assert_eq!(
+            c.cyclomatic_complexity, 1,
+            "guards are not counted (dead guard/guard_equation arm), got {}",
+            c.cyclomatic_complexity
+        );
+    }
 }
