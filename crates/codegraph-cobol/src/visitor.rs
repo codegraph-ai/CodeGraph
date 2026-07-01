@@ -673,4 +673,143 @@ mod tests {
         assert!(import.symbols.is_empty());
         assert!(import.alias.is_none());
     }
+
+    #[test]
+    fn test_program_body_prefix_truncation() {
+        // A program whose source exceeds BODY_PREFIX_MAX_CHARS is truncated to exactly that many bytes.
+        let mut src = String::from(
+            "       identification division.\n       program-id. BIG.\n       procedure division.\n       MAIN-PARA.\n",
+        );
+        for _ in 0..200 {
+            src.push_str("           display \"xxxxxxxx\".\n");
+        }
+        src.push_str("           stop run.\n");
+        let visitor = parse(src.as_bytes());
+
+        let body = visitor.programs[0].body_prefix.as_deref().unwrap();
+        assert_eq!(body.len(), codegraph_parser_api::BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_paragraph_body_prefix_truncation() {
+        // A paragraph whose header/body text exceeds BODY_PREFIX_MAX_CHARS is truncated to exactly that many bytes.
+        let mut src = String::from(
+            "       identification division.\n       program-id. BIG.\n       procedure division.\n",
+        );
+        // The paragraph header node's text is just the header line, so pad the name to overflow.
+        src.push_str("       ");
+        src.push_str(&"A".repeat(codegraph_parser_api::BODY_PREFIX_MAX_CHARS + 50));
+        src.push_str(".\n           stop run.\n");
+        let visitor = parse(src.as_bytes());
+
+        let body = visitor.paragraphs[0].body_prefix.as_deref().unwrap();
+        assert_eq!(body.len(), codegraph_parser_api::BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_two_programs_both_recorded() {
+        // Two independent program definitions each become a ClassEntity.
+        let source = b"       identification division.\n       program-id. FIRSTP.\n       procedure division.\n       stop run.\n       identification division.\n       program-id. SECONDP.\n       procedure division.\n       stop run.\n";
+        let visitor = parse(source);
+
+        assert_eq!(visitor.programs.len(), 2);
+        assert_eq!(visitor.programs[0].name, "FIRSTP");
+        assert_eq!(visitor.programs[1].name, "SECONDP");
+    }
+
+    #[test]
+    fn test_perform_nested_in_if_attributed_to_paragraph() {
+        // A PERFORM inside an IF block is still attributed to the enclosing paragraph.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           if x = 1\n               perform DO-WORK\n           end-if.\n           stop run.\n       DO-WORK.\n           display \"x\".\n";
+        let visitor = parse(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "DO-WORK")
+            .expect("Expected PERFORM of DO-WORK");
+        assert_eq!(call.caller, "MAIN-PARA");
+    }
+
+    #[test]
+    fn test_straight_line_paragraph_baseline_complexity() {
+        // A paragraph with no branches or loops has cyclomatic complexity 1.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           display \"a\".\n           stop run.\n";
+        let visitor = parse(source);
+
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_cobol::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let metrics = visitor._calculate_complexity(tree.root_node());
+        assert_eq!(metrics.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_call_statement_unquoted_word_callee_not_recorded() {
+        // A CALL to an unquoted data-name wraps the WORD in a `qualified_word` node
+        // (call_statement -> qualified_word -> WORD), but visit_call_statement only
+        // scans direct children for a WORD/string, so it descends no further and the
+        // callee is dropped. Only quoted string literals are captured for CALL.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           call SUBVAR.\n           stop run.\n";
+        let visitor = parse(source);
+
+        assert!(
+            !visitor.calls.iter().any(|c| c.callee == "SUBVAR"),
+            "unquoted CALL callee is nested under qualified_word and not extracted"
+        );
+    }
+
+    #[test]
+    fn test_find_child_text_recursive_depth_zero_returns_none() {
+        // At depth 0 the recursive search bails out immediately with None.
+        let visitor = CobolVisitor::new(b"");
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_cobol::language()).unwrap();
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       stop run.\n";
+        let tree = parser.parse(source, None).unwrap();
+        assert!(visitor
+            .find_child_text_recursive(tree.root_node(), "program_name", 0)
+            .is_none());
+    }
+
+    #[test]
+    fn test_two_performs_both_recorded() {
+        // Two PERFORM statements in one paragraph each produce a call relation.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           perform FIRST-WORK.\n           perform SECOND-WORK.\n           stop run.\n       FIRST-WORK.\n           display \"a\".\n       SECOND-WORK.\n           display \"b\".\n";
+        let visitor = parse(source);
+
+        assert!(visitor.calls.iter().any(|c| c.callee == "FIRST-WORK"));
+        assert!(visitor.calls.iter().any(|c| c.callee == "SECOND-WORK"));
+    }
+
+    #[test]
+    fn test_nested_if_perform_complexity_higher() {
+        // A paragraph with both an IF branch and a PERFORM loop scores above a straight-line one.
+        let branched = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           if x = 1\n               perform DO-WORK\n           end-if.\n           stop run.\n       DO-WORK.\n           display \"x\".\n";
+        let straight = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           display \"a\".\n           stop run.\n";
+        let v1 = parse(branched);
+        let v2 = parse(straight);
+
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_cobol::language()).unwrap();
+        let branched_metrics =
+            v1._calculate_complexity(parser.parse(branched, None).unwrap().root_node());
+        let straight_metrics =
+            v2._calculate_complexity(parser.parse(straight, None).unwrap().root_node());
+        assert!(branched_metrics.cyclomatic_complexity > straight_metrics.cyclomatic_complexity);
+    }
+
+    #[test]
+    fn test_perform_to_program_when_no_paragraph() {
+        // A PERFORM directly under PROCEDURE DIVISION (no paragraph) attributes to the program.
+        let source = b"       identification division.\n       program-id. NOPARA.\n       procedure division.\n           perform DO-WORK.\n           stop run.\n       DO-WORK.\n           display \"x\".\n";
+        let visitor = parse(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "DO-WORK")
+            .expect("Expected PERFORM of DO-WORK");
+        assert_eq!(call.caller, "NOPARA");
+    }
 }
