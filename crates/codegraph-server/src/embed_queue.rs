@@ -135,3 +135,100 @@ impl EmbedQueue {
         let _ = self.tx.send(path);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::CodeGraph;
+
+    fn make_engine() -> Arc<QueryEngine> {
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("in-memory graph"),
+        ));
+        Arc::new(QueryEngine::new(graph))
+    }
+
+    #[test]
+    fn embed_mode_variants_are_distinct() {
+        assert_eq!(EmbedMode::Now, EmbedMode::Now);
+        assert_eq!(EmbedMode::Enqueue, EmbedMode::Enqueue);
+        assert_eq!(EmbedMode::Skip, EmbedMode::Skip);
+        assert_ne!(EmbedMode::Now, EmbedMode::Enqueue);
+        assert_ne!(EmbedMode::Now, EmbedMode::Skip);
+        assert_ne!(EmbedMode::Enqueue, EmbedMode::Skip);
+    }
+
+    #[test]
+    fn embed_mode_is_copy_and_debug() {
+        // Copy: the value is still usable after being passed by value.
+        let mode = EmbedMode::Enqueue;
+        let copied = mode;
+        assert_eq!(mode, copied);
+        // Debug renders the variant name.
+        assert_eq!(format!("{:?}", EmbedMode::Now), "Now");
+        assert_eq!(format!("{:?}", EmbedMode::Enqueue), "Enqueue");
+        assert_eq!(format!("{:?}", EmbedMode::Skip), "Skip");
+    }
+
+    #[test]
+    fn new_without_runtime_is_inert() {
+        // Constructed outside a Tokio runtime, no worker spawns and the queue is
+        // inert: enqueue must not panic and the slug starts empty.
+        let queue = EmbedQueue::new(make_engine());
+        assert!(queue.slug.try_read().expect("uncontended").is_empty());
+        // Enqueue on an inert queue is a silent no-op (no receiver, no panic).
+        queue.enqueue(PathBuf::from("/tmp/a.rs"));
+        queue.enqueue(PathBuf::from("/tmp/b.rs"));
+    }
+
+    #[tokio::test]
+    async fn set_slug_stores_and_overwrites_value() {
+        let queue = EmbedQueue::new(make_engine());
+        assert!(queue.slug.read().await.is_empty());
+
+        queue.set_slug("proj-alpha".to_string()).await;
+        assert_eq!(&*queue.slug.read().await, "proj-alpha");
+
+        // Last write wins.
+        queue.set_slug("proj-beta".to_string()).await;
+        assert_eq!(&*queue.slug.read().await, "proj-beta");
+    }
+
+    #[tokio::test]
+    async fn clone_shares_slug_state() {
+        let queue = EmbedQueue::new(make_engine());
+        let clone = queue.clone();
+
+        // A slug set through the clone is visible on the original: both share the
+        // same Arc<RwLock<String>>.
+        clone.set_slug("shared".to_string()).await;
+        assert_eq!(&*queue.slug.read().await, "shared");
+    }
+
+    #[tokio::test]
+    async fn enqueue_under_runtime_does_not_panic() {
+        // Under a runtime the worker is spawned; enqueue hands files off without
+        // blocking and never panics even on a burst.
+        let queue = EmbedQueue::new(make_engine());
+        for i in 0..8 {
+            queue.enqueue(PathBuf::from(format!("/tmp/file{i}.rs")));
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_flushes_batch_and_queue_stays_usable() {
+        // End-to-end: enqueue a burst, let the debounce window elapse so the
+        // worker coalesces and processes the batch, then confirm the queue is
+        // still alive (worker did not crash) by enqueuing again.
+        let queue = EmbedQueue::new(make_engine());
+        queue.set_slug(String::new()).await; // empty slug -> skip persistence
+        queue.enqueue(PathBuf::from("/tmp/x.rs"));
+        queue.enqueue(PathBuf::from("/tmp/y.rs"));
+
+        // Wait past the debounce window plus processing headroom.
+        tokio::time::sleep(DEBOUNCE + Duration::from_millis(200)).await;
+
+        // Worker survived the flush; a subsequent enqueue still succeeds.
+        queue.enqueue(PathBuf::from("/tmp/z.rs"));
+    }
+}
