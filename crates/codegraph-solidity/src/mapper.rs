@@ -983,4 +983,210 @@ mod tests {
             Some(&PropertyValue::String("A".to_string()))
         );
     }
+
+    #[test]
+    fn free_function_records_path_line_bounds_and_signature() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        ir.add_function(FunctionEntity::new("helper", 7, 19).with_signature("function helper()"));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        // The mapper stamps the on-disk path passed to ir_to_graph (Token.sol).
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Token.sol".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(7))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(19))
+        );
+        assert_eq!(
+            node.properties.get("signature"),
+            Some(&PropertyValue::String("function helper()".to_string()))
+        );
+    }
+
+    #[test]
+    fn free_function_omits_optional_props_when_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        ir.add_function(FunctionEntity::new("bare", 1, 3));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert!(node.properties.get("doc").is_none());
+        assert!(node.properties.get("return_type").is_none());
+        assert!(node.properties.get("parameters").is_none());
+        assert!(node.properties.get("body_prefix").is_none());
+        assert!(node.properties.get("complexity").is_none());
+    }
+
+    #[test]
+    fn free_function_records_async_static_abstract_flags_when_set() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        ir.add_function(
+            FunctionEntity::new("flagged", 1, 5)
+                .async_fn()
+                .static_fn()
+                .abstract_fn(),
+        );
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("is_async"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get("is_static"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get("is_abstract"),
+            Some(&PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn method_records_path_and_line_bounds() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        let mut contract = ClassEntity::new("Token", 1, 20);
+        contract.methods.push(FunctionEntity::new("mint", 5, 12));
+        ir.add_class(contract);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Token.sol".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(5))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(12))
+        );
+    }
+
+    #[test]
+    fn interface_method_drops_complexity_and_parameters() {
+        // The interface-method loop writes a strictly narrower prop set than the
+        // class-method loop: complexity, parameters, attributes, and body_prefix
+        // present on the FunctionEntity are silently dropped for required methods.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 9,
+            branches: 4,
+            ..Default::default()
+        };
+        let mut iface = TraitEntity::new("IERC20", 1, 8);
+        iface.required_methods.push(
+            FunctionEntity::new("transfer", 2, 3)
+                .with_parameters(vec![Parameter::new("to")])
+                .with_body_prefix("return true;")
+                .with_complexity(metrics),
+        );
+        ir.add_trait(iface);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert!(node.properties.get("complexity").is_none());
+        assert!(node.properties.get("complexity_grade").is_none());
+        assert!(node.properties.get("parameters").is_none());
+        assert!(node.properties.get("body_prefix").is_none());
+    }
+
+    #[test]
+    fn interface_method_linked_via_trait_contains_edge() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        let mut iface = TraitEntity::new("IERC20", 1, 8);
+        iface
+            .required_methods
+            .push(FunctionEntity::new("transfer", 2, 3));
+        ir.add_trait(iface);
+
+        let (graph, info) = build(&ir);
+        let trait_id = info.traits[0];
+        let method_id = info.functions[0];
+        // trait -Contains-> method.
+        assert!(!graph
+            .get_edges_between(trait_id, method_id)
+            .unwrap()
+            .is_empty());
+        // The method is not directly contained by the file node.
+        let file_neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        assert!(!file_neighbors.contains(&method_id));
+    }
+
+    #[test]
+    fn direct_call_records_is_direct_true() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        // Default CallRelation is direct.
+        ir.add_call(CallRelation::new("caller", "callee", 3));
+
+        let (graph, info) = build(&ir);
+        let caller_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "caller")
+            .unwrap();
+        let callee_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "callee")
+            .unwrap();
+        let edge_ids = graph.get_edges_between(caller_id, callee_id).unwrap();
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(
+            edge.properties.get("is_direct"),
+            Some(&PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn import_with_alias_only_omits_wildcard_and_symbols() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        ir.add_import(ImportRelation::new("Token", "./Base.sol").with_alias("B"));
+
+        let (graph, info) = build(&ir);
+        let edge_ids = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(
+            edge.properties.get("alias"),
+            Some(&PropertyValue::String("B".to_string()))
+        );
+        assert!(edge.properties.get("is_wildcard").is_none());
+        assert!(edge.properties.get("symbols").is_none());
+    }
+
+    #[test]
+    fn wildcard_import_without_alias_records_only_wildcard() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Token.sol"));
+        ir.add_import(ImportRelation::new("Token", "./Base.sol").wildcard());
+
+        let (graph, info) = build(&ir);
+        let edge_ids = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(
+            edge.properties.get("is_wildcard"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+        assert!(edge.properties.get("alias").is_none());
+        assert!(edge.properties.get("symbols").is_none());
+    }
 }
