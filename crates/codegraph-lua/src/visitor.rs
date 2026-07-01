@@ -348,6 +348,7 @@ impl<'a> LuaVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> LuaVisitor<'_> {
         use tree_sitter::Parser;
@@ -653,5 +654,120 @@ mod tests {
         assert_eq!(visitor.functions.len(), 2);
         assert_eq!(visitor.functions[0].name, "first");
         assert_eq!(visitor.functions[1].name, "second");
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        // An oversized function body is truncated to exactly BODY_PREFIX_MAX_CHARS.
+        let filler = "  print(\"x\")\n".repeat(2000);
+        let source = format!("function big()\n{}end", filler);
+        let visitor = parse_and_visit(source.as_bytes());
+
+        let prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_leading_blank_lines_offset_line_start() {
+        // Two blank lines push the function's first line to line 3.
+        let source = b"\n\nfunction greet()\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].line_start, 3);
+    }
+
+    #[test]
+    fn test_else_scores_higher_than_lone_if() {
+        // An else clause adds an independent branch beyond the if.
+        let if_only = b"function a(x)\n  if x then\n    return 1\n  end\nend";
+        let if_else = b"function b(x)\n  if x then\n    return 1\n  else\n    return 2\n  end\nend";
+        let lone = parse_and_visit(if_only).functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        let with_else = parse_and_visit(if_else).functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        assert!(with_else > lone);
+    }
+
+    #[test]
+    fn test_or_logical_operator_raises_complexity() {
+        let source = b"function either(a, b)\n  return a or b\nend";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_straight_line_complexity_is_one() {
+        let source = b"function plain()\n  print(\"hi\")\nend";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_two_calls_in_one_body() {
+        let source = b"function outer()\n  first()\n  second()\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.calls.len(), 2);
+        let callees: Vec<_> = visitor.calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"first"));
+        assert!(callees.contains(&"second"));
+    }
+
+    #[test]
+    fn test_nested_call_in_if_attributed_to_function() {
+        let source = b"function outer(x)\n  if x then\n    inner()\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller, "outer");
+        assert_eq!(visitor.calls[0].callee, "inner");
+    }
+
+    #[test]
+    fn test_local_var_function_call_attribution() {
+        // A call inside a `local f = function() ... end` body is attributed to f.
+        let source = b"local runner = function()\n  work()\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller, "runner");
+        assert_eq!(visitor.calls[0].callee, "work");
+    }
+
+    #[test]
+    fn test_call_default_struct_and_field_none() {
+        let source = b"function outer()\n  inner()\nend";
+        let visitor = parse_and_visit(source);
+
+        let call = &visitor.calls[0];
+        assert_eq!(call.struct_type, None);
+        assert_eq!(call.field_name, None);
+    }
+
+    #[test]
+    fn test_multiple_functions_line_progression() {
+        let source = b"function first()\nend\nfunction second()\nend";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[1].line_start > visitor.functions[0].line_end);
+    }
+
+    #[test]
+    fn test_require_single_quotes_extracted() {
+        let source = b"local m = require('mymod')";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "mymod");
     }
 }
