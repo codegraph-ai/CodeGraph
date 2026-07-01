@@ -620,6 +620,59 @@ static DeviceOps ops = {
             .collect();
         assert!(!vtable_calls.is_empty(), "Should have vtable call entries");
     }
+
+    #[test]
+    fn test_preamble_plain_ascii_c_needs_none() {
+        // No stdint or kernel types -> no preamble required.
+        let source = "int add(int a, int b) { return a + b; }\nchar *name = \"hi\";\n";
+        assert!(!source_needs_type_preamble(source));
+    }
+
+    #[test]
+    fn test_preamble_detects_each_stdint_type() {
+        // Every C99 stdint.h type the fast path knows about should trigger.
+        for ty in [
+            "uint8_t", "uint16_t", "uint32_t", "uint64_t", "int8_t", "int16_t", "int32_t",
+            "int64_t",
+        ] {
+            let source = format!("{ty} counter = 0;\n");
+            assert!(
+                source_needs_type_preamble(&source),
+                "expected {ty} to require a type preamble"
+            );
+        }
+    }
+
+    #[test]
+    fn test_preamble_detects_kernel_types() {
+        // Linux/ESXi kernel type prefixes also require the preamble.
+        assert!(source_needs_type_preamble("vmk_Bool flag;\n"));
+        assert!(source_needs_type_preamble("VMK_ReturnStatus st;\n"));
+        assert!(source_needs_type_preamble("vmk_uint32 x;\n"));
+        assert!(source_needs_type_preamble("vmk_Device dev;\n"));
+    }
+
+    #[test]
+    fn test_preamble_only_samples_first_4kb() {
+        // A stdint type past the ~4KB fast-path window is not detected.
+        let mut source = String::from("int x = 0;\n");
+        source.push_str(&" ".repeat(5000));
+        source.push_str("uint32_t late;\n");
+        assert!(!source_needs_type_preamble(&source));
+    }
+
+    #[test]
+    fn test_preamble_no_panic_on_multibyte_at_boundary() {
+        // Regression for issue #3: a multi-byte char straddling byte 4096
+        // must not panic (truncate_at_char_boundary walks back to a boundary).
+        let mut source = String::from("uint8_t v;\n"); // early match keeps result true
+        while source.len() < 4095 {
+            source.push('a');
+        }
+        source.push('世'); // 3-byte char crossing the 4096 boundary
+        source.push_str(" tail\n");
+        assert!(source_needs_type_preamble(&source));
+    }
 }
 
 #[test]
