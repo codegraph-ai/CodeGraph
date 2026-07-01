@@ -675,4 +675,112 @@ mod tests {
         assert_eq!(result.dead_count, 1);
         assert_eq!(result.dead_imports[0].line, 7);
     }
+
+    #[test]
+    fn call_to_path_containing_slash_module_name_keeps_import_alive() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Callee path neither equals the module path nor ends with the module
+        // name, but contains "/<module_name>" as an interior segment. This hits
+        // the `contains("/{module_name}")` fallback in calls_any_in_module,
+        // distinct from the ends_with branch.
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "utils", "/src/utils.rs");
+        let func_b = add_node(&mut g, NodeType::Function, "fb", "/src/utils.rs");
+        let func_a = add_node(&mut g, NodeType::Function, "fa", "/src/a.rs");
+        // Interior "/utils" segment; does NOT end with "utils".
+        let callee = add_node(
+            &mut g,
+            NodeType::Function,
+            "helper",
+            "/vendor/utils/helper.rs",
+        );
+
+        edge(&mut g, file_a, func_a, EdgeType::Contains);
+        edge(&mut g, module_b, func_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        edge(&mut g, func_a, callee, EdgeType::Calls);
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.dead_count, 0);
+    }
+
+    #[test]
+    fn usage_edge_path_match_keeps_import_alive() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // A child of A has a Uses edge to a node that is NOT a Contains child of
+        // module B (so the ID-match arm fails) but whose path equals the module
+        // path. Exercises the path-based match arm of file_references_module.
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "b.rs", "/src/b.rs");
+        let func_b = add_node(&mut g, NodeType::Function, "fb", "/src/b.rs");
+        let sym_a = add_node(&mut g, NodeType::Function, "sa", "/src/a.rs");
+        // Target shares module B's path but is not one of its Contains children.
+        let target = add_node(&mut g, NodeType::Function, "loose", "/src/b.rs");
+
+        edge(&mut g, file_a, sym_a, EdgeType::Contains);
+        edge(&mut g, module_b, func_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        edge(&mut g, sym_a, target, EdgeType::Uses);
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.dead_count, 0);
+    }
+
+    #[test]
+    fn usage_edge_name_fallback_keeps_import_alive() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Uses edge to a node whose path differs from the module path but ends
+        // with the module name. Exercises the name-based fallback arm of
+        // file_references_module (the ID and path arms both miss).
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "b.rs", "/src/b.rs");
+        let func_b = add_node(&mut g, NodeType::Function, "fb", "/src/b.rs");
+        let sym_a = add_node(&mut g, NodeType::Function, "sa", "/src/a.rs");
+        let target = add_node(&mut g, NodeType::Function, "loose", "/vendor/b.rs");
+
+        edge(&mut g, file_a, sym_a, EdgeType::Contains);
+        edge(&mut g, module_b, func_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        edge(&mut g, sym_a, target, EdgeType::Uses);
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.dead_count, 0);
+    }
+
+    #[test]
+    fn extends_edge_keeps_import_alive() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Extends is one of the USAGE_EDGES not otherwise exercised (only
+        // References/Uses/Implements were covered).
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "b.rs", "/src/b.rs");
+        let class_a = add_node(&mut g, NodeType::Function, "ca", "/src/a.rs");
+        let base_b = add_node(&mut g, NodeType::Function, "bb", "/src/b.rs");
+
+        edge(&mut g, file_a, class_a, EdgeType::Contains);
+        edge(&mut g, module_b, base_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        edge(&mut g, class_a, base_b, EdgeType::Extends);
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.dead_count, 0);
+    }
+
+    #[test]
+    fn instantiates_edge_keeps_import_alive() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Instantiates is another USAGE_EDGES variant not otherwise exercised.
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "b.rs", "/src/b.rs");
+        let sym_a = add_node(&mut g, NodeType::Function, "sa", "/src/a.rs");
+        let ctor_b = add_node(&mut g, NodeType::Function, "cb", "/src/b.rs");
+
+        edge(&mut g, file_a, sym_a, EdgeType::Contains);
+        edge(&mut g, module_b, ctor_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        edge(&mut g, sym_a, ctor_b, EdgeType::Instantiates);
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.dead_count, 0);
+    }
 }
