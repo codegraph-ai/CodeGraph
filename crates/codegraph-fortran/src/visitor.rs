@@ -8,9 +8,8 @@
 //! relationships.
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImportRelation, Parameter, BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImportRelation, Parameter,
 };
 use tree_sitter::Node;
 
@@ -175,9 +174,7 @@ impl<'a> FortranVisitor<'a> {
             .or(Some(node))
             .and_then(|n| n.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let entity = ClassEntity {
             name,
@@ -216,9 +213,7 @@ impl<'a> FortranVisitor<'a> {
             .or(Some(node))
             .and_then(|n| n.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let entity = ClassEntity {
             name,
@@ -268,9 +263,7 @@ impl<'a> FortranVisitor<'a> {
             .or(Some(node))
             .and_then(|n| n.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
@@ -328,9 +321,7 @@ impl<'a> FortranVisitor<'a> {
             .or(Some(node))
             .and_then(|n| n.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
@@ -598,6 +589,19 @@ fn is_fortran_intrinsic(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Parse `source` and run the visitor over the whole tree, returning the
+    /// populated visitor. The visitor only borrows `source` (not the tree), so
+    /// the parsed tree can be dropped when this helper returns.
+    fn parse(source: &[u8]) -> FortranVisitor<'_> {
+        use tree_sitter::Parser;
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_fortran::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut visitor = FortranVisitor::new(source);
+        visitor.visit_node(tree.root_node());
+        visitor
+    }
+
     #[test]
     fn test_visitor_basics() {
         let visitor = FortranVisitor::new(b"program hello\nend program hello");
@@ -803,5 +807,230 @@ mod tests {
             .map(|p| p.name.to_lowercase())
             .collect();
         assert_eq!(params, vec!["x"]);
+    }
+
+    // --- program-unit metadata & defaults ---
+
+    #[test]
+    fn test_program_unit_defaults() {
+        let visitor = parse(b"module mymod\nend module mymod\n");
+        let unit = &visitor.program_units[0];
+        assert_eq!(unit.visibility, "public");
+        assert!(!unit.is_abstract);
+        assert!(!unit.is_interface);
+        assert!(unit.base_classes.is_empty());
+        assert!(unit.methods.is_empty());
+        assert!(unit.doc_comment.is_none());
+        assert!(unit.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_program_unit_line_bounds_one_based() {
+        let visitor = parse(b"module m\n  implicit none\nend module m\n");
+        let unit = &visitor.program_units[0];
+        assert_eq!(unit.line_start, 1);
+        assert_eq!(unit.line_end, 4);
+    }
+
+    #[test]
+    fn test_block_data_extraction() {
+        let visitor = parse(b"block data mydata\n  common /blk/ x\nend block data mydata\n");
+        assert_eq!(visitor.program_units.len(), 1);
+        assert_eq!(visitor.program_units[0].name.to_lowercase(), "mydata");
+    }
+
+    #[test]
+    fn test_submodule_extraction() {
+        let visitor = parse(b"submodule (parent) child\nend submodule child\n");
+        assert_eq!(visitor.program_units.len(), 1);
+        // The submodule's own name is the direct `name` child, not the parent.
+        assert_eq!(visitor.program_units[0].name.to_lowercase(), "child");
+    }
+
+    #[test]
+    fn test_multiple_program_units() {
+        let visitor =
+            parse(b"module a\nend module a\nmodule b\nend module b\nprogram c\nend program c\n");
+        assert_eq!(visitor.program_units.len(), 3);
+        let names: Vec<String> = visitor
+            .program_units
+            .iter()
+            .map(|u| u.name.to_lowercase())
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    // --- function/subroutine metadata ---
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let visitor = parse(b"subroutine init()\nend subroutine init\n");
+        let f = &visitor.functions[0];
+        assert_eq!(f.visibility, "public");
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.return_type.is_none());
+        assert!(f.doc_comment.is_none());
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_subroutine_line_bounds_and_signature() {
+        let visitor = parse(b"subroutine greet(name)\n  print *, name\nend subroutine greet\n");
+        let f = &visitor.functions[0];
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 4);
+        assert_eq!(f.signature.to_lowercase(), "subroutine greet(name)");
+        assert!(f.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_subroutine_parent_class_is_enclosing_module() {
+        let visitor =
+            parse(b"module m\ncontains\n  subroutine s()\n  end subroutine s\nend module m\n");
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(
+            visitor.functions[0]
+                .parent_class
+                .as_deref()
+                .map(str::to_lowercase),
+            Some("m".to_string())
+        );
+    }
+
+    #[test]
+    fn test_top_level_subroutine_has_no_parent() {
+        let visitor = parse(b"subroutine s()\nend subroutine s\n");
+        assert!(visitor.functions[0].parent_class.is_none());
+    }
+
+    // --- complexity ---
+
+    #[test]
+    fn test_complexity_baseline() {
+        let visitor = parse(b"subroutine s()\n  x = 1\nend subroutine s\n");
+        assert_eq!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity,
+            1
+        );
+    }
+
+    #[test]
+    fn test_complexity_if_adds_branch() {
+        let visitor = parse(
+            b"subroutine s(i)\n  integer :: i\n  if (i > 0) then\n    i = 1\n  end if\nend subroutine s\n",
+        );
+        assert_eq!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity,
+            2
+        );
+    }
+
+    #[test]
+    fn test_complexity_do_loop_adds_loop() {
+        let visitor =
+            parse(b"subroutine s(i)\n  integer :: i\n  do i = 1, 10\n  end do\nend subroutine s\n");
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 2);
+        assert_eq!(c.loops, 1);
+    }
+
+    #[test]
+    fn test_complexity_select_case() {
+        let visitor = parse(
+            b"subroutine s(i)\n  integer :: i\n  select case (i)\n  case (1)\n  case (2)\n  end select\nend subroutine s\n",
+        );
+        // select_case_statement is one branch plus one per case_statement.
+        assert_eq!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity,
+            4
+        );
+    }
+
+    // --- imports (use / include) ---
+
+    #[test]
+    fn test_use_without_only_is_wildcard() {
+        let visitor = parse(b"program main\n  use iso_fortran_env\nend program main\n");
+        assert_eq!(visitor.imports.len(), 1);
+        assert!(visitor.imports[0].is_wildcard);
+    }
+
+    #[test]
+    fn test_use_with_only_is_not_wildcard() {
+        let visitor = parse(b"program main\n  use mymod, only: foo\nend program main\n");
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported.to_lowercase(), "mymod");
+        assert!(!imp.is_wildcard);
+    }
+
+    #[test]
+    fn test_use_importer_is_enclosing_module() {
+        let visitor = parse(b"module m\n  use other\nend module m\n");
+        assert_eq!(visitor.imports[0].importer.to_lowercase(), "m");
+    }
+
+    #[test]
+    fn test_include_statement_becomes_wildcard_import() {
+        let visitor = parse(b"program main\n  include 'defs.inc'\nend program main\n");
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "defs.inc");
+        assert!(imp.is_wildcard);
+        assert!(imp.symbols.is_empty());
+    }
+
+    // --- calls ---
+
+    #[test]
+    fn test_call_caller_is_enclosing_function() {
+        let visitor = parse(b"subroutine outer()\n  call inner()\nend subroutine outer\n");
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller.to_lowercase(), "outer");
+        assert_eq!(visitor.calls[0].callee.to_lowercase(), "inner");
+    }
+
+    #[test]
+    fn test_call_expression_user_function_recorded() {
+        let visitor = parse(b"subroutine s()\n  y = myfunc(1)\nend subroutine s\n");
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.callee.to_lowercase() == "myfunc"));
+    }
+
+    #[test]
+    fn test_call_expression_intrinsic_skipped() {
+        let visitor = parse(b"subroutine s()\n  y = sqrt(2.0)\nend subroutine s\n");
+        assert!(
+            !visitor
+                .calls
+                .iter()
+                .any(|c| c.callee.to_lowercase() == "sqrt"),
+            "intrinsic sqrt should not be recorded as a call"
+        );
+    }
+
+    #[test]
+    fn test_is_fortran_intrinsic() {
+        assert!(is_fortran_intrinsic("x")); // single letter -> array access
+        assert!(is_fortran_intrinsic("sqrt"));
+        assert!(is_fortran_intrinsic("allocate"));
+        assert!(!is_fortran_intrinsic("myfunc"));
     }
 }
