@@ -148,3 +148,173 @@ pub(crate) fn get_dependency_graph(
 
     DependencyGraphResult { nodes, edges }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{NodeType, PropertyMap, PropertyValue};
+
+    /// Add a CodeFile node with name/path/language properties, returning its id.
+    fn add_file(graph: &mut CodeGraph, name: &str, path: &str, language: &str) -> NodeId {
+        let mut props = PropertyMap::new();
+        props.insert("name".to_string(), PropertyValue::String(name.to_string()));
+        props.insert("path".to_string(), PropertyValue::String(path.to_string()));
+        props.insert(
+            "language".to_string(),
+            PropertyValue::String(language.to_string()),
+        );
+        graph.add_node(NodeType::CodeFile, props).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    #[test]
+    fn missing_file_returns_empty() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let result = get_dependency_graph(&g, "/src/nope.rs", 3, "both");
+        assert!(result.nodes.is_empty());
+        assert!(result.edges.is_empty());
+    }
+
+    #[test]
+    fn imports_direction_follows_outgoing_only() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // c.rs imports a.rs imports b.rs. Starting at a.rs with "imports"
+        // should reach b.rs (dependency) but not c.rs (dependent).
+        let a = add_file(&mut g, "a.rs", "/src/a.rs", "rust");
+        let b = add_file(&mut g, "b.rs", "/src/b.rs", "rust");
+        let c = add_file(&mut g, "c.rs", "/src/c.rs", "rust");
+        edge(&mut g, a, b, EdgeType::Imports);
+        edge(&mut g, c, a, EdgeType::Imports);
+
+        let result = get_dependency_graph(&g, "/src/a.rs", 3, "imports");
+        let mut paths: Vec<_> = result.nodes.iter().map(|n| n.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/src/a.rs", "/src/b.rs"]);
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].edge_type, "import");
+    }
+
+    #[test]
+    fn imported_by_direction_follows_incoming_only() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_file(&mut g, "a.rs", "/src/a.rs", "rust");
+        let b = add_file(&mut g, "b.rs", "/src/b.rs", "rust");
+        let c = add_file(&mut g, "c.rs", "/src/c.rs", "rust");
+        edge(&mut g, a, b, EdgeType::Imports);
+        edge(&mut g, c, a, EdgeType::Imports);
+
+        // Starting at a.rs with "importedBy" should reach c.rs, not b.rs.
+        let result = get_dependency_graph(&g, "/src/a.rs", 3, "importedBy");
+        let mut paths: Vec<_> = result.nodes.iter().map(|n| n.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/src/a.rs", "/src/c.rs"]);
+    }
+
+    #[test]
+    fn both_direction_includes_dependencies_and_dependents() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_file(&mut g, "a.rs", "/src/a.rs", "rust");
+        let b = add_file(&mut g, "b.rs", "/src/b.rs", "rust");
+        let c = add_file(&mut g, "c.rs", "/src/c.rs", "rust");
+        edge(&mut g, a, b, EdgeType::Imports);
+        edge(&mut g, c, a, EdgeType::Imports);
+
+        let result = get_dependency_graph(&g, "/src/a.rs", 3, "both");
+        assert_eq!(result.nodes.len(), 3);
+        // Both import edges are between reachable nodes.
+        assert_eq!(result.edges.len(), 2);
+    }
+
+    #[test]
+    fn depth_limits_transitive_reach() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // a -> b -> c chain of imports.
+        let a = add_file(&mut g, "a.rs", "/src/a.rs", "rust");
+        let b = add_file(&mut g, "b.rs", "/src/b.rs", "rust");
+        let c = add_file(&mut g, "c.rs", "/src/c.rs", "rust");
+        edge(&mut g, a, b, EdgeType::Imports);
+        edge(&mut g, b, c, EdgeType::Imports);
+
+        // depth 1 reaches only b, not the transitive c.
+        let result = get_dependency_graph(&g, "/src/a.rs", 1, "imports");
+        let mut paths: Vec<_> = result.nodes.iter().map(|n| n.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/src/a.rs", "/src/b.rs"]);
+    }
+
+    #[test]
+    fn non_import_edges_are_excluded_from_edge_list() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // a Contains b (not an import) plus a imports b. Only the import edge is emitted,
+        // but b is still reachable only if an import edge exists, so add one.
+        let a = add_file(&mut g, "a.rs", "/src/a.rs", "rust");
+        let b = add_file(&mut g, "b.rs", "/src/b.rs", "rust");
+        edge(&mut g, a, b, EdgeType::Imports);
+        edge(&mut g, a, b, EdgeType::Contains);
+
+        let result = get_dependency_graph(&g, "/src/a.rs", 3, "imports");
+        // Both nodes reachable, but only the single Imports edge is reported.
+        assert_eq!(result.nodes.len(), 2);
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].edge_type, "import");
+    }
+
+    #[test]
+    fn external_flag_and_missing_language_defaults() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_file(&mut g, "a.rs", "/src/a.rs", "rust");
+        // b has no language and an external=true flag.
+        let mut props = PropertyMap::new();
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String("serde".to_string()),
+        );
+        props.insert(
+            "path".to_string(),
+            PropertyValue::String("/ext/serde.rs".to_string()),
+        );
+        props.insert(
+            "external".to_string(),
+            PropertyValue::String("true".to_string()),
+        );
+        let b = g.add_node(NodeType::CodeFile, props).expect("add_node");
+        edge(&mut g, a, b, EdgeType::Imports);
+
+        let result = get_dependency_graph(&g, "/src/a.rs", 3, "imports");
+        let b_node = result
+            .nodes
+            .iter()
+            .find(|n| n.path == "/ext/serde.rs")
+            .expect("b node present");
+        assert!(b_node.is_external);
+        assert_eq!(b_node.language, "unknown");
+        assert_eq!(b_node.node_type, "codefile");
+
+        let a_node = result
+            .nodes
+            .iter()
+            .find(|n| n.path == "/src/a.rs")
+            .expect("a node present");
+        assert!(!a_node.is_external);
+        assert_eq!(a_node.language, "rust");
+    }
+
+    #[test]
+    fn imports_from_edges_traversed_but_only_imports_edges_reported() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // ImportsFrom is followed during reachability (transitive_dependencies accepts it)
+        // but get_dependency_graph only emits edges of type Imports.
+        let a = add_file(&mut g, "a.rs", "/src/a.rs", "rust");
+        let b = add_file(&mut g, "b.rs", "/src/b.rs", "rust");
+        edge(&mut g, a, b, EdgeType::ImportsFrom);
+
+        let result = get_dependency_graph(&g, "/src/a.rs", 3, "imports");
+        assert_eq!(result.nodes.len(), 2);
+        assert!(result.edges.is_empty());
+    }
+}
