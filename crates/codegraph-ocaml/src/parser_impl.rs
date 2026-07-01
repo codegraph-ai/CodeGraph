@@ -278,7 +278,7 @@ mod tests {
     /// entity kind: one `open` directive (import) and one parameterised `let`
     /// binding (function). OCaml's visitor carries only functions/imports/calls
     /// - no class or trait concept - so this pins functions=1/classes=0/
-    /// traits=0/imports=1 with entity_count=1.
+    ///   traits=0/imports=1 with entity_count=1.
     const SAMPLE: &str = r#"open Printf
 
 let greet name =
