@@ -365,12 +365,28 @@ pub fn ir_to_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, FunctionEntity, ImplementationRelation, ImportRelation,
+        InheritanceRelation, ModuleEntity, TraitEntity,
+    };
+    use std::path::{Path, PathBuf};
+
+    fn map(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(ir, &mut graph, Path::new("test.swift")).unwrap();
+        (graph, info)
+    }
+
+    /// Return the single edge between two nodes (fails if not exactly one).
+    fn edge_between(graph: &CodeGraph, src: NodeId, dst: NodeId) -> &codegraph::Edge {
+        let ids = graph.get_edges_between(src, dst).unwrap();
+        assert_eq!(ids.len(), 1, "expected exactly one edge {src}->{dst}");
+        graph.get_edge(ids[0]).unwrap()
+    }
 
     #[test]
     fn test_property_types() {
-        use codegraph::PropertyValue;
-        use codegraph_parser_api::{FunctionEntity, ModuleEntity};
-        use std::path::PathBuf;
         let mut ir = CodeIR::new(PathBuf::from("test.swift"));
         ir.set_module(ModuleEntity::new("test", "test.swift", "swift").with_line_count(100));
         let func = FunctionEntity::new("test_fn", 10, 20)
@@ -379,8 +395,7 @@ mod tests {
             .async_fn();
         ir.add_function(func);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let file_info = ir_to_graph(&ir, &mut graph, std::path::Path::new("test.swift")).unwrap();
+        let (graph, file_info) = map(&ir);
 
         // Verify file node line_count is Int
         let file_node = graph.get_node(file_info.file_id).unwrap();
@@ -395,29 +410,224 @@ mod tests {
 
         // Verify function properties are correct types
         let func_node = graph.get_node(file_info.functions[0]).unwrap();
-        assert!(
-            matches!(
-                func_node.properties.get("line_start"),
-                Some(PropertyValue::Int(10))
-            ),
-            "line_start should be Int(10), got {:?}",
-            func_node.properties.get("line_start")
+        assert!(matches!(
+            func_node.properties.get("line_start"),
+            Some(PropertyValue::Int(10))
+        ));
+        assert!(matches!(
+            func_node.properties.get("line_end"),
+            Some(PropertyValue::Int(20))
+        ));
+        assert!(matches!(
+            func_node.properties.get("is_async"),
+            Some(PropertyValue::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn empty_ir_builds_file_node_from_path_stem() {
+        // No module set: name is derived from the file stem, language is
+        // hard-coded to "swift", and the graph holds only the file node.
+        let ir = CodeIR::new(PathBuf::from("test.swift"));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(info.line_count, 0);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("test"));
+        assert_eq!(file.properties.get_string("language"), Some("swift"));
+        assert!(matches!(file.node_type, NodeType::CodeFile));
+    }
+
+    #[test]
+    fn free_function_gets_file_contains_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_function(FunctionEntity::new("free", 1, 2));
+        let (graph, info) = map(&ir);
+
+        let func_id = info.functions[0];
+        let edge = edge_between(&graph, info.file_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
+    }
+
+    #[test]
+    fn class_emits_node_methods_and_contains_edges() {
+        // A class with a method yields a Class node (file->class Contains)
+        // plus a "Class::method" Function node (class->method Contains).
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        let class = ClassEntity::new("Widget", 1, 30)
+            .with_visibility("public")
+            .with_methods(vec![FunctionEntity::new("render", 5, 9)]);
+        ir.add_class(class);
+        let (graph, info) = map(&ir);
+
+        // file + class + method
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(info.classes.len(), 1);
+        assert_eq!(info.functions.len(), 1);
+
+        let class_id = info.classes[0];
+        let class_node = graph.get_node(class_id).unwrap();
+        assert!(matches!(class_node.node_type, NodeType::Class));
+        assert_eq!(class_node.properties.get_string("name"), Some("Widget"));
+
+        // file -> class
+        assert!(matches!(
+            edge_between(&graph, info.file_id, class_id).edge_type,
+            EdgeType::Contains
+        ));
+
+        // method is qualified and contained by the class, not the file
+        let method_id = info.functions[0];
+        let method = graph.get_node(method_id).unwrap();
+        assert_eq!(method.properties.get_string("name"), Some("Widget::render"));
+        assert_eq!(method.properties.get_string("parent_class"), Some("Widget"));
+        assert!(matches!(
+            edge_between(&graph, class_id, method_id).edge_type,
+            EdgeType::Contains
+        ));
+        // no direct file -> method containment
+        assert!(graph
+            .get_edges_between(info.file_id, method_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn trait_becomes_interface_with_required_methods() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        let t = TraitEntity::new("Drawable", 1, 5)
+            .with_methods(vec![FunctionEntity::new("draw", 2, 3)]);
+        ir.add_trait(t);
+        let (graph, info) = map(&ir);
+
+        assert_eq!(info.traits.len(), 1);
+        let trait_node = graph.get_node(info.traits[0]).unwrap();
+        assert!(matches!(trait_node.node_type, NodeType::Interface));
+        assert_eq!(
+            trait_node
+                .properties
+                .get_string_list_compat("required_methods"),
+            Some(vec!["draw".to_string()])
         );
-        assert!(
-            matches!(
-                func_node.properties.get("line_end"),
-                Some(PropertyValue::Int(20))
-            ),
-            "line_end should be Int(20), got {:?}",
-            func_node.properties.get("line_end")
+        // file -> interface Contains
+        assert!(matches!(
+            edge_between(&graph, info.file_id, info.traits[0]).edge_type,
+            EdgeType::Contains
+        ));
+    }
+
+    #[test]
+    fn import_creates_external_module_with_edge_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_import(
+            ImportRelation::new("test", "Foundation")
+                .with_alias("F")
+                .with_symbols(vec!["URL".to_string(), "Data".to_string()]),
         );
-        assert!(
-            matches!(
-                func_node.properties.get("is_async"),
-                Some(PropertyValue::Bool(true))
-            ),
-            "is_async should be Bool(true), got {:?}",
-            func_node.properties.get("is_async")
+        let (graph, info) = map(&ir);
+
+        assert_eq!(info.imports.len(), 1);
+        let module = graph.get_node(info.imports[0]).unwrap();
+        assert!(matches!(module.node_type, NodeType::Module));
+        assert_eq!(module.properties.get_string("name"), Some("Foundation"));
+        assert_eq!(module.properties.get_string("is_external"), Some("true"));
+
+        let edge = edge_between(&graph, info.file_id, info.imports[0]);
+        assert!(matches!(edge.edge_type, EdgeType::Imports));
+        assert_eq!(edge.properties.get_string("alias"), Some("F"));
+        assert_eq!(
+            edge.properties.get_string_list_compat("symbols"),
+            Some(vec!["URL".to_string(), "Data".to_string()])
         );
+    }
+
+    #[test]
+    fn duplicate_imports_reuse_one_module_node() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_import(ImportRelation::new("test", "UIKit"));
+        ir.add_import(ImportRelation::new("test", "UIKit"));
+        let (graph, info) = map(&ir);
+
+        // Both import_ids point at the same reused Module node.
+        assert_eq!(info.imports.len(), 2);
+        assert_eq!(info.imports[0], info.imports[1]);
+        // file + single module node only.
+        assert_eq!(graph.node_count(), 2);
+    }
+
+    #[test]
+    fn resolved_call_creates_calls_edge_with_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 8));
+        ir.add_call(CallRelation::new("caller", "callee", 3));
+        let (graph, info) = map(&ir);
+
+        let caller_id = info.functions[0];
+        let callee_id = info.functions[1];
+        let edge = edge_between(&graph, caller_id, callee_id);
+        assert!(matches!(edge.edge_type, EdgeType::Calls));
+        assert!(matches!(
+            edge.properties.get("call_site_line"),
+            Some(PropertyValue::Int(3))
+        ));
+    }
+
+    #[test]
+    fn unresolved_call_is_stored_on_caller_node() {
+        // Callee absent from the node map: the call is recorded as an
+        // `unresolved_calls` string list on the caller rather than an edge.
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_call(CallRelation::new("caller", "external_fn", 2));
+        let (graph, info) = map(&ir);
+
+        let caller = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            caller.properties.get_string_list_compat("unresolved_calls"),
+            Some(vec!["external_fn".to_string()])
+        );
+        // no Calls edge was created.
+        assert_eq!(
+            graph
+                .iter_edges()
+                .filter(|(_, e)| matches!(e.edge_type, EdgeType::Calls))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn inheritance_creates_extends_edge_with_order() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_class(ClassEntity::new("Dog", 1, 4));
+        ir.add_class(ClassEntity::new("Animal", 5, 8));
+        ir.add_inheritance(InheritanceRelation::new("Dog", "Animal").with_order(2));
+        let (graph, info) = map(&ir);
+
+        let dog = info.classes[0];
+        let animal = info.classes[1];
+        let edge = edge_between(&graph, dog, animal);
+        assert!(matches!(edge.edge_type, EdgeType::Extends));
+        assert!(matches!(
+            edge.properties.get("order"),
+            Some(PropertyValue::Int(2))
+        ));
+    }
+
+    #[test]
+    fn implementation_creates_implements_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("test.swift"));
+        ir.add_class(ClassEntity::new("Dog", 1, 4));
+        ir.add_trait(TraitEntity::new("Barkable", 5, 6));
+        ir.add_implementation(ImplementationRelation::new("Dog", "Barkable"));
+        let (graph, info) = map(&ir);
+
+        let dog = info.classes[0];
+        let barkable = info.traits[0];
+        let edge = edge_between(&graph, dog, barkable);
+        assert!(matches!(edge.edge_type, EdgeType::Implements));
     }
 }
