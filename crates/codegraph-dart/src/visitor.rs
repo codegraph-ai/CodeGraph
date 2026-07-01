@@ -1090,4 +1090,155 @@ mod tests {
         // The signature starts on the third physical line.
         assert_eq!(visitor.functions[0].line_start, 3);
     }
+
+    #[test]
+    fn simple_call_is_not_recorded() {
+        // GAP: `helper()` parses as identifier + a `selector` sibling, but
+        // visit_body_for_calls only matches selector_suffix/argument_part/arguments
+        // siblings, so no CallRelation is produced for a plain call.
+        let source = b"void run() {\n  helper();\n}";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn method_call_is_not_recorded() {
+        // GAP (same selector-sibling mismatch) inside a class method body.
+        let source = b"class Worker {\n  void go() {\n    helper();\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn logical_and_does_not_raise_complexity() {
+        // GAP: `a && b` parses as logical_and_expression, not binary_expression,
+        // so the &&/|| complexity arm never fires - it stays at baseline.
+        let source = b"bool f(bool a, bool b) {\n  return a && b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn logical_or_does_not_raise_complexity() {
+        // GAP: `a || b` parses as its own expression kind (not binary_expression).
+        let source = b"bool f(bool a, bool b) {\n  return a || b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn switch_case_does_not_raise_complexity() {
+        // GAP: cases parse as switch_statement_case/switch_statement_default, not the
+        // switch_case/default_case kinds the complexity walker matches, so a switch
+        // enters a scope but adds no branches - complexity stays at baseline.
+        let source = b"int f(int n) {\n  switch (n) {\n    case 1:\n      return 1;\n    default:\n      return 0;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn do_while_loop_raises_complexity() {
+        let source = b"int f() {\n  do {\n    step();\n  } while (true);\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn finally_clause_raises_complexity() {
+        // A finally clause is counted as an exception handler.
+        let source =
+            b"int f() {\n  try {\n    risky();\n  } finally {\n    cleanup();\n  }\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn underscore_getter_is_private() {
+        let source = b"class Box {\n  int get _size => 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let g = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "_size")
+            .expect("getter extracted");
+        assert_eq!(g.visibility, "private");
+        assert!(g.attributes.contains(&"getter".to_string()));
+    }
+
+    #[test]
+    fn method_body_prefix_captured() {
+        let source = b"class Counter {\n  void inc() {\n    count += 1;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "inc")
+            .expect("method extracted");
+        let prefix = m.body_prefix.as_ref().expect("body prefix present");
+        assert!(prefix.contains("count"));
+    }
+
+    #[test]
+    fn bodyless_method_is_not_extracted() {
+        // GAP: a bodyless method `double area();` parses as
+        // class_member > declaration > function_signature. Inside a class,
+        // visit_node's function_signature arm is guarded by current_class.is_none(),
+        // and there is no method_signature node, so the method is never extracted.
+        let source = b"abstract class Shape {\n  double area();\n}";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions.iter().all(|f| f.name != "area"));
+    }
+
+    #[test]
+    fn underscore_prefixed_mixin_is_private() {
+        let source = b"mixin _Secret {\n  void run() {}\n}";
+        let visitor = parse_and_visit(source);
+
+        let t = visitor
+            .traits
+            .iter()
+            .find(|t| t.name == "_Secret")
+            .expect("mixin extracted as trait");
+        assert_eq!(t.visibility, "private");
+    }
+
+    #[test]
+    fn multi_line_class_line_end_spans_body() {
+        // A class spanning several physical lines records the closing-brace line.
+        let source = b"class Big {\n  int a = 0;\n  int b = 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes[0].line_start, 1);
+        assert_eq!(visitor.classes[0].line_end, 4);
+    }
 }
