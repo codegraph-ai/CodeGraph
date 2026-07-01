@@ -106,7 +106,9 @@ mod tests {
 
     fn parse_and_visit(source: &[u8]) -> DockerfileVisitor<'_> {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&crate::ts_dockerfile::language()).unwrap();
+        parser
+            .set_language(&crate::ts_dockerfile::language())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
         let mut visitor = DockerfileVisitor::new(source);
         visitor.visit_node(tree.root_node());
@@ -120,7 +122,11 @@ mod tests {
         assert!(
             visitor.functions.iter().any(|f| f.name == "FROM"),
             "expected a FROM directive, got: {:?}",
-            visitor.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+            visitor
+                .functions
+                .iter()
+                .map(|f| &f.name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -134,7 +140,11 @@ mod tests {
             .find(|f| f.name == "USER")
             .expect("USER directive missing");
         assert!(
-            user_dir.body_prefix.as_deref().unwrap_or("").contains("root"),
+            user_dir
+                .body_prefix
+                .as_deref()
+                .unwrap_or("")
+                .contains("root"),
             "expected body to contain 'root', got {:?}",
             user_dir.body_prefix
         );
@@ -150,7 +160,11 @@ mod tests {
         assert!(names.contains(&"EXPOSE"), "missing EXPOSE in {names:?}");
         assert!(names.contains(&"CMD"), "missing CMD in {names:?}");
         // Two EXPOSE directives expected
-        let expose_count = visitor.functions.iter().filter(|f| f.name == "EXPOSE").count();
+        let expose_count = visitor
+            .functions
+            .iter()
+            .filter(|f| f.name == "EXPOSE")
+            .count();
         assert_eq!(expose_count, 2, "expected two EXPOSE directives");
     }
 
@@ -158,9 +172,17 @@ mod tests {
     fn test_visitor_captures_secrets_in_env() {
         let source = b"ENV API_KEY=abc123\nARG SECRET=hardcoded\n";
         let visitor = parse_and_visit(source);
-        let env = visitor.functions.iter().find(|f| f.name == "ENV").expect("ENV missing");
+        let env = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "ENV")
+            .expect("ENV missing");
         assert!(env.body_prefix.as_deref().unwrap_or("").contains("API_KEY"));
-        let arg = visitor.functions.iter().find(|f| f.name == "ARG").expect("ARG missing");
+        let arg = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "ARG")
+            .expect("ARG missing");
         assert!(arg.body_prefix.as_deref().unwrap_or("").contains("SECRET"));
     }
 }
