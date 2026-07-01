@@ -140,4 +140,72 @@ mod tests {
         assert_eq!(ir.entity_count(), 0);
         assert_eq!(ir.relationship_count(), 0);
     }
+
+    #[test]
+    fn new_sets_path_and_leaves_rest_empty() {
+        let ir = CodeIR::new(PathBuf::from("src/lib.rs"));
+        assert_eq!(ir.file_path, PathBuf::from("src/lib.rs"));
+        assert!(ir.module.is_none());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.calls.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.inheritance.is_empty());
+        assert!(ir.implementations.is_empty());
+        assert!(ir.type_references.is_empty());
+        assert_eq!(ir.entity_count(), 0);
+        assert_eq!(ir.relationship_count(), 0);
+    }
+
+    #[test]
+    fn set_module_counts_as_one_entity() {
+        let mut ir = CodeIR::new(PathBuf::from("m.rs"));
+        assert_eq!(ir.entity_count(), 0);
+        ir.set_module(ModuleEntity::new("m", "m.rs", "rust"));
+        assert!(ir.module.is_some());
+        assert_eq!(ir.entity_count(), 1);
+        assert_eq!(ir.relationship_count(), 0);
+    }
+
+    #[test]
+    fn add_entities_increment_entity_count() {
+        let mut ir = CodeIR::new(PathBuf::from("e.rs"));
+        ir.set_module(ModuleEntity::new("e", "e.rs", "rust"));
+        ir.add_function(FunctionEntity::new("f", 1, 2));
+        ir.add_class(ClassEntity::new("C", 3, 4));
+        ir.add_trait(TraitEntity::new("T", 5, 6));
+        assert_eq!(ir.functions.len(), 1);
+        assert_eq!(ir.classes.len(), 1);
+        assert_eq!(ir.traits.len(), 1);
+        // module + function + class + trait
+        assert_eq!(ir.entity_count(), 4);
+        assert_eq!(ir.relationship_count(), 0);
+    }
+
+    #[test]
+    fn add_relationships_increment_relationship_count() {
+        let mut ir = CodeIR::new(PathBuf::from("r.rs"));
+        ir.add_call(CallRelation::new("a", "b", 1));
+        ir.add_import(ImportRelation::new("a", "std::io"));
+        ir.add_inheritance(InheritanceRelation::new("Child", "Parent"));
+        ir.add_implementation(ImplementationRelation::new("S", "Trait"));
+        ir.add_type_reference(TypeReference::new("f", "Widget", 9));
+        assert_eq!(ir.calls.len(), 1);
+        assert_eq!(ir.imports.len(), 1);
+        assert_eq!(ir.inheritance.len(), 1);
+        assert_eq!(ir.implementations.len(), 1);
+        assert_eq!(ir.type_references.len(), 1);
+        assert_eq!(ir.relationship_count(), 5);
+        assert_eq!(ir.entity_count(), 0);
+    }
+
+    #[test]
+    fn add_methods_append_in_order() {
+        let mut ir = CodeIR::new(PathBuf::from("o.rs"));
+        ir.add_function(FunctionEntity::new("first", 1, 1));
+        ir.add_function(FunctionEntity::new("second", 2, 2));
+        assert_eq!(ir.functions[0].name, "first");
+        assert_eq!(ir.functions[1].name, "second");
+    }
 }
