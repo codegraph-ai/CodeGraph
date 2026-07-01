@@ -726,4 +726,245 @@ mod tests {
             func_node.properties.get("is_async")
         );
     }
+
+    #[test]
+    fn test_http_handler_detection_on_controller() {
+        // A public method in a *Controller class is treated as an HTTP handler.
+        let mut ir = CodeIR::new(PathBuf::from("test.php"));
+        let mut class = ClassEntity::new("UserController", 1, 20);
+        class
+            .methods
+            .push(FunctionEntity::new("index", 2, 5).with_visibility("public"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.php").as_path()).unwrap();
+
+        let method_node = graph.get_node(file_info.functions[0]).unwrap();
+        assert_eq!(
+            method_node.properties.get_string("http_method"),
+            Some("ANY"),
+            "controller public method should be tagged as HTTP handler"
+        );
+        assert_eq!(
+            method_node.properties.get_string("route"),
+            Some("/index"),
+            "route should default to /<method>"
+        );
+        assert_eq!(
+            method_node.properties.get_bool("is_entry_point"),
+            Some(true),
+            "controller public method should be an entry point"
+        );
+    }
+
+    #[test]
+    fn test_http_handler_skips_lifecycle_and_non_public() {
+        // __construct (lifecycle) and a protected action are NOT HTTP handlers.
+        let mut ir = CodeIR::new(PathBuf::from("test.php"));
+        let mut class = ClassEntity::new("OrderController", 1, 30);
+        class
+            .methods
+            .push(FunctionEntity::new("__construct", 2, 4).with_visibility("public"));
+        class
+            .methods
+            .push(FunctionEntity::new("boot", 5, 7).with_visibility("public"));
+        class
+            .methods
+            .push(FunctionEntity::new("helper", 8, 10).with_visibility("protected"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.php").as_path()).unwrap();
+
+        for &method_id in &file_info.functions {
+            let node = graph.get_node(method_id).unwrap();
+            assert_eq!(
+                node.properties.get_string("http_method"),
+                None,
+                "lifecycle/non-public methods must not be tagged as HTTP handlers"
+            );
+        }
+    }
+
+    #[test]
+    fn test_http_handler_not_on_non_controller_class() {
+        // A public method in a non-Controller class is not an entry point.
+        let mut ir = CodeIR::new(PathBuf::from("test.php"));
+        let mut class = ClassEntity::new("UserService", 1, 20);
+        class
+            .methods
+            .push(FunctionEntity::new("fetch", 2, 5).with_visibility("public"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.php").as_path()).unwrap();
+
+        let method_node = graph.get_node(file_info.functions[0]).unwrap();
+        assert_eq!(method_node.properties.get_string("http_method"), None);
+        assert_eq!(method_node.properties.get_bool("is_entry_point"), None);
+    }
+
+    #[test]
+    fn test_php_controller_and_lifecycle_helpers() {
+        assert!(is_php_controller_class("HomeController"));
+        assert!(!is_php_controller_class("HomeService"));
+
+        assert!(is_php_lifecycle_method("__construct"));
+        assert!(is_php_lifecycle_method("boot"));
+        assert!(is_php_lifecycle_method("register"));
+        assert!(is_php_lifecycle_method("validateInput"));
+        assert!(is_php_lifecycle_method("authorizeRequest"));
+        assert!(is_php_lifecycle_method("beforeAction"));
+        assert!(!is_php_lifecycle_method("index"));
+        assert!(!is_php_lifecycle_method("show"));
+    }
+
+    #[test]
+    fn test_resolved_call_creates_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("test.php"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        ir.add_call(codegraph_parser_api::CallRelation::new(
+            "caller", "callee", 3,
+        ));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.php").as_path()).unwrap();
+
+        let caller_id = file_info.functions[0];
+        let callee_id = file_info.functions[1];
+        let edges = graph.get_edges_between(caller_id, callee_id).unwrap();
+        assert!(
+            !edges.is_empty(),
+            "resolved call should create a Calls edge"
+        );
+
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(
+            edge.properties.get("call_site_line"),
+            Some(&codegraph::PropertyValue::Int(3))
+        );
+        assert_eq!(edge.properties.get_bool("is_direct"), Some(true));
+    }
+
+    #[test]
+    fn test_unresolved_call_stored_on_caller() {
+        // A call to a callee not present in the file is recorded on the caller node.
+        let mut ir = CodeIR::new(PathBuf::from("test.php"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_call(codegraph_parser_api::CallRelation::new(
+            "caller",
+            "missingFn",
+            3,
+        ));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.php").as_path()).unwrap();
+
+        let caller_node = graph.get_node(file_info.functions[0]).unwrap();
+        let unresolved = caller_node
+            .properties
+            .get_string_list_compat("unresolved_calls")
+            .unwrap_or_default();
+        assert_eq!(unresolved, vec!["missingFn".to_string()]);
+    }
+
+    #[test]
+    fn test_fallback_file_node_without_module() {
+        // With no module set, the file node derives its name from the path stem.
+        let ir = CodeIR::new(PathBuf::from("src/Widget.php"));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info =
+            ir_to_graph(&ir, &mut graph, PathBuf::from("src/Widget.php").as_path()).unwrap();
+
+        let file_node = graph.get_node(file_info.file_id).unwrap();
+        assert_eq!(file_node.properties.get_string("name"), Some("Widget"));
+        assert_eq!(file_node.properties.get_string("language"), Some("php"));
+        assert_eq!(file_info.line_count, 0);
+    }
+
+    #[test]
+    fn test_complexity_props_propagated() {
+        use codegraph_parser_api::ComplexityMetrics;
+        let mut ir = CodeIR::new(PathBuf::from("test.php"));
+        let metrics = ComplexityMetrics::new()
+            .with_branches(3)
+            .with_loops(2)
+            .with_logical_operators(1)
+            .with_nesting_depth(4)
+            .with_exception_handlers(1)
+            .with_early_returns(2)
+            .finalize();
+        ir.add_function(FunctionEntity::new("complex", 1, 40).with_complexity(metrics));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.php").as_path()).unwrap();
+
+        let node = graph.get_node(file_info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("complexity_branches"),
+            Some(&codegraph::PropertyValue::Int(3))
+        );
+        assert_eq!(
+            node.properties.get("complexity_loops"),
+            Some(&codegraph::PropertyValue::Int(2))
+        );
+        assert_eq!(
+            node.properties.get("complexity_early_returns"),
+            Some(&codegraph::PropertyValue::Int(2))
+        );
+        // grade() must be recorded as a single-character string.
+        assert!(node.properties.get_string("complexity_grade").is_some());
+    }
+
+    #[test]
+    fn test_import_edge_props_alias_wildcard_symbols() {
+        let mut ir = CodeIR::new(PathBuf::from("test.php"));
+        let import = ImportRelation::new("global", "App\\Models\\User")
+            .with_alias("UserModel")
+            .with_symbols(vec!["find".to_string(), "create".to_string()])
+            .wildcard();
+        ir.add_import(import);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.php").as_path()).unwrap();
+
+        let edges = graph
+            .get_edges_between(file_info.file_id, file_info.imports[0])
+            .unwrap();
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert_eq!(edge.properties.get_string("alias"), Some("UserModel"));
+        assert_eq!(edge.properties.get_string("is_wildcard"), Some("true"));
+        let symbols = edge
+            .properties
+            .get_string_list_compat("symbols")
+            .unwrap_or_default();
+        assert_eq!(symbols, vec!["find".to_string(), "create".to_string()]);
+    }
+
+    #[test]
+    fn test_trait_required_methods_recorded() {
+        let mut ir = CodeIR::new(PathBuf::from("test.php"));
+        let trait_entity = TraitEntity::new("Comparable", 1, 8).with_methods(vec![
+            FunctionEntity::new("compareTo", 2, 3),
+            FunctionEntity::new("equals", 4, 5),
+        ]);
+        ir.add_trait(trait_entity);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.php").as_path()).unwrap();
+
+        let node = graph.get_node(file_info.traits[0]).unwrap();
+        let required = node
+            .properties
+            .get_string_list_compat("required_methods")
+            .unwrap_or_default();
+        assert_eq!(
+            required,
+            vec!["compareTo".to_string(), "equals".to_string()]
+        );
+    }
 }
