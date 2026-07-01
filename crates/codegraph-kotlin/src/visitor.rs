@@ -4,10 +4,9 @@
 //! AST visitor for extracting Kotlin entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, TraitEntity,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    TraitEntity,
 };
 use tree_sitter::Node;
 
@@ -157,7 +156,8 @@ impl<'a> KotlinVisitor<'a> {
                         }
                     }
                 }
-                "*" => {
+                "*" | "wildcard_import" => {
+                    // tree-sitter-kotlin emits a `wildcard_import` node for `import a.b.*`
                     is_wildcard = true;
                 }
                 _ => {}
@@ -224,9 +224,7 @@ impl<'a> KotlinVisitor<'a> {
         let body_prefix = class_body_node
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -294,9 +292,7 @@ impl<'a> KotlinVisitor<'a> {
         let body_prefix = class_body_node
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let object_entity = ClassEntity {
@@ -322,9 +318,12 @@ impl<'a> KotlinVisitor<'a> {
         let previous_class = self.current_class.take();
         self.current_class = Some(qualified_name);
 
-        // Visit object body to extract methods
-        if let Some(body) = node.child_by_field_name("class_body") {
-            self.visit_class_body(body);
+        // Visit object body to extract methods (class_body is a plain child, not a field)
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "class_body" {
+                self.visit_class_body(child);
+            }
         }
 
         self.current_class = previous_class;
@@ -403,9 +402,7 @@ impl<'a> KotlinVisitor<'a> {
         let body_prefix = class_body_node
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let enum_entity = ClassEntity {
@@ -536,9 +533,7 @@ impl<'a> KotlinVisitor<'a> {
         let body_prefix = func_body_node
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -642,6 +637,14 @@ impl<'a> KotlinVisitor<'a> {
         for child in node.children(&mut cursor) {
             if child.kind() == "simple_identifier" {
                 result = self.node_text(child);
+            } else if child.kind() == "navigation_suffix" {
+                // `.method` - descend to the inner simple_identifier to get `method`
+                let mut suffix_cursor = child.walk();
+                for suffix_child in child.children(&mut suffix_cursor) {
+                    if suffix_child.kind() == "simple_identifier" {
+                        result = self.node_text(suffix_child);
+                    }
+                }
             } else if child.kind() == "navigation_expression" {
                 // Recurse into chained navigation
                 result = self.extract_navigation_callee(child);
@@ -775,7 +778,15 @@ impl<'a> KotlinVisitor<'a> {
 
     fn extract_interface_methods(&self, node: Node) -> Vec<FunctionEntity> {
         let mut methods = Vec::new();
-        if let Some(body) = node.child_by_field_name("class_body") {
+        // class_body is a plain child in tree-sitter-kotlin, not a named field.
+        let class_body = {
+            let mut cursor = node.walk();
+            let found = node
+                .children(&mut cursor)
+                .find(|c| c.kind() == "class_body");
+            found
+        };
+        if let Some(body) = class_body {
             let mut cursor = body.walk();
             for child in body.children(&mut cursor) {
                 if child.kind() == "function_declaration" {
@@ -900,7 +911,16 @@ impl<'a> KotlinVisitor<'a> {
 
     fn extract_parameters(&self, node: Node) -> Vec<Parameter> {
         let mut params = Vec::new();
-        if let Some(params_node) = node.child_by_field_name("function_value_parameters") {
+        // tree-sitter-kotlin exposes function_value_parameters as a plain child, not a
+        // named field, so search children by kind rather than child_by_field_name.
+        let params_node = {
+            let mut cursor = node.walk();
+            let found = node
+                .children(&mut cursor)
+                .find(|c| c.kind() == "function_value_parameters");
+            found
+        };
+        if let Some(params_node) = params_node {
             let mut cursor = params_node.walk();
             for child in params_node.children(&mut cursor) {
                 if child.kind() == "parameter" {
@@ -1121,9 +1141,7 @@ mod tests {
         use tree_sitter::Parser;
 
         let mut parser = Parser::new();
-        parser
-            .set_language(&crate::ts_kotlin::language())
-            .unwrap();
+        parser.set_language(&crate::ts_kotlin::language()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = KotlinVisitor::new(source);
@@ -1480,5 +1498,282 @@ fun nested(x: Int, y: Int) {
             "Expected nesting depth >= 3, got {}",
             complexity.max_nesting_depth
         );
+    }
+
+    #[test]
+    fn test_import_wildcard() {
+        let source = b"import java.util.*";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert!(visitor.imports[0].is_wildcard);
+        assert_eq!(visitor.imports[0].imported, "java.util");
+        assert!(visitor.imports[0].alias.is_none());
+    }
+
+    #[test]
+    fn test_import_alias() {
+        let source = b"import java.util.List as JList";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert!(!visitor.imports[0].is_wildcard);
+        assert_eq!(visitor.imports[0].alias, Some("JList".to_string()));
+    }
+
+    #[test]
+    fn test_import_importer_defaults_to_default() {
+        // With no package_header, the importer is the literal "default"
+        let source = b"import java.util.List";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].importer, "default");
+    }
+
+    #[test]
+    fn test_import_importer_uses_package() {
+        let source = b"package com.app\nimport java.util.List";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].importer, "com.app");
+    }
+
+    #[test]
+    fn test_function_signature_first_line() {
+        let source = b"fun add(a: Int, b: Int): Int { return a + b }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[0].signature.contains("fun add"));
+        assert!(visitor.functions[0].signature.contains("Int"));
+    }
+
+    #[test]
+    fn test_function_visibility_private() {
+        let source = b"class C { private fun secret() {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_function_visibility_defaults_public() {
+        let source = b"fun open() {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_function_return_type() {
+        let source = b"fun name(): String { return \"x\" }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].return_type, Some("String".to_string()));
+    }
+
+    #[test]
+    fn test_function_return_type_unit_normalized_to_none() {
+        // An explicit Unit return type is dropped to None
+        let source = b"fun act(): Unit { println(\"x\") }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[0].return_type.is_none());
+    }
+
+    #[test]
+    fn test_function_nullable_return_type() {
+        let source = b"fun maybe(): String? { return null }";
+        let visitor = parse_and_visit(source);
+
+        let rt = visitor.functions[0].return_type.as_ref().unwrap();
+        assert!(rt.contains("String"));
+    }
+
+    #[test]
+    fn test_function_parameters_with_types() {
+        let source = b"fun add(a: Int, b: String) {}";
+        let visitor = parse_and_visit(source);
+
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "a");
+        assert!(params[0]
+            .type_annotation
+            .as_deref()
+            .unwrap()
+            .contains("Int"));
+        assert_eq!(params[1].name, "b");
+        assert!(params[1]
+            .type_annotation
+            .as_deref()
+            .unwrap()
+            .contains("String"));
+    }
+
+    #[test]
+    fn test_function_is_static_always_false() {
+        // Kotlin has no static; the visitor hardcodes is_static=false
+        let source = b"class C { fun create(): C { return C() } }";
+        let visitor = parse_and_visit(source);
+
+        assert!(!visitor.functions.is_empty());
+        assert!(visitor.functions.iter().all(|f| !f.is_static));
+    }
+
+    #[test]
+    fn test_function_line_bounds_one_based() {
+        let source = b"fun single() {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].line_start, 1);
+        assert_eq!(visitor.functions[0].line_end, 1);
+    }
+
+    #[test]
+    fn test_function_body_prefix_present() {
+        let source = b"fun greet() { println(\"hi\") }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_function_kdoc_doc_comment() {
+        let source = b"/** Adds two numbers. */\nfun add(a: Int, b: Int): Int { return a + b }";
+        let visitor = parse_and_visit(source);
+
+        let doc = visitor.functions[0].doc_comment.as_ref().unwrap();
+        assert!(doc.starts_with("/**"));
+        assert!(doc.contains("Adds two numbers"));
+    }
+
+    #[test]
+    fn test_function_test_annotation_flags_is_test() {
+        let source = b"class T { @Test fun testFoo() {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_function_inline_and_operator_attributes() {
+        let source =
+            b"class V(val x: Int) { inline operator fun plus(o: Int): Int { return x + o } }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let attrs = &visitor.functions[0].attributes;
+        assert!(attrs.contains(&"inline".to_string()));
+        assert!(attrs.contains(&"operator".to_string()));
+    }
+
+    #[test]
+    fn test_class_inheritance_base_class() {
+        // A supertype with a constructor call () is recorded as a base class + inheritance edge
+        let source = b"class Dog : Animal() {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(visitor.classes[0]
+            .base_classes
+            .contains(&"Animal".to_string()));
+        assert_eq!(visitor.inheritance.len(), 1);
+        assert_eq!(visitor.inheritance[0].parent, "Animal");
+        assert_eq!(visitor.inheritance[0].child, "Dog");
+    }
+
+    #[test]
+    fn test_class_implements_interface() {
+        // A supertype with no constructor call is recorded as an implemented trait
+        let source = b"class Task : Runnable {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(visitor.classes[0]
+            .implemented_traits
+            .contains(&"Runnable".to_string()));
+        assert_eq!(visitor.implementations.len(), 1);
+        assert_eq!(visitor.implementations[0].trait_name, "Runnable");
+        assert_eq!(visitor.implementations[0].implementor, "Task");
+    }
+
+    #[test]
+    fn test_class_sealed_attribute() {
+        let source = b"sealed class Shape";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(visitor.classes[0]
+            .attributes
+            .contains(&"sealed".to_string()));
+    }
+
+    #[test]
+    fn test_interface_required_methods() {
+        let source = b"interface Reader { fun read(): String }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.traits.len(), 1);
+        assert_eq!(visitor.traits[0].required_methods.len(), 1);
+        let m = &visitor.traits[0].required_methods[0];
+        assert_eq!(m.name, "read");
+        assert!(m.is_abstract);
+    }
+
+    #[test]
+    fn test_object_method_parent_class() {
+        // A method inside an object_declaration is qualified to the object name
+        let source = b"object Registry { fun register() {} }";
+        let visitor = parse_and_visit(source);
+
+        let register = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "register")
+            .expect("object method extracted");
+        assert_eq!(register.parent_class, Some("Registry".to_string()));
+    }
+
+    #[test]
+    fn test_complexity_elvis_operator_adds_branch() {
+        let source = b"fun orZero(x: Int?): Int { return x ?: 0 }";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.branches >= 1,
+            "Expected elvis to add a branch, got {}",
+            complexity.branches
+        );
+    }
+
+    #[test]
+    fn test_top_level_call_not_recorded() {
+        // A call outside any function has no caller, so it is not recorded
+        let source = b"val result = compute()";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.calls.len(), 0);
+    }
+
+    #[test]
+    fn test_navigation_call_callee_is_method_name() {
+        let source = b"
+class C {
+    fun run() {
+        obj.doWork()
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "doWork"));
     }
 }
