@@ -1226,4 +1226,200 @@ mod tests {
         assert_eq!(work.parent_class, Some("Orphan".to_string()));
         assert!(!work.is_abstract);
     }
+
+    #[test]
+    fn test_category_interface_extracted_as_class() {
+        // `@interface Foo (Private)` parses as a class_interface; the class name is Foo
+        // and the `(Private)` category identifier is ignored (not a superclass).
+        let source = br#"
+@interface Foo (Private)
+- (void)ping;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        let class = &visitor.classes[0];
+        assert_eq!(class.name, "Foo");
+        // The trailing `Private` identifier appears with no `:`, so it is not a superclass.
+        assert!(class.base_classes.is_empty());
+        // The category's method is still extracted and parented to Foo.
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "ping");
+        assert_eq!(visitor.functions[0].parent_class, Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn test_protocol_inheritance_parent_traits_empty_gap() {
+        // `@protocol Sub <Base>` records Sub but never reads the protocol_reference_list,
+        // so parent_traits stays empty - a latent gap pinned here.
+        let source = br#"
+@protocol Sub <Base>
+- (void)go;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.traits.len(), 1);
+        assert_eq!(visitor.traits[0].name, "Sub");
+        assert!(visitor.traits[0].parent_traits.is_empty());
+    }
+
+    #[test]
+    fn test_class_protocol_conformance_implemented_traits_empty_gap() {
+        // `@interface Foo : NSObject <Bar>` keeps NSObject as the superclass but the
+        // `<Bar>` conformance (a parameterized_arguments node) is never read, so
+        // implemented_traits stays empty - a latent gap pinned here.
+        let source = br#"
+@interface Foo : NSObject <Bar>
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        let class = &visitor.classes[0];
+        assert_eq!(class.base_classes, vec!["NSObject"]);
+        assert!(class.implemented_traits.is_empty());
+    }
+
+    #[test]
+    fn test_keyword_selector_name_first_part_only_gap() {
+        // A multi-part keyword selector `setX:y:` yields only the first segment `setX`
+        // because extract_method_name_from_node returns the first identifier after the
+        // method_type - the full selector name is truncated (a latent gap).
+        let source = br#"
+@implementation C
+- (void)setX:(int)x y:(int)y {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "setX");
+    }
+
+    #[test]
+    fn test_keyword_selector_parameters_empty_gap() {
+        // extract_method_parameters_from_node always returns an empty vec, so even a
+        // keyword selector with two typed parameters records no parameters (a latent gap).
+        let source = br#"
+@implementation C
+- (void)setX:(int)x y:(int)y {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn test_message_expression_not_tracked_as_call_gap() {
+        // An ObjC message send `[self ping]` parses as a message_expression, but
+        // visit_body_for_calls only tracks C-style call_expression nodes, so no call
+        // is recorded - a latent gap pinned here.
+        let source = br#"
+@implementation C
+- (void)go {
+    [self ping];
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_ternary_no_complexity_gap() {
+        // A ternary `x > 0 ? 1 : 2` parses as a conditional_expression, which the
+        // complexity visitor does not count, so complexity stays at the baseline 1.
+        let source = br#"
+@implementation C
+- (int)pick:(int)x {
+    return x > 0 ? 1 : 2;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "pick").unwrap();
+        assert_eq!(m.complexity.as_ref().unwrap().cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_for_in_enumeration_complexity_and_call() {
+        // Fast enumeration `for (id x in a)` parses as a for_statement, so it raises
+        // complexity as a loop, and a C-style call in its body is still attributed.
+        let source = br#"
+@implementation C
+- (void)each:(NSArray *)a {
+    for (id x in a) {
+        NSLog(@"%@", x);
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "each").unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller, "each");
+        assert_eq!(visitor.calls[0].callee, "NSLog");
+    }
+
+    #[test]
+    fn test_multiple_protocols_extracted() {
+        let source = br#"
+@protocol Alpha
+- (void)a;
+@end
+
+@protocol Beta
+- (void)b;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.traits.len(), 2);
+        let names: Vec<&str> = visitor.traits.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Alpha"));
+        assert!(names.contains(&"Beta"));
+    }
+
+    #[test]
+    fn test_class_method_definition_static_with_body() {
+        // A `+` method with a body under @implementation is static, non-abstract, and
+        // carries complexity/body_prefix (unlike an interface class-method declaration).
+        let source = br#"
+@implementation C
++ (instancetype)make {
+    return nil;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let make = visitor.functions.iter().find(|f| f.name == "make").unwrap();
+        assert!(make.is_static);
+        assert!(!make.is_abstract);
+        assert!(make.complexity.is_some());
+        assert!(make.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_call_in_switch_case_attributed() {
+        // A C-style call inside a switch case body is attributed to the enclosing method.
+        let source = br#"
+@implementation C
+- (void)route:(int)x {
+    switch (x) {
+        case 1:
+            NSLog(@"one");
+            break;
+        default:
+            break;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller, "route");
+        assert_eq!(visitor.calls[0].callee, "NSLog");
+    }
 }
