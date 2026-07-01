@@ -303,7 +303,8 @@ mod tests {
     use crate::sdc::{SdcClock, SdcData};
     use codegraph::PropertyValue;
     use codegraph_parser_api::{
-        CallRelation, ClassEntity, FunctionEntity, ImportRelation, ModuleEntity, TraitEntity,
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
+        Parameter, TraitEntity,
     };
     use std::path::PathBuf;
 
@@ -548,5 +549,155 @@ mod tests {
         assert!(clocks.contains("clk_port"));
         let reads = file.properties.get_string("eda_design_reads").unwrap();
         assert!(reads.contains("top.v"));
+    }
+
+    #[test]
+    fn function_complexity_attaches_all_metric_props() {
+        // A function carrying ComplexityMetrics expands into eight numeric
+        // props plus the letter grade. cyclomatic = 1+4+2+3+1 = 11 -> grade C.
+        let mut metrics = ComplexityMetrics::new()
+            .with_branches(4)
+            .with_loops(2)
+            .with_logical_operators(3)
+            .with_nesting_depth(5)
+            .with_exception_handlers(1)
+            .with_early_returns(2);
+        metrics.calculate_cyclomatic();
+
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("busy", 1, 40).with_complexity(metrics));
+        let (graph, info) = map(&ir);
+
+        let func = graph.get_node(info.functions[0]).unwrap();
+        let p = &func.properties;
+        assert!(matches!(p.get("complexity"), Some(PropertyValue::Int(11))));
+        assert_eq!(p.get_string("complexity_grade"), Some("C"));
+        assert!(matches!(
+            p.get("complexity_branches"),
+            Some(PropertyValue::Int(4))
+        ));
+        assert!(matches!(
+            p.get("complexity_loops"),
+            Some(PropertyValue::Int(2))
+        ));
+        assert!(matches!(
+            p.get("complexity_logical_ops"),
+            Some(PropertyValue::Int(3))
+        ));
+        assert!(matches!(
+            p.get("complexity_nesting"),
+            Some(PropertyValue::Int(5))
+        ));
+        assert!(matches!(
+            p.get("complexity_exceptions"),
+            Some(PropertyValue::Int(1))
+        ));
+        assert!(matches!(
+            p.get("complexity_early_returns"),
+            Some(PropertyValue::Int(2))
+        ));
+    }
+
+    #[test]
+    fn function_optional_props_attached_when_present() {
+        // doc/parameters/attributes/body_prefix are only emitted when set.
+        let func = FunctionEntity::new("proc", 1, 5)
+            .with_doc("does a thing")
+            .with_parameters(vec![Parameter::new("a"), Parameter::new("b")])
+            .with_attributes(vec!["export".to_string()])
+            .with_body_prefix("set x 1");
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(func);
+        let (graph, info) = map(&ir);
+
+        let p = &graph.get_node(info.functions[0]).unwrap().properties;
+        assert_eq!(p.get_string("doc"), Some("does a thing"));
+        assert_eq!(
+            p.get_string_list_compat("parameters"),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            p.get_string_list_compat("attributes"),
+            Some(vec!["export".to_string()])
+        );
+        assert_eq!(p.get_string("body_prefix"), Some("set x 1"));
+    }
+
+    #[test]
+    fn function_parent_class_links_to_earlier_function() {
+        // Classes are mapped AFTER functions, so a parent_class name only
+        // resolves in node_map if it belongs to an EARLIER function. Here the
+        // child's parent is a previously-added function, so the Contains edge
+        // comes from that function node, not the file.
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("parent", 1, 20));
+        ir.add_function(FunctionEntity::new("child", 5, 9).with_parent_class("parent"));
+        let (graph, info) = map(&ir);
+
+        let parent_id = info.functions[0];
+        let child_id = info.functions[1];
+        // child is contained by parent, not by the file.
+        assert!(matches!(
+            edge_between(&graph, parent_id, child_id).edge_type,
+            EdgeType::Contains
+        ));
+        assert!(graph
+            .get_edges_between(info.file_id, child_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn function_parent_class_unresolved_leaves_function_orphaned() {
+        // When parent_class is set but never resolves in node_map (e.g. a
+        // namespace mapped later, or a missing name), the inner lookup has no
+        // else arm, so NO Contains edge is emitted - the function is orphaned
+        // (not wired to the file).
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("child", 5, 9).with_parent_class("Missing"));
+        let (graph, info) = map(&ir);
+
+        // file + function nodes, but zero edges.
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph
+            .get_edges_between(info.file_id, info.functions[0])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn module_doc_comment_attached_to_file_node() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.set_module(
+            ModuleEntity::new("test", "test.tcl", "tcl")
+                .with_line_count(7)
+                .with_doc("module docs"),
+        );
+        let (graph, info) = map(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("doc"), Some("module docs"));
+        assert_eq!(info.line_count, 7);
+    }
+
+    #[test]
+    fn class_optional_props_attached_when_present() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_class(
+            ClassEntity::new("NS", 1, 30)
+                .with_doc("namespace docs")
+                .with_attributes(vec!["public".to_string()])
+                .with_body_prefix("variable state"),
+        );
+        let (graph, info) = map(&ir);
+
+        let p = &graph.get_node(info.classes[0]).unwrap().properties;
+        assert_eq!(p.get_string("doc"), Some("namespace docs"));
+        assert_eq!(
+            p.get_string_list_compat("attributes"),
+            Some(vec!["public".to_string()])
+        );
+        assert_eq!(p.get_string("body_prefix"), Some("variable state"));
     }
 }
