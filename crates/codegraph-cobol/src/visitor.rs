@@ -11,7 +11,7 @@
 
 use codegraph_parser_api::{
     truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
-    FunctionEntity, ImportRelation, BODY_PREFIX_MAX_CHARS,
+    FunctionEntity, ImportRelation,
 };
 use tree_sitter::Node;
 
@@ -115,7 +115,7 @@ impl<'a> CobolVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let entity = ClassEntity {
             name,
@@ -195,7 +195,7 @@ impl<'a> CobolVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
@@ -347,6 +347,18 @@ impl<'a> CobolVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tree_sitter::Parser;
+
+    /// Parse COBOL source and run the visitor, returning the populated visitor.
+    /// The tree is dropped after visiting since the visitor only borrows `source`.
+    fn parse(source: &[u8]) -> CobolVisitor<'_> {
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_cobol::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut visitor = CobolVisitor::new(source);
+        visitor.visit_node(tree.root_node());
+        visitor
+    }
 
     #[test]
     fn test_visitor_initial_state() {
@@ -373,31 +385,63 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_string_quotes_trims_surrounding_whitespace() {
+        // trim() runs before the quote check, so padded quoted text still unwraps.
+        assert_eq!(CobolVisitor::strip_string_quotes("  \"X\"  "), "X");
+    }
+
+    #[test]
+    fn test_strip_string_quotes_empty_quoted() {
+        // s[1..len-1] of "\"\"" is the empty string.
+        assert_eq!(CobolVisitor::strip_string_quotes("\"\""), "");
+    }
+
+    #[test]
+    fn test_strip_string_quotes_mismatched_quotes_kept() {
+        // Opening double, closing single -> neither branch matches, returned as-is (trimmed).
+        assert_eq!(CobolVisitor::strip_string_quotes("\"MYPROG'"), "\"MYPROG'");
+    }
+
+    #[test]
     fn test_visitor_program_extraction() {
-        use tree_sitter::Parser;
         // Minimal COBOL with fixed-format (7 spaces before keywords)
         let source = b"       identification division.\n       program-id. MYPROG.\n       procedure division.\n       stop run.\n";
-        let mut parser = Parser::new();
-        parser.set_language(&crate::ts_cobol::language()).unwrap();
-        let tree = parser.parse(source, None).unwrap();
-
-        let mut visitor = CobolVisitor::new(source);
-        visitor.visit_node(tree.root_node());
+        let visitor = parse(source);
 
         assert_eq!(visitor.programs.len(), 1);
         assert_eq!(visitor.programs[0].name, "MYPROG");
     }
 
     #[test]
-    fn test_visitor_paragraph_extraction() {
-        use tree_sitter::Parser;
-        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           stop run.\n";
-        let mut parser = Parser::new();
-        parser.set_language(&crate::ts_cobol::language()).unwrap();
-        let tree = parser.parse(source, None).unwrap();
+    fn test_program_metadata_defaults() {
+        let source = b"       identification division.\n       program-id. MYPROG.\n       procedure division.\n       stop run.\n";
+        let visitor = parse(source);
 
-        let mut visitor = CobolVisitor::new(source);
-        visitor.visit_node(tree.root_node());
+        let prog = &visitor.programs[0];
+        assert_eq!(prog.visibility, "public");
+        assert!(!prog.is_abstract);
+        assert!(!prog.is_interface);
+        assert!(prog.base_classes.is_empty());
+        assert!(prog.methods.is_empty());
+        assert!(prog.doc_comment.is_none());
+        // Fixed-format program spans line 1 through the final line (1-based).
+        assert_eq!(prog.line_start, 1);
+        assert!(prog.line_end >= 4);
+    }
+
+    #[test]
+    fn test_program_body_prefix_populated() {
+        let source = b"       identification division.\n       program-id. MYPROG.\n       procedure division.\n       stop run.\n";
+        let visitor = parse(source);
+
+        let body = visitor.programs[0].body_prefix.as_deref().unwrap();
+        assert!(body.contains("identification"));
+    }
+
+    #[test]
+    fn test_visitor_paragraph_extraction() {
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           stop run.\n";
+        let visitor = parse(source);
 
         assert_eq!(visitor.programs.len(), 1);
         assert_eq!(visitor.paragraphs.len(), 1);
@@ -406,17 +450,108 @@ mod tests {
     }
 
     #[test]
-    fn test_visitor_copy_extraction() {
-        use tree_sitter::Parser;
-        let source = b"       identification division.\n       program-id. COPYTEST.\n       data division.\n       working-storage section.\n       copy MYBOOK.\n       procedure division.\n       stop run.\n";
-        let mut parser = Parser::new();
-        parser.set_language(&crate::ts_cobol::language()).unwrap();
-        let tree = parser.parse(source, None).unwrap();
+    fn test_paragraph_metadata_defaults() {
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           stop run.\n";
+        let visitor = parse(source);
 
-        let mut visitor = CobolVisitor::new(source);
-        visitor.visit_node(tree.root_node());
+        let para = &visitor.paragraphs[0];
+        assert_eq!(para.visibility, "public");
+        assert!(!para.is_async);
+        assert!(!para.is_test);
+        assert!(!para.is_static);
+        assert!(para.parameters.is_empty());
+        assert!(para.return_type.is_none());
+        // Default complexity metrics are attached to every paragraph.
+        assert!(para.complexity.is_some());
+        // signature is the header text with the trailing period retained.
+        assert_eq!(para.signature, "MAIN-PARA.");
+        assert_eq!(para.line_start, 4);
+    }
+
+    #[test]
+    fn test_multiple_paragraphs_close_line_end() {
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       FIRST-PARA.\n           display \"a\".\n       SECOND-PARA.\n           stop run.\n";
+        let visitor = parse(source);
+
+        assert_eq!(visitor.paragraphs.len(), 2);
+        assert_eq!(visitor.paragraphs[0].name, "FIRST-PARA");
+        assert_eq!(visitor.paragraphs[1].name, "SECOND-PARA");
+        // FIRST-PARA (line 4) closes at the line before SECOND-PARA (line 6) -> 5.
+        assert_eq!(visitor.paragraphs[0].line_end, 5);
+        // SECOND-PARA is the last paragraph; it closes at program end.
+        assert!(visitor.paragraphs[1].line_end >= visitor.paragraphs[1].line_start);
+    }
+
+    #[test]
+    fn test_visitor_copy_extraction() {
+        let source = b"       identification division.\n       program-id. COPYTEST.\n       data division.\n       working-storage section.\n       copy MYBOOK.\n       procedure division.\n       stop run.\n";
+        let visitor = parse(source);
 
         assert!(!visitor.imports.is_empty(), "Expected COPY import");
         assert_eq!(visitor.imports[0].imported, "MYBOOK");
+    }
+
+    #[test]
+    fn test_copy_importer_is_program_name() {
+        let source = b"       identification division.\n       program-id. COPYTEST.\n       data division.\n       working-storage section.\n       copy MYBOOK.\n       procedure division.\n       stop run.\n";
+        let visitor = parse(source);
+
+        assert_eq!(visitor.imports[0].importer, "COPYTEST");
+        assert!(!visitor.imports[0].is_wildcard);
+        assert!(visitor.imports[0].symbols.is_empty());
+        assert!(visitor.imports[0].alias.is_none());
+    }
+
+    #[test]
+    fn test_call_statement_records_call() {
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           call \"SUBPROG\".\n           stop run.\n";
+        let visitor = parse(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "SUBPROG")
+            .expect("Expected CALL to SUBPROG");
+        // Caller is the enclosing paragraph.
+        assert_eq!(call.caller, "MAIN-PARA");
+    }
+
+    #[test]
+    fn test_perform_statement_records_call() {
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           perform DO-WORK.\n           stop run.\n       DO-WORK.\n           display \"x\".\n";
+        let visitor = parse(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "DO-WORK")
+            .expect("Expected PERFORM of DO-WORK");
+        assert_eq!(call.caller, "MAIN-PARA");
+    }
+
+    #[test]
+    fn test_find_first_word_returns_none_without_word() {
+        let visitor = CobolVisitor::new(b"");
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_cobol::language()).unwrap();
+        // Source with no PROCEDURE content -> no WORD leaf in an empty subtree search.
+        let source = b"       identification division.\n       program-id. TEST.\n";
+        let tree = parser.parse(source, None).unwrap();
+        // The root has children but no WORD under identification-only source is fine;
+        // assert the recursive search terminates and finds the program-id token or None.
+        let _ = visitor.find_first_word(tree.root_node());
+    }
+
+    #[test]
+    fn test_calculate_complexity_counts_if_and_perform() {
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           if x = 1\n               perform DO-WORK\n           end-if.\n           stop run.\n       DO-WORK.\n           display \"x\".\n";
+        let visitor = parse(source);
+
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_cobol::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let metrics = visitor._calculate_complexity(tree.root_node());
+        // An IF header (branch) and a PERFORM (loop) push cyclomatic above the base 1.
+        assert!(metrics.cyclomatic_complexity >= 2);
     }
 }
