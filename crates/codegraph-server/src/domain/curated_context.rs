@@ -499,6 +499,231 @@ mod tests {
         assert_eq!(result.metadata.dependencies_included, 1);
     }
 
+    #[test]
+    fn get_edges_both_direction_reports_edges_in_both_orientations() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::Function, &[("name", "a")]);
+        let b = add_node(&mut g, NodeType::Function, &[("name", "b")]);
+        edge(&mut g, a, b, EdgeType::Calls);
+        edge(&mut g, b, a, EdgeType::Imports);
+
+        let both = get_edges(&g, a, Direction::Both);
+        assert_eq!(both.len(), 2);
+        assert!(both.contains(&(a, b, EdgeType::Calls)));
+        assert!(both.contains(&(b, a, EdgeType::Imports)));
+    }
+
+    #[tokio::test]
+    async fn imports_edge_surfaces_dependency() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let primary = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "handleRequest"),
+                ("path", "/src/a.rs"),
+                ("source", "fn handleRequest() {}"),
+            ],
+        );
+        let dep = add_node(
+            &mut g,
+            NodeType::Module,
+            &[
+                ("name", "config"),
+                ("path", "/src/config.rs"),
+                ("source", "mod config {}"),
+            ],
+        );
+        edge(&mut g, primary, dep, EdgeType::Imports);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "handle", None, 4000, 5)
+            .await
+            .expect("match should produce a result");
+
+        assert_eq!(result.dependencies.len(), 1);
+        assert_eq!(result.dependencies[0].name, "config");
+        assert_eq!(result.dependencies[0].relationship, "imports");
+    }
+
+    #[tokio::test]
+    async fn non_import_call_edge_is_not_a_dependency() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let primary = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "handleRequest"),
+                ("path", "/src/a.rs"),
+                ("source", "fn handleRequest() {}"),
+            ],
+        );
+        let other = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "sibling"), ("path", "/src/b.rs")],
+        );
+        // References is neither Imports nor Calls, so it must not surface as a dep.
+        edge(&mut g, primary, other, EdgeType::References);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "handle", None, 4000, 5)
+            .await
+            .expect("match should produce a result");
+
+        assert!(result.dependencies.is_empty());
+        assert_eq!(result.metadata.dependencies_included, 0);
+    }
+
+    #[tokio::test]
+    async fn max_symbols_caps_returned_symbols() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        for name in ["handleAlpha", "handleBeta", "handleGamma"] {
+            add_node(
+                &mut g,
+                NodeType::Function,
+                &[
+                    ("name", name),
+                    (
+                        "path",
+                        Box::leak(format!("/src/{name}.rs").into_boxed_str()),
+                    ),
+                ],
+            );
+        }
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "handle", None, 4000, 2)
+            .await
+            .expect("matches should produce a result");
+
+        assert_eq!(result.symbols.len(), 2);
+        assert_eq!(result.metadata.symbols_included, 2);
+        // All three still counted in the pre-cap search total.
+        assert!(result.metadata.symbols_found >= 3);
+    }
+
+    #[tokio::test]
+    async fn oversized_dependency_source_is_omitted_but_listed() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let primary = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "handleRequest"),
+                ("path", "/src/a.rs"),
+                ("source", "fn handleRequest() {}"),
+            ],
+        );
+        // dep_budget = 4000*25/100 = 1000; omitted when code_tokens (len/4) > 1000/3 ≈ 333,
+        // i.e. source longer than ~1332 chars.
+        let big_source = "x".repeat(2000);
+        let dep = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "helper"),
+                ("path", "/src/b.rs"),
+                ("source", Box::leak(big_source.into_boxed_str())),
+            ],
+        );
+        edge(&mut g, primary, dep, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "handle", None, 4000, 5)
+            .await
+            .expect("match should produce a result");
+
+        assert_eq!(result.dependencies.len(), 1);
+        assert_eq!(result.dependencies[0].name, "helper");
+        // Oversized source is dropped to keep the budget, but the dependency is still listed.
+        assert!(result.dependencies[0].code.is_none());
+    }
+
+    #[tokio::test]
+    async fn only_one_dependency_per_primary_symbol() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let primary = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "handleRequest"),
+                ("path", "/src/a.rs"),
+                ("source", "fn handleRequest() {}"),
+            ],
+        );
+        let dep1 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "helperOne"), ("path", "/src/b.rs")],
+        );
+        let dep2 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "helperTwo"), ("path", "/src/c.rs")],
+        );
+        edge(&mut g, primary, dep1, EdgeType::Calls);
+        edge(&mut g, primary, dep2, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "handle", None, 4000, 5)
+            .await
+            .expect("match should produce a result");
+
+        // Despite two Calls edges, only one dependency is processed per primary symbol.
+        assert_eq!(result.dependencies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_dependency_is_deduplicated_across_primaries() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let p1 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "handleAlpha"),
+                ("path", "/src/a.rs"),
+                ("source", "fn handleAlpha() {}"),
+            ],
+        );
+        let p2 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "handleBeta"),
+                ("path", "/src/b.rs"),
+                ("source", "fn handleBeta() {}"),
+            ],
+        );
+        let shared = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", "sharedHelper"),
+                ("path", "/src/c.rs"),
+                ("source", "fn sharedHelper() {}"),
+            ],
+        );
+        edge(&mut g, p1, shared, EdgeType::Calls);
+        edge(&mut g, p2, shared, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "handle", None, 4000, 5)
+            .await
+            .expect("matches should produce a result");
+
+        assert_eq!(result.symbols.len(), 2);
+        // The shared dependency is only recorded once thanks to seen_dep_ids.
+        assert_eq!(result.dependencies.len(), 1);
+        assert_eq!(result.dependencies[0].name, "sharedHelper");
+    }
+
     #[tokio::test]
     async fn anchor_path_sorts_anchor_file_first() {
         let mut g = CodeGraph::in_memory().expect("in_memory");
