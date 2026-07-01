@@ -661,4 +661,134 @@ body {
         assert_eq!(visitor.functions.len(), 1);
         assert_eq!(visitor.functions[0].name, ".container");
     }
+
+    #[test]
+    fn test_unquoted_url_import_is_dropped() {
+        // @import url(foo.css); — the argument parses as a plain_value, not a
+        // string_value, so extract_url_path finds no path and no import is pushed.
+        let source = b"@import url(foo.css);";
+        let visitor = parse_and_visit(source);
+
+        assert!(
+            visitor.imports.is_empty(),
+            "unquoted url() argument should yield no import, got: {:?}",
+            visitor.imports
+        );
+    }
+
+    #[test]
+    fn test_signature_equals_selector_name() {
+        let source = b".btn:hover {\n    background: blue;\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, ".btn:hover");
+        assert_eq!(f.signature, f.name);
+    }
+
+    #[test]
+    fn test_rule_line_end_spans_full_block() {
+        let source = b".card {\n    color: red;\n    padding: 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert_eq!(f.line_start, 1);
+        // closing brace is on the 4th line
+        assert_eq!(f.line_end, 4);
+    }
+
+    #[test]
+    fn test_grouped_selector_kept_as_single_rule() {
+        let source = b"h1, h2 {\n    color: red;\n}";
+        let visitor = parse_and_visit(source);
+
+        // A comma-grouped selector is one `selectors` node → one function, verbatim.
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "h1, h2");
+    }
+
+    #[test]
+    fn test_body_prefix_contains_block_text() {
+        let source = b".box {\n    color: red;\n}";
+        let visitor = parse_and_visit(source);
+
+        let body = visitor.functions[0]
+            .body_prefix
+            .as_ref()
+            .expect("expected body_prefix");
+        // Short blocks are not truncated: the braces and declaration are present.
+        assert!(body.contains("color: red"));
+        assert!(body.starts_with('{'));
+    }
+
+    #[test]
+    fn test_pseudo_element_selector_preserved() {
+        let source = b".tooltip::before {\n    content: \"\";\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, ".tooltip::before");
+    }
+
+    #[test]
+    fn test_empty_block_rule_still_extracted() {
+        let source = b".empty {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, ".empty");
+        // an empty `{}` block still yields a body_prefix of the braces
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_nested_rule_inside_rule_set_not_extracted() {
+        // rule_set is treated as a leaf (no recursion), so a CSS-nested rule
+        // inside another rule_set is dropped — only the outer selector is kept.
+        let source = b".card {\n    color: red;\n    .inner { color: blue; }\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, ".card");
+    }
+
+    #[test]
+    fn test_import_with_trailing_media_query_records_path() {
+        // @import "x.css" screen; — the string_value is matched first and the
+        // trailing media query is ignored.
+        let source = b"@import \"print.css\" print;";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "print.css");
+    }
+
+    #[test]
+    fn test_media_rule_body_prefix_and_line_end() {
+        let source = br#"@media (max-width: 768px) {
+    .container {
+        padding: 0;
+        margin: 0;
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        // nested rule spans lines 2..5 (1-based)
+        assert_eq!(f.line_start, 2);
+        assert_eq!(f.line_end, 5);
+        assert!(f.body_prefix.as_ref().unwrap().contains("padding: 0"));
+    }
+
+    #[test]
+    fn test_multiple_top_level_rules_source_order() {
+        let source = br#"a { color: red; }
+b { color: green; }
+c { color: blue; }
+"#;
+        let visitor = parse_and_visit(source);
+        let names: Vec<_> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
 }
