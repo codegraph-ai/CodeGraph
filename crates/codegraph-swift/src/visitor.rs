@@ -1690,4 +1690,229 @@ func greet() { }
             .expect("body_prefix missing");
         assert!(prefix.contains("let x = 42"));
     }
+
+    #[test]
+    fn test_class_base_then_protocol_split() {
+        // First inheritance entry is treated as the superclass, the rest as protocols.
+        let source = b"class Animal {}\nprotocol Runnable {}\nclass Dog: Animal, Runnable {}";
+        let visitor = parse_and_visit(source);
+        let dog = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Dog")
+            .expect("Dog not found");
+        assert!(
+            dog.base_classes.contains(&"Animal".to_string()),
+            "expected Animal as base, got {:?}",
+            dog.base_classes
+        );
+        assert!(
+            dog.implemented_traits.contains(&"Runnable".to_string()),
+            "expected Runnable as implemented trait, got {:?}",
+            dog.implemented_traits
+        );
+        assert!(
+            visitor
+                .implementations
+                .iter()
+                .any(|i| i.implementor == "Dog" && i.trait_name == "Runnable"),
+            "expected an implementation relation Dog->Runnable"
+        );
+    }
+
+    #[test]
+    fn test_multiple_protocol_conformance() {
+        // A class conforming to several protocols records all-but-the-first as traits.
+        let source = b"class C: A, B, D {}";
+        let visitor = parse_and_visit(source);
+        let c = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "C")
+            .expect("C not found");
+        assert!(c.base_classes.contains(&"A".to_string()));
+        assert!(c.implemented_traits.contains(&"B".to_string()));
+        assert!(c.implemented_traits.contains(&"D".to_string()));
+    }
+
+    #[test]
+    fn test_protocol_required_methods_are_abstract() {
+        let source = b"protocol Drawable {\n    func draw()\n    func erase()\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.traits.len(), 1);
+        let methods = &visitor.traits[0].required_methods;
+        assert!(
+            methods.iter().any(|m| m.name == "draw"),
+            "expected a required draw method, got {:?}",
+            methods.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+        assert!(
+            methods.iter().all(|m| m.is_abstract),
+            "protocol required methods should be abstract"
+        );
+    }
+
+    #[test]
+    fn test_protocol_inheritance_parent_traits_gap() {
+        // Gap: protocol-to-protocol inheritance is never recorded as parent_traits.
+        let source = b"protocol Base {}\nprotocol Sub: Base {}";
+        let visitor = parse_and_visit(source);
+        let sub = visitor
+            .traits
+            .iter()
+            .find(|t| t.name == "Sub")
+            .expect("Sub not found");
+        assert!(
+            sub.parent_traits.is_empty(),
+            "parent_traits is structurally never populated for Swift protocols"
+        );
+    }
+
+    #[test]
+    fn test_extension_conformance_misclassified_as_base_class() {
+        // Gap: tree-sitter-swift parses `extension` as a class_declaration, so it
+        // is routed through visit_class (visit_extension is dead code). The first
+        // conformance is then treated as a superclass rather than a protocol, so
+        // it lands in base_classes/inheritance instead of implementations.
+        let source = b"extension String: CustomStringConvertible {}";
+        let visitor = parse_and_visit(source);
+        let ext = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "String")
+            .expect("extension entity not found");
+        assert!(
+            ext.base_classes
+                .contains(&"CustomStringConvertible".to_string()),
+            "expected conformance recorded as a base class, got {:?}",
+            ext.base_classes
+        );
+        assert!(
+            !visitor
+                .implementations
+                .iter()
+                .any(|i| i.implementor == "String"),
+            "extension conformance is not recorded as an implementation relation"
+        );
+    }
+
+    #[test]
+    fn test_private_visibility() {
+        let source = b"private func secret() { }";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_open_class_visibility() {
+        let source = b"open class Base { }";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].visibility, "open");
+    }
+
+    #[test]
+    fn test_class_doc_comment_extracted() {
+        let source = br#"/// A person model
+class Person { }
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(
+            visitor.classes[0].doc_comment.as_deref(),
+            Some("/// A person model")
+        );
+    }
+
+    #[test]
+    fn test_class_body_prefix_captured() {
+        let source = br#"class Config {
+    var name: String = "default"
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        let prefix = visitor.classes[0]
+            .body_prefix
+            .as_ref()
+            .expect("class body_prefix missing");
+        assert!(prefix.contains("name"));
+    }
+
+    #[test]
+    fn test_required_init_attribute() {
+        let source = br#"
+class Model {
+    required init() { }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let init = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "init")
+            .expect("init not found");
+        assert!(init.attributes.contains(&"required".to_string()));
+    }
+
+    #[test]
+    fn test_nested_class_extraction() {
+        let source = br#"
+class Outer {
+    class Inner { }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.classes.iter().any(|c| c.name == "Outer"),
+            "Outer not found"
+        );
+        assert!(
+            visitor.classes.iter().any(|c| c.name == "Inner"),
+            "nested Inner not found, got {:?}",
+            visitor.classes.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_class_keyword_method_not_marked_static_gap() {
+        // Gap: `class func` (a type-level method) is not marked static because the
+        // `class` keyword is a bare child of function_declaration, not inside a
+        // `modifiers` node, so has_modifier never sees it. A `static func` is.
+        let source = br#"
+class Factory {
+    class func make() -> Int { return 0 }
+    static func build() -> Int { return 1 }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let make = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "make")
+            .expect("make not found");
+        assert!(!make.is_static, "`class func` is not detected as static");
+        let build = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "build")
+            .expect("build not found");
+        assert!(build.is_static, "`static func` should be static");
+    }
+
+    #[test]
+    fn test_optional_return_type_extracted() {
+        let source = b"func find() -> String? { return nil }";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let ret = visitor.functions[0]
+            .return_type
+            .as_deref()
+            .expect("optional return type missing");
+        assert!(
+            ret.contains("String"),
+            "expected optional return type to contain String, got {ret}"
+        );
+    }
 }
