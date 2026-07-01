@@ -48,6 +48,16 @@ mod tests {
     }
 
     #[test]
+    fn serializes_to_exact_snake_case_wire_format() {
+        let t = TypeReference::new("buildGraph", "DependencyGraphParams", 12);
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(
+            json,
+            r#"{"referrer":"buildGraph","type_name":"DependencyGraphParams","line_number":12}"#
+        );
+    }
+
+    #[test]
     fn accepts_string_and_str_inputs() {
         let t = TypeReference::new(String::from("f"), "T", 1);
         assert_eq!(t.referrer, "f");
