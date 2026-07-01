@@ -613,4 +613,115 @@ mod tests {
         assert!(visitor.imports.is_empty());
         assert!(visitor.calls.is_empty());
     }
+
+    #[test]
+    fn test_function_line_numbers() {
+        // Leading newline pushes the function onto line 2.
+        let source = b"\npub fn add(a: i32) i32 {\n    return a;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].line_start, 2);
+        assert_eq!(visitor.functions[0].line_end, 4);
+    }
+
+    #[test]
+    fn test_function_default_flags() {
+        let source = b"pub fn add(a: i32) i32 {\n    return a;\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+    }
+
+    #[test]
+    fn test_signature_is_first_line_only() {
+        let source = b"pub fn add(\n    a: i32,\n    b: i32,\n) i32 {\n    return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].signature, "pub fn add(");
+    }
+
+    #[test]
+    fn test_body_prefix_content() {
+        let source = b"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let prefix = visitor.functions[0]
+            .body_prefix
+            .as_deref()
+            .expect("body prefix present");
+        assert!(prefix.contains("return"));
+    }
+
+    #[test]
+    fn test_loop_complexity() {
+        let source =
+            b"pub fn f() void {\n    var i: usize = 0;\n    while (i < 10) {\n        i += 1;\n    }\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_switch_complexity() {
+        let source =
+            b"pub fn f(a: i32) i32 {\n    switch (a) {\n        0 => return 1,\n        else => return 0,\n    }\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_logical_operator_complexity() {
+        let source = b"pub fn f(a: bool, b: bool) bool {\n    return a and b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_multiple_imports() {
+        let source = b"const std = @import(\"std\");\nconst builtin = @import(\"builtin\");";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 2);
+        assert_eq!(visitor.imports[0].imported, "std");
+        assert_eq!(visitor.imports[1].imported, "builtin");
+    }
+
+    #[test]
+    fn test_struct_doc_comment() {
+        let source = b"/// A 2D point.\nconst Point = struct {\n    x: i32,\n};";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(
+            visitor.classes[0].doc_comment.as_deref(),
+            Some("/// A 2D point.")
+        );
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = b"pub fn one() i32 {\n    return 1;\n}\npub fn two() i32 {\n    return 2;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "one");
+        assert_eq!(visitor.functions[1].name, "two");
+    }
 }
