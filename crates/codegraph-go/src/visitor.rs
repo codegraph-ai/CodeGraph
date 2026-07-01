@@ -1470,4 +1470,169 @@ func handle(x int, ch chan int) {
         assert_eq!(visitor.interfaces[0].line_start, 3);
         assert_eq!(visitor.interfaces[0].line_end, 5);
     }
+
+    #[test]
+    fn test_struct_fields_always_empty() {
+        // Latent gap: struct fields are never populated even when declared.
+        let source = b"package main\ntype Point struct {\n\tX int\n\tY string\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.structs.len(), 1);
+        assert!(
+            visitor.structs[0].fields.is_empty(),
+            "GoVisitor never extracts struct fields (hardcoded empty)"
+        );
+    }
+
+    #[test]
+    fn test_struct_methods_and_bases_always_empty() {
+        // Latent gap: methods, base_classes, and type_parameters are never
+        // populated on a struct entity regardless of the source.
+        let source = b"package main\ntype T[K comparable] struct {\n\tK K\n}";
+        let visitor = parse_and_visit(source);
+        let s = &visitor.structs[0];
+        assert!(s.methods.is_empty());
+        assert!(s.base_classes.is_empty());
+        assert!(s.implemented_traits.is_empty());
+        assert!(s.type_parameters.is_empty());
+        assert!(!s.is_interface);
+        assert!(!s.is_abstract);
+    }
+
+    #[test]
+    fn test_struct_visibility_always_public() {
+        // Pin: struct visibility is hardcoded "public", ignoring Go's
+        // export rule (an unexported lowercase struct still reads as public).
+        let source = b"package main\ntype point struct {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.structs.len(), 1);
+        assert_eq!(visitor.structs[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_struct_body_prefix_truncated() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // An oversized struct body is truncated to the cap.
+        let fields = (0..400)
+            .map(|i| format!("\tField{i} int\n"))
+            .collect::<String>();
+        let source = format!("package main\ntype Big struct {{\n{fields}}}");
+        let visitor = parse_and_visit(source.as_bytes());
+        assert_eq!(visitor.structs.len(), 1);
+        let body_prefix = visitor.structs[0].body_prefix.as_ref().unwrap();
+        assert_eq!(body_prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_interface_required_methods_always_empty() {
+        // Latent gap: interface methods are never captured as required_methods.
+        let source =
+            b"package main\ntype Writer interface {\n\tWrite(p []byte) (int, error)\n\tClose() error\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.interfaces.len(), 1);
+        assert!(
+            visitor.interfaces[0].required_methods.is_empty(),
+            "GoVisitor never populates interface required_methods (hardcoded empty)"
+        );
+    }
+
+    #[test]
+    fn test_interface_embedding_parent_traits_empty() {
+        // Latent gap: an embedded interface is never recorded as a parent trait.
+        let source = b"package main\ntype ReadCloser interface {\n\tReader\n\tClose() error\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.interfaces.len(), 1);
+        assert!(
+            visitor.interfaces[0].parent_traits.is_empty(),
+            "embedded interfaces are not recorded as parent_traits"
+        );
+    }
+
+    #[test]
+    fn test_type_alias_produces_no_entity() {
+        // Only struct_type/interface_type are handled; a named basic type
+        // like `type ID int` yields neither a struct nor an interface.
+        let source = b"package main\ntype ID int";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.structs.is_empty());
+        assert!(visitor.interfaces.is_empty());
+    }
+
+    #[test]
+    fn test_unnamed_parameter_has_empty_name() {
+        // A type-only parameter (`func f(int)`) yields one param with an
+        // empty name but a preserved type annotation.
+        let source = b"package main\nfunc f(int) {}";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.parameters.len(), 1);
+        assert_eq!(f.parameters[0].name, "");
+        assert_eq!(f.parameters[0].type_annotation.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_type_switch_raises_complexity() {
+        // A type switch's cases each add a branch, raising complexity.
+        let source = br#"package main
+func classify(x interface{}) {
+    switch x.(type) {
+    case int:
+        return
+    case string:
+        return
+    default:
+        return
+    }
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        let complexity = f.complexity.as_ref().unwrap();
+        assert!(
+            complexity.branches >= 3,
+            "type switch with 3 cases should add >= 3 branches, got {}",
+            complexity.branches
+        );
+    }
+
+    #[test]
+    fn test_return_type_qualified_type_ref() {
+        // A qualified return type (io.Writer) records the field portion.
+        let source = b"package main\nfunc open() io.Writer { return nil }";
+        let visitor = parse_and_visit(source);
+        let refs: Vec<_> = visitor
+            .type_references
+            .iter()
+            .filter(|r| r.referrer == "open")
+            .collect();
+        assert!(
+            refs.iter().any(|r| r.type_name == "Writer"),
+            "open should reference Writer from io.Writer, got: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn test_method_is_test_always_false() {
+        // Pin: is_test is hardcoded false for methods, even a Test-prefixed
+        // receiver method (Go test functions are never methods anyway).
+        let source = b"package main\ntype S struct{}\nfunc (s S) TestThing() {}";
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "TestThing")
+            .unwrap();
+        assert!(!m.is_test, "method is_test is always false");
+        assert_eq!(m.parent_class.as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn test_call_in_func_literal_dropped() {
+        // Latent gap: a call inside a top-level func literal has no enclosing
+        // named function, so current_function is None and the call is dropped.
+        let source = b"package main\nvar f = func() {\n\thelper()\n}\nfunc helper() {}";
+        let visitor = parse_and_visit(source);
+        assert!(
+            !visitor.calls.iter().any(|c| c.callee == "helper"),
+            "call inside a top-level func literal should be dropped (no caller)"
+        );
+    }
 }
