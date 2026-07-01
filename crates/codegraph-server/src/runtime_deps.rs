@@ -562,6 +562,127 @@ mod tests {
         assert_eq!(extract_http_method_from_name("http.put"), "PUT");
         assert_eq!(extract_http_method_from_name("fetch"), "ANY");
         assert_eq!(extract_http_method_from_name("http.NewRequest"), "ANY");
+        // `::`-separated (Rust) names take the last `::` segment as the method.
+        assert_eq!(extract_http_method_from_name("reqwest::get"), "GET");
+        assert_eq!(extract_http_method_from_name("Client::delete"), "DELETE");
+        assert_eq!(extract_http_method_from_name("httpx.patch"), "PATCH");
+    }
+
+    #[test]
+    fn test_detect_http_client_calls_via_unresolved() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // A function whose unresolved_calls names a known HTTP client function.
+        let props = PropertyMap::new()
+            .with("name", "fetch_data")
+            .with("unresolved_calls", "requests.get");
+        let node_id = graph.add_node(NodeType::Function, props).unwrap();
+
+        let count = detect_http_client_calls(&mut graph);
+        assert_eq!(count, 1);
+
+        let node = graph.get_node(node_id).unwrap();
+        assert_eq!(node.properties.get_string("http_client_call"), Some("true"));
+        assert_eq!(
+            node.properties.get_string("http_client_method"),
+            Some("GET")
+        );
+    }
+
+    #[test]
+    fn test_detect_http_client_calls_via_calls_edge() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // A caller wired to a callee named after a known HTTP client function
+        // through a resolved Calls edge (the second detection branch).
+        let caller = graph
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new().with("name", "caller"),
+            )
+            .unwrap();
+        let callee = graph
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new().with("name", "axios.post"),
+            )
+            .unwrap();
+        graph
+            .add_edge(caller, callee, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let count = detect_http_client_calls(&mut graph);
+        assert_eq!(count, 1);
+
+        let node = graph.get_node(caller).unwrap();
+        assert_eq!(
+            node.properties.get_string("http_client_method"),
+            Some("POST")
+        );
+    }
+
+    #[test]
+    fn test_detect_http_client_calls_ignores_non_http() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // A function calling something that is not a known HTTP client function.
+        let props = PropertyMap::new()
+            .with("name", "compute")
+            .with("unresolved_calls", "std.mem.copy");
+        graph.add_node(NodeType::Function, props).unwrap();
+
+        assert_eq!(detect_http_client_calls(&mut graph), 0);
+    }
+
+    #[test]
+    fn test_create_runtime_call_edges_matches_client_to_route() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // Route handler for /api/users.
+        let handler = graph
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new()
+                    .with("name", "get_users")
+                    .with("route", "/api/users"),
+            )
+            .unwrap();
+        // Client caller whose inline source fetches that path.
+        let caller = graph
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new()
+                    .with("name", "load_users")
+                    .with("http_client_call", "true")
+                    .with("source", "async () => { await fetch(\"/api/users\"); }"),
+            )
+            .unwrap();
+
+        let count = create_runtime_call_edges(&mut graph);
+        assert_eq!(count, 1);
+
+        // The edge is a RuntimeCalls edge from caller to handler with an exact match.
+        let edge = graph
+            .iter_edges()
+            .find(|(_, e)| e.edge_type == EdgeType::RuntimeCalls)
+            .map(|(_, e)| e.clone())
+            .expect("RuntimeCalls edge");
+        assert_eq!(edge.source_id, caller);
+        assert_eq!(edge.target_id, handler);
+        assert_eq!(edge.properties.get_string("match_type"), Some("exact"));
+    }
+
+    #[test]
+    fn test_create_runtime_call_edges_no_routes_returns_zero() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // A client caller but no route handlers at all.
+        graph
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new()
+                    .with("name", "load")
+                    .with("http_client_call", "true")
+                    .with("source", "fetch(\"/x\")"),
+            )
+            .unwrap();
+
+        assert_eq!(create_runtime_call_edges(&mut graph), 0);
     }
 
     #[test]
@@ -638,6 +759,7 @@ fn test_normalize_route() {
 fn test_route_pattern_matches() {
     assert!(route_pattern_matches("/users/{id}", "/users/123"));
     assert!(route_pattern_matches("/users/:id", "/users/456"));
+    assert!(route_pattern_matches("/users/<id>", "/users/789")); // Flask-style
     assert!(route_pattern_matches("/api/items", "/api/items"));
     assert!(!route_pattern_matches("/users/{id}", "/posts/123"));
     assert!(!route_pattern_matches("/users/{id}/posts", "/users/123"));
