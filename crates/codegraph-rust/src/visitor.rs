@@ -9,7 +9,7 @@
 use codegraph_parser_api::{
     truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, Field,
     FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
-    ParserConfig, TraitEntity, TypeReference, BODY_PREFIX_MAX_CHARS,
+    ParserConfig, TraitEntity, TypeReference,
 };
 use tree_sitter::Node;
 
@@ -318,7 +318,7 @@ impl<'a> RustVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -409,7 +409,7 @@ impl<'a> RustVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class = ClassEntity {
@@ -450,7 +450,7 @@ impl<'a> RustVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class = ClassEntity {
@@ -621,7 +621,7 @@ impl<'a> RustVisitor<'a> {
                             .child_by_field_name("body")
                             .and_then(|b| b.utf8_text(self.source).ok())
                             .filter(|t| !t.is_empty())
-                            .map(|t| truncate_body_prefix(t))
+                            .map(truncate_body_prefix)
                             .map(|t| t.to_string()),
                     };
 
@@ -2193,5 +2193,115 @@ fn add(a: i32, b: u64) -> f64 { 0.0 }
             "Primitive types should not produce type references, got {:?}",
             visitor.type_references
         );
+    }
+
+    #[test]
+    fn test_is_ident_start_classifies_bytes() {
+        // ASCII letters and underscore start identifiers.
+        assert!(is_ident_start(b'a'));
+        assert!(is_ident_start(b'Z'));
+        assert!(is_ident_start(b'_'));
+        // Digits do NOT start an identifier (unlike continue), nor does punctuation/whitespace.
+        assert!(!is_ident_start(b'0'));
+        assert!(!is_ident_start(b'9'));
+        assert!(!is_ident_start(b'('));
+        assert!(!is_ident_start(b'.'));
+        assert!(!is_ident_start(b' '));
+        assert!(!is_ident_start(b':'));
+    }
+
+    #[test]
+    fn test_is_ident_continue_classifies_bytes() {
+        // Letters, digits, and underscore continue an identifier.
+        assert!(is_ident_continue(b'a'));
+        assert!(is_ident_continue(b'Z'));
+        assert!(is_ident_continue(b'_'));
+        assert!(is_ident_continue(b'0'));
+        assert!(is_ident_continue(b'7'));
+        // Punctuation and whitespace terminate an identifier scan.
+        assert!(!is_ident_continue(b'('));
+        assert!(!is_ident_continue(b'.'));
+        assert!(!is_ident_continue(b' '));
+        assert!(!is_ident_continue(b':'));
+        assert!(!is_ident_continue(b'-'));
+    }
+
+    #[test]
+    fn test_is_builtin_rust_type_matches_primitives_and_std() {
+        // Integer/float/scalar primitives.
+        for t in [
+            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+            "f32", "f64", "bool", "char", "str",
+        ] {
+            assert!(
+                RustVisitor::is_builtin_rust_type(t),
+                "{t} should be a builtin"
+            );
+        }
+        // Common std container/wrapper types treated as builtins for filtering.
+        for t in [
+            "String",
+            "Vec",
+            "Option",
+            "Result",
+            "Box",
+            "Rc",
+            "Arc",
+            "HashMap",
+            "HashSet",
+            "BTreeMap",
+            "BTreeSet",
+            "Cow",
+            "PhantomData",
+            "Cell",
+            "RefCell",
+            "Mutex",
+            "RwLock",
+            "Self",
+        ] {
+            assert!(
+                RustVisitor::is_builtin_rust_type(t),
+                "{t} should be a builtin"
+            );
+        }
+        // User-defined / non-listed names are not builtins.
+        for t in [
+            "MyStruct", "Report", "Error", "vec", "string", "i33", "", "u",
+        ] {
+            assert!(
+                !RustVisitor::is_builtin_rust_type(t),
+                "{t:?} should NOT be a builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn test_macro_call_scan_filters_keywords_and_self() {
+        // The heuristic token scanner over macro bodies must NOT emit calls for
+        // control-flow keywords or `self`/`Self` receivers, only for real callees.
+        let source = r#"
+fn outer() {
+    guard! {
+        if (cond) { while (x) { real_call(); } }
+        match (y) { _ => return () }
+        self.method();
+        Self::assoc();
+    }
+}
+
+fn real_call() {}
+"#;
+        let visitor = parse_and_visit(source);
+        let callees: Vec<&str> = visitor.calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(
+            callees.contains(&"real_call"),
+            "real callee should be extracted, got {callees:?}"
+        );
+        for kw in ["if", "while", "match", "return", "self", "Self"] {
+            assert!(
+                !callees.contains(&kw),
+                "keyword/self `{kw}` must not be treated as a callee, got {callees:?}"
+            );
+        }
     }
 }
