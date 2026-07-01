@@ -5112,6 +5112,39 @@ mod quarantine_tests {
     }
 
     #[test]
+    fn classify_tool_error_covers_every_or_branch_phrase() {
+        use super::classify_tool_error;
+        // Each category is an OR of several `contains` phrases; the sibling test
+        // only exercises one phrase per arm. Pin the remaining phrases so every
+        // short-circuit branch is covered.
+        // not_indexed: the "no index" phrase (distinct from "not indexed").
+        assert_eq!(classify_tool_error("there is no index here"), "not_indexed");
+        // not_found: the bare "not found" and "no results" phrases.
+        assert_eq!(classify_tool_error("symbol not found"), "not_found");
+        assert_eq!(
+            classify_tool_error("query returned no results"),
+            "not_found"
+        );
+        // invalid_params: the three phrases the sibling test skipped.
+        assert_eq!(
+            classify_tool_error("invalid file path given"),
+            "invalid_params"
+        );
+        assert_eq!(classify_tool_error("invalid param value"), "invalid_params");
+        assert_eq!(
+            classify_tool_error("invalid argument supplied"),
+            "invalid_params"
+        );
+        // timeout: the "timeout" spelling (sibling only used "timed out").
+        assert_eq!(classify_tool_error("request timeout"), "timeout");
+        // internal_error: the "panic" phrase (sibling only used "internal error").
+        assert_eq!(
+            classify_tool_error("thread panic in handler"),
+            "internal_error"
+        );
+    }
+
+    #[test]
     fn safe_tool_name_passes_only_wellformed_codegraph_ids() {
         use super::safe_tool_name;
         assert_eq!(
