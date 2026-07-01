@@ -297,6 +297,126 @@ mod tests {
     }
 
     #[test]
+    fn test_property_value_int32_and_owned_string_conversions() {
+        // i32 is widened to Int(i64)
+        let i: PropertyValue = 7i32.into();
+        assert!(matches!(i, PropertyValue::Int(7)));
+
+        // owned String uses the From<String> impl (distinct from From<&str>)
+        let owned: String = "owned".to_string();
+        let s: PropertyValue = owned.into();
+        assert!(matches!(s, PropertyValue::String(ref v) if v == "owned"));
+
+        // Vec<i64> maps to IntList via From
+        let list: PropertyValue = vec![1i64, 2i64].into();
+        assert!(matches!(list, PropertyValue::IntList(ref v) if v.len() == 2));
+    }
+
+    #[test]
+    fn test_get_float_and_wrong_type() {
+        let props = PropertyMap::new()
+            .with("score", 0.75f64)
+            .with("name", "fn");
+
+        assert_eq!(props.get_float("score"), Some(0.75));
+        // Non-float value returns None (no coercion)
+        assert_eq!(props.get_float("name"), None);
+        // Missing key returns None
+        assert_eq!(props.get_float("missing"), None);
+    }
+
+    #[test]
+    fn test_len_and_is_empty() {
+        let empty = PropertyMap::new();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+
+        let props = PropertyMap::new().with("a", 1i64).with("b", 2i64);
+        assert_eq!(props.len(), 2);
+        assert!(!props.is_empty());
+    }
+
+    #[test]
+    fn test_iter_yields_all_entries() {
+        let props = PropertyMap::new().with("a", 1i64).with("b", "x");
+        let mut keys: Vec<&String> = props.iter().map(|(k, _)| k).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["a", "b"]);
+        assert_eq!(props.iter().count(), 2);
+    }
+
+    #[test]
+    fn test_from_iterator() {
+        let props: PropertyMap = vec![
+            ("k1".to_string(), PropertyValue::Int(5)),
+            ("k2".to_string(), PropertyValue::String("v".to_string())),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(props.len(), 2);
+        assert_eq!(props.get_int("k1"), Some(5));
+        assert_eq!(props.get_string("k2"), Some("v"));
+    }
+
+    #[test]
+    fn test_null_variant_getters_return_none() {
+        let mut props = PropertyMap::new();
+        props.insert("nil", PropertyValue::Null);
+
+        // The key exists and holds Null...
+        assert!(props.contains_key("nil"));
+        assert!(matches!(props.get("nil"), Some(PropertyValue::Null)));
+        // ...but every typed getter treats Null as absent.
+        assert_eq!(props.get_string("nil"), None);
+        assert_eq!(props.get_int("nil"), None);
+        assert_eq!(props.get_float("nil"), None);
+        assert_eq!(props.get_bool("nil"), None);
+        assert_eq!(props.get_string_list("nil"), None);
+        assert_eq!(props.get_int_list("nil"), None);
+        assert!(props.get_string_list_compat("nil").is_none());
+    }
+
+    #[test]
+    fn test_wrong_type_list_getters_return_none() {
+        let props = PropertyMap::new().with("n", 3i64);
+        // Asking for list types on a scalar returns None (no coercion)
+        assert_eq!(props.get_string_list("n"), None);
+        assert_eq!(props.get_int_list("n"), None);
+        assert_eq!(props.get_bool("n"), None);
+    }
+
+    #[test]
+    fn test_serde_round_trip() {
+        let props = PropertyMap::new()
+            .with("name", "fn")
+            .with("line", 42i64)
+            .with("score", 1.5f64)
+            .with("is_test", true)
+            .with("tags", vec!["a".to_string(), "b".to_string()])
+            .with("ranges", vec![1i64, 2i64]);
+
+        let json = serde_json::to_string(&props).unwrap();
+        let restored: PropertyMap = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.get_string("name"), Some("fn"));
+        assert_eq!(restored.get_int("line"), Some(42));
+        assert_eq!(restored.get_float("score"), Some(1.5));
+        assert_eq!(restored.get_bool("is_test"), Some(true));
+        assert_eq!(restored.get_string_list("tags").map(|s| s.len()), Some(2));
+        assert_eq!(restored.get_int_list("ranges").map(|l| l.len()), Some(2));
+    }
+
+    #[test]
+    fn test_property_value_null_serde() {
+        // Null is an explicit variant, not dropped on serialization.
+        let v = PropertyValue::Null;
+        let json = serde_json::to_string(&v).unwrap();
+        let restored: PropertyValue = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, PropertyValue::Null));
+    }
+
+    #[test]
     fn test_get_string_list_compat() {
         // StringList variant works directly
         let props = PropertyMap::new().with("symbols", vec!["foo".to_string(), "bar".to_string()]);
