@@ -251,6 +251,64 @@ mod tests {
             weighted_mean_l2(&matrix, Some(&w), &[0, 1], 2, 2, false),
             vec![3.0, 1.0]
         );
+        // empty ids -> zero vector, n stays 0 so no divide-by-zero
+        assert_eq!(
+            weighted_mean_l2(&matrix, None, &[], 2, 2, true),
+            vec![0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn tensor_to_f32_decodes_f32() {
+        let bytes: Vec<u8> = [1.5f32, -2.0, 3.25]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        let t = TensorView::new(Dtype::F32, vec![3], &bytes).unwrap();
+        assert_eq!(tensor_to_f32(&t).unwrap(), vec![1.5, -2.0, 3.25]);
+    }
+
+    #[test]
+    fn tensor_to_f32_decodes_f16() {
+        let bytes: Vec<u8> = [1.0f32, 2.0]
+            .iter()
+            .flat_map(|x| half::f16::from_f32(*x).to_le_bytes())
+            .collect();
+        let t = TensorView::new(Dtype::F16, vec![2], &bytes).unwrap();
+        // f16 represents 1.0 and 2.0 exactly.
+        assert_eq!(tensor_to_f32(&t).unwrap(), vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn tensor_to_f32_decodes_f64() {
+        let bytes: Vec<u8> = [0.5f64, 4.0].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let t = TensorView::new(Dtype::F64, vec![2], &bytes).unwrap();
+        assert_eq!(tensor_to_f32(&t).unwrap(), vec![0.5, 4.0]);
+    }
+
+    #[test]
+    fn tensor_to_f32_rejects_unsupported_dtype() {
+        // I32 is not one of the accepted float dtypes.
+        let bytes: Vec<u8> = 7i32.to_le_bytes().to_vec();
+        let t = TensorView::new(Dtype::I32, vec![1], &bytes).unwrap();
+        let err = tensor_to_f32(&t).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported tensor dtype"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn static_config_defaults_and_overrides() {
+        // Empty object -> normalize defaults true, hidden_dim None.
+        let cfg: StaticConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.normalize);
+        assert_eq!(cfg.hidden_dim, None);
+        // Explicit values are honored; unknown fields ignored.
+        let cfg: StaticConfig =
+            serde_json::from_str(r#"{"normalize": false, "hidden_dim": 256, "extra": 1}"#).unwrap();
+        assert!(!cfg.normalize);
+        assert_eq!(cfg.hidden_dim, Some(256));
     }
 
     fn static_dir(name: &str) -> std::path::PathBuf {
