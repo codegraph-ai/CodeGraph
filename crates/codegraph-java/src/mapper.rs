@@ -192,9 +192,7 @@ pub fn ir_to_graph(
                 method_props = method_props.with("annotations", method.attributes.clone());
             }
             // Detect HTTP handler annotations (Spring MVC, JAX-RS)
-            if let Some((http_method, route)) =
-                detect_java_http_annotation(&method.attributes)
-            {
+            if let Some((http_method, route)) = detect_java_http_annotation(&method.attributes) {
                 method_props = method_props
                     .with("http_method", http_method)
                     .with("route", route)

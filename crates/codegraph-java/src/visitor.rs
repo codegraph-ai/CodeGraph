@@ -4,10 +4,9 @@
 //! AST visitor for extracting Java entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, TraitEntity,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    TraitEntity, BODY_PREFIX_MAX_CHARS,
 };
 use tree_sitter::Node;
 
@@ -181,9 +180,7 @@ impl<'a> JavaVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -309,9 +306,7 @@ impl<'a> JavaVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let enum_entity = ClassEntity {
@@ -375,9 +370,7 @@ impl<'a> JavaVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let record_entity = ClassEntity {
@@ -450,9 +443,7 @@ impl<'a> JavaVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -915,7 +906,9 @@ mod tests {
         use tree_sitter::Parser;
 
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_java::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = JavaVisitor::new(source);
@@ -1281,5 +1274,278 @@ public class Resource {
             complexity.exception_handlers
         );
         assert!(complexity.cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_visitor_method_line_numbers() {
+        // line_start/line_end are 1-indexed and offset by leading blank lines
+        let source = b"
+
+public class Widget {
+    public void run() {
+        int x = 1;
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let func = &visitor.functions[0];
+        assert_eq!(func.line_start, 4);
+        assert_eq!(func.line_end, 6);
+    }
+
+    #[test]
+    fn test_visitor_method_default_flags() {
+        // A plain instance method has all boolean flags false and package visibility
+        let source = b"class Box { void plain() {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let func = &visitor.functions[0];
+        assert!(!func.is_async);
+        assert!(!func.is_static);
+        assert!(!func.is_abstract);
+        assert!(!func.is_test);
+        assert_eq!(func.visibility, "package");
+    }
+
+    #[test]
+    fn test_visitor_static_and_visibility_modifiers() {
+        // static keyword sets is_static; private/protected map to visibility
+        let source = b"
+public class Svc {
+    private static int helper() { return 0; }
+    protected void guard() {}
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        let helper = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "helper")
+            .unwrap();
+        assert!(helper.is_static);
+        assert_eq!(helper.visibility, "private");
+
+        let guard = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "guard")
+            .unwrap();
+        assert!(!guard.is_static);
+        assert_eq!(guard.visibility, "protected");
+    }
+
+    #[test]
+    fn test_visitor_return_type_void_vs_typed() {
+        // void return type is dropped to None; a real type is captured
+        let source = b"
+public class Types {
+    public void nothing() {}
+    public String label() { return \"x\"; }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        let nothing = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "nothing")
+            .unwrap();
+        assert_eq!(nothing.return_type, None);
+
+        let label = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "label")
+            .unwrap();
+        assert_eq!(label.return_type, Some("String".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_method_parameters() {
+        // Parameter names and type annotations are captured in order
+        let source = b"class P { void take(int count, String label) {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "count");
+        assert_eq!(params[0].type_annotation, Some("int".to_string()));
+        assert_eq!(params[1].name, "label");
+        assert_eq!(params[1].type_annotation, Some("String".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_varargs_parameter() {
+        // A spread_parameter (String... args) is marked variadic
+        let source = b"class V { void log(String... args) {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert!(params[0].is_variadic);
+    }
+
+    #[test]
+    fn test_visitor_method_body_prefix() {
+        // body_prefix is populated with the method body text (including braces)
+        let source = b"class B { void act() { doThing(); } }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(prefix.contains("doThing"));
+    }
+
+    #[test]
+    fn test_visitor_javadoc_doc_comment() {
+        // A preceding /** */ block comment is attached as the doc comment
+        let source = b"
+public class Documented {
+    /** Adds two ints. */
+    public int add(int a, int b) { return a + b; }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let doc = visitor.functions[0].doc_comment.as_ref().unwrap();
+        assert!(doc.starts_with("/**"));
+        assert!(doc.contains("Adds two ints"));
+    }
+
+    #[test]
+    fn test_visitor_method_annotations_in_attributes() {
+        // Annotations on a method are collected into attributes
+        let source = b"
+public class Impl {
+    @Override
+    public String toString() { return \"x\"; }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0]
+            .attributes
+            .iter()
+            .any(|a| a.contains("@Override")));
+    }
+
+    #[test]
+    fn test_visitor_inner_class_extraction() {
+        // An inner class is extracted as its own entity. qualify_name only
+        // prepends the package (not the enclosing class), so an inner class in
+        // the default package keeps its bare name rather than "Outer.Inner".
+        let source = b"
+public class Outer {
+    public class Inner {
+        public void ping() {}
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 2);
+        assert!(visitor.classes.iter().any(|c| c.name == "Outer"));
+        assert!(visitor.classes.iter().any(|c| c.name == "Inner"));
+        // The inner method's parent_class is the inner class name
+        let ping = visitor.functions.iter().find(|f| f.name == "ping").unwrap();
+        assert_eq!(ping.parent_class, Some("Inner".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_call_default_metadata() {
+        // Direct calls carry is_direct=true and no struct_type/field_name
+        let source = b"
+public class C {
+    void caller() { helper(); }
+    void helper() {}
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.calls.len(), 1);
+        let call = &visitor.calls[0];
+        assert!(call.is_direct);
+        assert_eq!(call.struct_type, None);
+        assert_eq!(call.field_name, None);
+    }
+
+    #[test]
+    fn test_visitor_complexity_switch_ternary_logical() {
+        // switch labels + ternary + && all raise cyclomatic complexity
+        let source = b"
+public class Router {
+    public int route(int code, boolean flag) {
+        int base = flag && code > 0 ? 1 : 2;
+        switch (code) {
+            case 1:
+                return base;
+            case 2:
+                return base + 1;
+            default:
+                return 0;
+        }
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        // 3 switch labels add branches, ternary adds one, && adds a logical op
+        assert!(
+            complexity.branches >= 4,
+            "expected >= 4 branches, got {}",
+            complexity.branches
+        );
+        assert!(complexity.cyclomatic_complexity > 4);
+    }
+
+    #[test]
+    fn test_visitor_complexity_while_and_do() {
+        // while and do-while are both counted as loops
+        let source = b"
+public class Loops {
+    public void spin(int n) {
+        while (n > 0) {
+            n--;
+        }
+        do {
+            n++;
+        } while (n < 0);
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.loops >= 2,
+            "expected >= 2 loops, got {}",
+            complexity.loops
+        );
+    }
+
+    #[test]
+    fn test_visitor_interface_extends_parent_gap() {
+        // Regression: `interface B extends A` does NOT populate parent_traits.
+        // The extends_interfaces node wraps its parents in a `type_list`, but
+        // visit_interface only scans its direct children for type_identifier /
+        // scoped_type_identifier, so the nested parents are missed. Pinning the
+        // current behavior so a future fix is a deliberate change.
+        let source = b"interface A {}\ninterface B extends A { void go(); }";
+        let visitor = parse_and_visit(source);
+
+        let b = visitor.traits.iter().find(|t| t.name == "B").unwrap();
+        assert!(b.parent_traits.is_empty());
     }
 }
