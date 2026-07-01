@@ -286,6 +286,59 @@ mod tests {
     }
 
     #[test]
+    fn function_doc_and_body_prefix_props_are_emitted_when_present() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("config.yaml"));
+        let func = FunctionEntity::new("release", 1, 6)
+            .with_signature("release:")
+            .with_doc("release pipeline stage")
+            .with_body_prefix("release:\n  steps:");
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        // The `if let Some(ref doc)` and `if let Some(ref body)` arms only fire
+        // when the entity carries them; every other function test leaves both None.
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("release pipeline stage".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&PropertyValue::String("release:\n  steps:".to_string()))
+        );
+    }
+
+    #[test]
+    fn function_without_doc_or_body_prefix_omits_those_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("config.yaml"));
+        ir.add_function(FunctionEntity::new("plain", 1, 2));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        // Neither optional arm fires, so the props stay absent.
+        assert_eq!(node.properties.get("doc"), None);
+        assert_eq!(node.properties.get("body_prefix"), None);
+    }
+
+    #[test]
+    fn missing_file_stem_falls_back_to_unknown_name() {
+        let ir = CodeIR::new(std::path::PathBuf::from(".."));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // `..` has no file_stem, so the `unwrap_or("unknown")` arm is taken; the
+        // build() helper always uses config.yaml and never reaches this fallback.
+        let info = ir_to_graph(&ir, &mut graph, Path::new("..")).unwrap();
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("unknown".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("language"),
+            Some(&PropertyValue::String("yaml".to_string()))
+        );
+    }
+
+    #[test]
     fn multiple_functions_are_each_contained_by_file() {
         let mut ir = CodeIR::new(std::path::PathBuf::from("config.yaml"));
         ir.add_function(FunctionEntity::new("stage_build", 1, 4));
