@@ -60,6 +60,148 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str) -> CodeIR {
+        let config = ParserConfig::default();
+        extract(source, Path::new("test.scala"), &config).expect("extract should succeed")
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "test");
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new(".."), &config).expect("extract should succeed");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_module_path_and_language() {
+        let ir = extract_ok("");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "test.scala");
+        assert_eq!(module.language, "scala");
+    }
+
+    #[test]
+    fn test_module_line_count() {
+        let ir = extract_ok("def a(): Int = 1\ndef b(): Int = 2\n");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.line_count, 2);
+    }
+
+    #[test]
+    fn test_module_doc_comment_and_attributes_empty() {
+        let ir = extract_ok("def add(a: Int, b: Int): Int = a + b\n");
+        let module = ir.module.expect("module should be set");
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+        assert!(ir.inheritance.is_empty());
+        assert!(ir.implementations.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let ir = extract_ok("// just a comment\n");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_object_flows_into_classes() {
+        let ir = extract_ok("object Config {\n  val port = 8080\n}\n");
+        assert_eq!(ir.classes.len(), 1);
+        assert_eq!(ir.classes[0].name, "Config");
+        assert!(ir.classes[0].attributes.iter().any(|a| a == "object"));
+    }
+
+    #[test]
+    fn test_trait_flows_into_traits() {
+        let ir = extract_ok("trait Greeter {\n  def greet(): String\n}\n");
+        assert_eq!(ir.traits.len(), 1);
+        assert_eq!(ir.traits[0].name, "Greeter");
+    }
+
+    #[test]
+    fn test_class_extends_populates_inheritance() {
+        let ir = extract_ok("class Dog extends Animal\n");
+        assert_eq!(ir.inheritance.len(), 1);
+        assert_eq!(ir.inheritance[0].child, "Dog");
+        assert_eq!(ir.inheritance[0].parent, "Animal");
+    }
+
+    #[test]
+    fn test_calls_populated_via_caller_callee() {
+        let source = r#"
+def helper(): Int = 1
+def run(): Int = {
+  helper()
+}
+"#;
+        let ir = extract_ok(source);
+        assert!(
+            ir.calls
+                .iter()
+                .any(|c| c.caller == "run" && c.callee == "helper"),
+            "expected a run->helper call, got {:?}",
+            ir.calls
+        );
+    }
+
+    #[test]
+    fn test_mixed_source_populates_multiple_kinds() {
+        let source = r#"
+import scala.collection.mutable.ListBuffer
+trait Named {
+  def name(): String
+}
+class Dog extends Animal
+def add(a: Int, b: Int): Int = a + b
+"#;
+        let ir = extract_ok(source);
+        assert!(!ir.imports.is_empty(), "imports should be populated");
+        assert!(!ir.traits.is_empty(), "traits should be populated");
+        assert!(!ir.classes.is_empty(), "classes should be populated");
+        assert!(!ir.functions.is_empty(), "functions should be populated");
+        assert!(
+            !ir.inheritance.is_empty(),
+            "inheritance should be populated"
+        );
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = r#"
+def one(): Int = 1
+def two(): Int = 2
+def three(): Int = 3
+"#;
+        let ir = extract_ok(source);
+        assert_eq!(ir.functions.len(), 3);
+        let names: Vec<&str> = ir.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"one"));
+        assert!(names.contains(&"two"));
+        assert!(names.contains(&"three"));
+    }
+
     #[test]
     fn test_extract_simple_function() {
         let source = r#"
