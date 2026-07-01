@@ -1071,4 +1071,154 @@ end # module
         assert!(visitor.imports.is_empty());
         assert!(visitor.calls.is_empty());
     }
+
+    #[test]
+    fn test_visitor_body_prefix_truncated() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+
+        // A body longer than the cap must be truncated to exactly the cap.
+        let filler = "    x += 1\n".repeat(200);
+        let source = format!("function big(x)\n{filler}    return x\nend");
+        let visitor = parse_and_visit(source.as_bytes());
+
+        assert_eq!(visitor.functions.len(), 1);
+        let body = visitor.functions[0]
+            .body_prefix
+            .as_ref()
+            .expect("large body should have a body_prefix");
+        assert_eq!(body.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_visitor_complexity_or_operator() {
+        let source = b"function either(a, b)\n    return a || b\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("logical-or function should have complexity");
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "|| should raise complexity above base, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_elseif() {
+        // if + elseif + else should each add a branch, exceeding a plain if.
+        let source = b"function grade(x)\n    if x > 90\n        \"A\"\n    elseif x > 80\n        \"B\"\n    else\n        \"F\"\n    end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("if/elseif/else function should have complexity");
+        assert!(
+            complexity.cyclomatic_complexity >= 3,
+            "if/elseif/else should raise complexity to at least 3, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_visitor_baseline_complexity_one() {
+        // A branch-free function keeps the base cyclomatic complexity of 1.
+        let source = b"function passthrough(x)\n    y = x\n    return y\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("function should have complexity metrics");
+        assert_eq!(complexity.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_visitor_exported_struct_is_public() {
+        let source = b"export User\nstruct User\n    name::String\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].name, "User");
+        assert_eq!(visitor.classes[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_visitor_exported_abstract_type_is_public() {
+        let source = b"export Animal\nabstract type Animal end";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.traits.len(), 1);
+        assert_eq!(visitor.traits[0].name, "Animal");
+        assert_eq!(visitor.traits[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_visitor_struct_line_numbers_one_indexed() {
+        let source = b"\nstruct Point\n    x::Int\n    y::Int\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        // A leading blank line pushes the struct to line 2.
+        assert_eq!(visitor.classes[0].line_start, 2);
+        assert_eq!(visitor.classes[0].line_end, 5);
+    }
+
+    #[test]
+    fn test_visitor_abstract_type_line_numbers_one_indexed() {
+        let source = b"\n\nabstract type Shape end";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.traits.len(), 1);
+        // Two leading blank lines push the declaration to line 3.
+        assert_eq!(visitor.traits[0].line_start, 3);
+        assert_eq!(visitor.traits[0].line_end, 3);
+    }
+
+    #[test]
+    fn test_visitor_struct_doc_comment() {
+        let source = b"# A 2D point\nstruct Point\n    x::Int\n    y::Int\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(
+            visitor.classes[0].doc_comment,
+            Some("# A 2D point".to_string())
+        );
+    }
+
+    #[test]
+    fn test_visitor_top_level_call_not_recorded() {
+        // A call_expression outside any function has no enclosing caller, so
+        // current_function is None and no CallRelation is recorded.
+        let source = b"println(\"hello\")\n";
+        let visitor = parse_and_visit(source);
+
+        assert!(
+            visitor.calls.is_empty(),
+            "top-level calls should not be recorded, got {:?}",
+            visitor.calls
+        );
+    }
+
+    #[test]
+    fn test_visitor_nested_call_attributed_to_function() {
+        // A call nested inside an if-body is still attributed to the enclosing
+        // function via visit_body_for_calls' recursion.
+        let source = b"function run(x)\n    if x > 0\n        helper()\n    end\nend";
+        let visitor = parse_and_visit(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("expected a call to helper");
+        assert_eq!(call.caller, "run");
+        assert_eq!(call.call_site_line, 3);
+    }
 }
