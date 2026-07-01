@@ -541,4 +541,153 @@ resource "aws_s3_bucket" "data" {
         let visitor = parse_and_visit(source);
         assert_eq!(visitor.imports[0].imported, "terraform-aws-modules/vpc/aws");
     }
+
+    #[test]
+    fn test_data_line_numbers_and_body_prefix() {
+        // Leading blank line offsets the 1-indexed line numbers; body_prefix
+        // captures the block body text.
+        let source = br#"
+data "aws_ami" "ubuntu" {
+  most_recent = true
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.line_start, 2);
+        assert_eq!(f.line_end, 4);
+        assert!(f.body_prefix.as_deref().unwrap().contains("most_recent"));
+    }
+
+    #[test]
+    fn test_output_line_numbers_and_body_prefix() {
+        let source = br#"output "instance_ip" {
+  value = "1.2.3.4"
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 3);
+        assert!(f.body_prefix.as_deref().unwrap().contains("1.2.3.4"));
+    }
+
+    #[test]
+    fn test_provider_body_prefix() {
+        let source = br#"provider "aws" {
+  region = "us-east-1"
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert!(f.body_prefix.as_deref().unwrap().contains("us-east-1"));
+    }
+
+    #[test]
+    fn test_variable_body_prefix() {
+        let source = br#"variable "region" {
+  type    = string
+  default = "us-west-2"
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert!(f.body_prefix.as_deref().unwrap().contains("us-west-2"));
+    }
+
+    #[test]
+    fn test_two_modules_ordering() {
+        let source = br#"module "vpc" {
+  source = "./modules/vpc"
+}
+
+module "eks" {
+  source = "./modules/eks"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 2);
+        assert_eq!(visitor.imports[0].imported, "./modules/vpc");
+        assert_eq!(visitor.imports[0].alias, Some("vpc".to_string()));
+        assert_eq!(visitor.imports[1].imported, "./modules/eks");
+        assert_eq!(visitor.imports[1].alias, Some("eks".to_string()));
+    }
+
+    #[test]
+    fn test_module_source_non_string_falls_back_to_label() {
+        // A `source` whose value is not a string literal (a bare reference)
+        // is not extractable, so imported falls back to the module label.
+        let source = br#"module "vpc" {
+  source = local.vpc_source
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "vpc");
+    }
+
+    #[test]
+    fn test_resource_extra_labels_uses_first_two() {
+        // A resource with more than two labels still names from the first two.
+        let source = br#"resource "aws_instance" "web" "extra" {
+  ami = "a"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "aws_instance.web");
+    }
+
+    #[test]
+    fn test_data_single_label_skipped() {
+        // data with fewer than 2 labels does not match; no function emitted.
+        let source = br#"data "aws_ami" {
+  most_recent = true
+}"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions.is_empty());
+    }
+
+    #[test]
+    fn test_provider_without_label_skipped() {
+        // provider with no label fails the guard and yields no function.
+        let source = br#"provider {
+  region = "us-east-1"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions.is_empty());
+    }
+
+    #[test]
+    fn test_module_without_label_yields_no_import() {
+        // module with no label falls through to the default arm; no import.
+        let source = br#"module {
+  source = "./modules/vpc"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_mixed_blocks_functions_and_imports_recorded_separately() {
+        // A resource and a module in one file populate functions and imports
+        // independently.
+        let source = br#"resource "aws_instance" "web" {
+  ami = "a"
+}
+
+module "vpc" {
+  source = "./modules/vpc"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "aws_instance.web");
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "./modules/vpc");
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max_chars() {
+        // An oversized block body is truncated to BODY_PREFIX_MAX_CHARS.
+        let filler = "x".repeat(2000);
+        let source = format!("resource \"aws_instance\" \"web\" {{\n  ami = \"{filler}\"\n}}");
+        let visitor = parse_and_visit(source.as_bytes());
+        let f = &visitor.functions[0];
+        assert_eq!(
+            f.body_prefix.as_deref().unwrap().len(),
+            codegraph_parser_api::BODY_PREFIX_MAX_CHARS
+        );
+    }
 }
