@@ -302,7 +302,7 @@ mod tests {
     use codegraph::{Direction, PropertyValue};
     use codegraph_parser_api::{
         CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImplementationRelation,
-        ImportRelation, InheritanceRelation, ModuleEntity, TraitEntity,
+        ImportRelation, InheritanceRelation, ModuleEntity, Parameter, TraitEntity,
     };
 
     fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
@@ -612,5 +612,338 @@ mod tests {
             .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Implements)
             .collect();
         assert_eq!(implements.len(), 1);
+    }
+
+    #[test]
+    fn free_function_records_all_optional_props_and_flags() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        let func = FunctionEntity::new("compute", 4, 9)
+            .with_signature("def compute(x: Int): Int")
+            .with_visibility("private")
+            .with_doc("computes a value")
+            .with_return_type("Int")
+            .with_body_prefix("val y = x + 1")
+            .with_parameters(vec![Parameter::new("x").with_type("Int")])
+            .static_fn()
+            .abstract_fn();
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("computes a value".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("return_type"),
+            Some(&PropertyValue::String("Int".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("private".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&PropertyValue::String("val y = x + 1".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("parameters"),
+            Some(&PropertyValue::StringList(vec!["x".to_string()]))
+        );
+        assert_eq!(
+            node.properties.get("is_static"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get("is_abstract"),
+            Some(&PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn free_function_omits_optional_props_when_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_function(FunctionEntity::new("bare", 1, 2));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert!(node.properties.get("doc").is_none());
+        assert!(node.properties.get("return_type").is_none());
+        assert!(node.properties.get("parent_class").is_none());
+        assert!(node.properties.get("body_prefix").is_none());
+        assert!(node.properties.get("parameters").is_none());
+        assert!(node.properties.get("complexity").is_none());
+    }
+
+    #[test]
+    fn free_function_records_all_eight_complexity_sub_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 25,
+            branches: 7,
+            loops: 3,
+            logical_operators: 4,
+            max_nesting_depth: 5,
+            exception_handlers: 2,
+            early_returns: 6,
+        };
+        ir.add_function(FunctionEntity::new("big", 1, 40).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("complexity"),
+            Some(&PropertyValue::Int(25))
+        );
+        // Cyclomatic 25 falls in the D band.
+        assert_eq!(
+            node.properties.get("complexity_grade"),
+            Some(&PropertyValue::String("D".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("complexity_branches"),
+            Some(&PropertyValue::Int(7))
+        );
+        assert_eq!(
+            node.properties.get("complexity_loops"),
+            Some(&PropertyValue::Int(3))
+        );
+        assert_eq!(
+            node.properties.get("complexity_logical_ops"),
+            Some(&PropertyValue::Int(4))
+        );
+        assert_eq!(
+            node.properties.get("complexity_nesting"),
+            Some(&PropertyValue::Int(5))
+        );
+        assert_eq!(
+            node.properties.get("complexity_exceptions"),
+            Some(&PropertyValue::Int(2))
+        );
+        assert_eq!(
+            node.properties.get("complexity_early_returns"),
+            Some(&PropertyValue::Int(6))
+        );
+    }
+
+    #[test]
+    fn free_function_with_unknown_parent_class_gets_no_contains_edge() {
+        // Functions are mapped before classes, so a parent_class that names a
+        // class is never in node_map yet: neither the class branch nor the
+        // file-fallback else runs, leaving the function orphaned.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_function(FunctionEntity::new("orphan", 3, 8).with_parent_class("Repo"));
+        ir.add_class(ClassEntity::new("Repo", 1, 20));
+
+        let (graph, info) = build(&ir);
+        let func_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "orphan")
+            .unwrap();
+        assert!(graph
+            .get_edges_between(info.file_id, func_id)
+            .unwrap()
+            .is_empty());
+        let class_id = info.classes[0];
+        assert!(graph
+            .get_edges_between(class_id, func_id)
+            .unwrap()
+            .is_empty());
+        // The parent_class prop is still stamped on the node.
+        let node = graph.get_node(func_id).unwrap();
+        assert_eq!(
+            node.properties.get("parent_class"),
+            Some(&PropertyValue::String("Repo".to_string()))
+        );
+    }
+
+    #[test]
+    fn class_records_doc_attributes_and_body_prefix() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        let class = ClassEntity::new("Repo", 1, 20)
+            .with_doc("a repository")
+            .with_attributes(vec!["@deprecated".to_string()])
+            .with_body_prefix("val db = ...");
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.classes[0]).unwrap();
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("a repository".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("attributes"),
+            Some(&PropertyValue::StringList(vec!["@deprecated".to_string()]))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&PropertyValue::String("val db = ...".to_string()))
+        );
+    }
+
+    #[test]
+    fn class_omits_optional_props_when_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_class(ClassEntity::new("Repo", 1, 5));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.classes[0]).unwrap();
+        assert!(node.properties.get("doc").is_none());
+        assert!(node.properties.get("attributes").is_none());
+        assert!(node.properties.get("body_prefix").is_none());
+    }
+
+    #[test]
+    fn class_method_records_doc_body_prefix_and_method_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        let mut class = ClassEntity::new("Repo", 1, 20);
+        class.methods.push(
+            FunctionEntity::new("save", 5, 10)
+                .with_signature("def save(): Unit")
+                .with_visibility("protected")
+                .with_doc("persists")
+                .with_body_prefix("db.write()"),
+        );
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let method_id = info.functions[0];
+        let node = graph.get_node(method_id).unwrap();
+        assert_eq!(
+            node.properties.get("is_method"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("parent_class"),
+            Some(&PropertyValue::String("Repo".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("signature"),
+            Some(&PropertyValue::String("def save(): Unit".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("protected".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("persists".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&PropertyValue::String("db.write()".to_string()))
+        );
+    }
+
+    #[test]
+    fn trait_records_doc_when_present_and_omits_when_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_trait(TraitEntity::new("Named", 1, 3).with_doc("has a name"));
+        ir.add_trait(TraitEntity::new("Bare", 4, 6));
+
+        let (graph, info) = build(&ir);
+        let named = info
+            .traits
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "Named")
+            .unwrap();
+        let bare = info
+            .traits
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "Bare")
+            .unwrap();
+        assert_eq!(
+            graph.get_node(named).unwrap().properties.get("doc"),
+            Some(&PropertyValue::String("has a name".to_string()))
+        );
+        assert!(graph
+            .get_node(bare)
+            .unwrap()
+            .properties
+            .get("doc")
+            .is_none());
+    }
+
+    #[test]
+    fn import_reuses_in_file_node_without_marking_external() {
+        // An import whose target matches an already-mapped class reuses that
+        // node instead of creating an external Module.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_class(ClassEntity::new("Repo", 1, 20));
+        ir.add_import(ImportRelation::new("Service", "Repo"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+        let import_id = info.imports[0];
+        // Reused class node: same id, Class type, no is_external stamp.
+        assert_eq!(import_id, info.classes[0]);
+        let node = graph.get_node(import_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Class);
+        assert!(node.properties.get("is_external").is_none());
+
+        // A fresh Imports edge is added alongside the file->class Contains edge.
+        let import_edges: Vec<_> = graph
+            .get_edges_between(info.file_id, import_id)
+            .unwrap()
+            .into_iter()
+            .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Imports)
+            .collect();
+        assert_eq!(import_edges.len(), 1);
+    }
+
+    #[test]
+    fn bare_import_records_no_symbols_edge_prop() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_import(ImportRelation::new("Service", "scala.util"));
+
+        let (graph, info) = build(&ir);
+        let edge_ids = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(edge_ids.len(), 1);
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert!(edge.properties.get("symbols").is_none());
+    }
+
+    #[test]
+    fn call_edge_records_is_direct_flag() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("direct", 6, 10));
+        ir.add_function(FunctionEntity::new("indirect", 11, 15));
+        ir.add_call(CallRelation::new("caller", "direct", 3));
+        ir.add_call(CallRelation::new("caller", "indirect", 4).indirect());
+
+        let (graph, info) = build(&ir);
+        let id_of = |name: &str| -> NodeId {
+            info.functions
+                .iter()
+                .copied()
+                .find(|&id| name_of(&graph, id) == name)
+                .unwrap()
+        };
+        let caller = id_of("caller");
+
+        let is_direct = |callee: NodeId| -> bool {
+            let edge = graph
+                .get_edges_between(caller, callee)
+                .unwrap()
+                .into_iter()
+                .map(|e| graph.get_edge(e).unwrap())
+                .find(|e| e.edge_type == EdgeType::Calls)
+                .unwrap();
+            matches!(
+                edge.properties.get("is_direct"),
+                Some(&PropertyValue::Bool(true))
+            )
+        };
+        assert!(is_direct(id_of("direct")));
+        assert!(!is_direct(id_of("indirect")));
     }
 }
