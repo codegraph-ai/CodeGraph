@@ -61,6 +61,11 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        let config = ParserConfig::default();
+        extract(source, Path::new(path), &config).expect("extract should succeed")
+    }
+
     #[test]
     fn test_extract_simple_function() {
         let source = r#"
@@ -106,5 +111,105 @@ import 'package:flutter/material.dart';
         assert!(result.is_ok());
         let ir = result.unwrap();
         assert_eq!(ir.imports.len(), 2);
+    }
+
+    #[test]
+    fn module_name_from_file_stem() {
+        let ir = extract_ok("void f() {}\n", "widgets.dart");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "widgets");
+    }
+
+    #[test]
+    fn module_name_falls_back_to_unknown_without_stem() {
+        let ir = extract_ok("void f() {}\n", "..");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn module_records_path_language_and_line_count() {
+        let source = "void a() {}\nvoid b() {}\n";
+        let ir = extract_ok(source, "sample.dart");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "sample.dart");
+        assert_eq!(module.language, "dart");
+        assert_eq!(module.line_count, source.lines().count());
+    }
+
+    #[test]
+    fn module_doc_comment_and_attributes_are_empty() {
+        let ir = extract_ok("void f() {}\n", "test.dart");
+        let module = ir.module.expect("module should be set");
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn empty_source_yields_only_a_module() {
+        let ir = extract_ok("", "empty.dart");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn comment_only_source_yields_no_entities() {
+        let ir = extract_ok("// just a comment\n", "comment.dart");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+    }
+
+    #[test]
+    fn mixin_flows_into_traits() {
+        let ir = extract_ok("mixin Logger {\n  void log() {}\n}\n", "test.dart");
+        assert_eq!(ir.traits.len(), 1);
+        assert_eq!(ir.traits[0].name, "Logger");
+    }
+
+    #[test]
+    fn class_extends_flows_into_inheritance() {
+        let ir = extract_ok("class Dog extends Animal {\n}\n", "test.dart");
+        assert_eq!(ir.inheritance.len(), 1);
+    }
+
+    #[test]
+    fn class_implements_flows_into_implementations() {
+        let ir = extract_ok("class Service implements Runnable {\n}\n", "test.dart");
+        assert_eq!(ir.implementations.len(), 1);
+    }
+
+    #[test]
+    fn mixed_source_populates_each_entity_kind() {
+        let source = r#"
+import 'dart:io';
+
+class Animal {}
+
+class Dog extends Animal {}
+
+mixin Logger {
+  void log() {}
+}
+
+void main() {}
+"#;
+        let ir = extract_ok(source, "test.dart");
+        assert!(!ir.imports.is_empty());
+        assert!(!ir.classes.is_empty());
+        assert!(!ir.traits.is_empty());
+        assert!(!ir.functions.is_empty());
+        assert!(!ir.inheritance.is_empty());
+    }
+
+    #[test]
+    fn multiple_functions_are_all_extracted() {
+        let source = "void a() {}\nvoid b() {}\nvoid c() {}\n";
+        let ir = extract_ok(source, "test.dart");
+        assert_eq!(ir.functions.len(), 3);
     }
 }
