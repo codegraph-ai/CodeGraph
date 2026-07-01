@@ -696,5 +696,4 @@ mod tests {
 
         assert!(!visitor.imports.is_empty());
     }
-
 }
