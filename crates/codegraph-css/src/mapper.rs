@@ -294,6 +294,41 @@ mod tests {
     }
 
     #[test]
+    fn function_records_doc_and_body_prefix_when_present() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("theme.css"));
+        let func = FunctionEntity::new("fade", 1, 4)
+            .with_signature("fade()")
+            .with_doc("fades an element")
+            .with_body_prefix("opacity: 0;");
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        // Both optional `if let Some(..)` arms on the function fire only when set.
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("fades an element".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&PropertyValue::String("opacity: 0;".to_string()))
+        );
+    }
+
+    #[test]
+    fn file_stem_falls_back_to_unknown_without_module() {
+        let ir = CodeIR::new(std::path::PathBuf::from(".."));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // A path with no file_stem drives the `unwrap_or("unknown")` fallback.
+        let info = ir_to_graph(&ir, &mut graph, Path::new("..")).unwrap();
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("unknown".to_string()))
+        );
+    }
+
+    #[test]
     fn import_creates_external_module_with_empty_edge_props() {
         let mut ir = CodeIR::new(std::path::PathBuf::from("theme.css"));
         ir.add_import(ImportRelation::new("theme", "reset").with_symbols(vec!["base".to_string()]));
