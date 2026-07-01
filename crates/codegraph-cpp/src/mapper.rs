@@ -652,4 +652,194 @@ mod tests {
         let edge = edge_between(&graph, dog, barkable);
         assert!(matches!(edge.edge_type, EdgeType::Implements));
     }
+
+    #[test]
+    fn module_doc_comment_sets_file_doc_prop() {
+        // A module carrying a doc comment surfaces it as the `doc` property on
+        // the CodeFile node, and language comes from the module (not the "cpp"
+        // fallback).
+        let mut ir = CodeIR::new(PathBuf::from("test.cpp"));
+        ir.set_module(
+            ModuleEntity::new("mod", "test.cpp", "cpp")
+                .with_line_count(42)
+                .with_doc("File header docs"),
+        );
+        let (graph, info) = map(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("doc"), Some("File header docs"));
+        assert_eq!(file.properties.get_string("language"), Some("cpp"));
+        // line_count comes from the module on the module path.
+        assert_eq!(info.line_count, 42);
+    }
+
+    #[test]
+    fn function_complexity_props_propagate() {
+        use codegraph_parser_api::ComplexityMetrics;
+
+        let mut metrics = ComplexityMetrics::new()
+            .with_branches(3)
+            .with_loops(1)
+            .with_logical_operators(2)
+            .with_nesting_depth(4)
+            .with_exception_handlers(1)
+            .with_early_returns(2);
+        metrics.calculate_cyclomatic(); // 1 + 3 + 1 + 2 + 1 = 8
+
+        let mut ir = CodeIR::new(PathBuf::from("test.cpp"));
+        ir.add_function(FunctionEntity::new("compute", 1, 20).with_complexity(metrics));
+        let (graph, info) = map(&ir);
+
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert!(matches!(
+            node.properties.get("complexity"),
+            Some(PropertyValue::Int(8))
+        ));
+        assert!(matches!(
+            node.properties.get("complexity_branches"),
+            Some(PropertyValue::Int(3))
+        ));
+        assert!(matches!(
+            node.properties.get("complexity_loops"),
+            Some(PropertyValue::Int(1))
+        ));
+        assert!(matches!(
+            node.properties.get("complexity_logical_ops"),
+            Some(PropertyValue::Int(2))
+        ));
+        assert!(matches!(
+            node.properties.get("complexity_nesting"),
+            Some(PropertyValue::Int(4))
+        ));
+        assert!(matches!(
+            node.properties.get("complexity_exceptions"),
+            Some(PropertyValue::Int(1))
+        ));
+        assert!(matches!(
+            node.properties.get("complexity_early_returns"),
+            Some(PropertyValue::Int(2))
+        ));
+        // Grade for CC=8 is 'B'.
+        assert_eq!(node.properties.get_string("complexity_grade"), Some("B"));
+    }
+
+    #[test]
+    fn function_doc_return_type_attributes_and_body_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.cpp"));
+        ir.add_function(
+            FunctionEntity::new("f", 1, 3)
+                .with_doc("does f")
+                .with_return_type("int")
+                .with_attributes(vec!["[[nodiscard]]".to_string()])
+                .with_body_prefix("return 0;"),
+        );
+        let (graph, info) = map(&ir);
+
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(node.properties.get_string("doc"), Some("does f"));
+        assert_eq!(node.properties.get_string("return_type"), Some("int"));
+        assert_eq!(node.properties.get_string("body_prefix"), Some("return 0;"));
+        assert_eq!(
+            node.properties.get_string_list_compat("attributes"),
+            Some(vec!["[[nodiscard]]".to_string()])
+        );
+    }
+
+    #[test]
+    fn function_with_unknown_parent_class_gets_no_containment_edge() {
+        // parent_class is set but the class is not in the node map, so neither
+        // the class->func nor the fallback file->func Contains edge is created:
+        // the function node is orphaned but still records parent_class.
+        let mut ir = CodeIR::new(PathBuf::from("test.cpp"));
+        ir.add_function(FunctionEntity::new("orphan", 1, 2).with_parent_class("Missing"));
+        let (graph, info) = map(&ir);
+
+        let func_id = info.functions[0];
+        let node = graph.get_node(func_id).unwrap();
+        assert_eq!(node.properties.get_string("parent_class"), Some("Missing"));
+        // No file->func edge and no edges at all.
+        assert!(graph
+            .get_edges_between(info.file_id, func_id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn class_records_type_parameters_attributes_and_abstract() {
+        let mut ir = CodeIR::new(PathBuf::from("test.cpp"));
+        ir.add_class(
+            ClassEntity::new("Vec", 1, 30)
+                .abstract_class()
+                .with_doc("a vector")
+                .with_attributes(vec!["final".to_string()])
+                .with_type_parameters(vec!["T".to_string(), "N".to_string()])
+                .with_body_prefix("public:"),
+        );
+        let (graph, info) = map(&ir);
+
+        let node = graph.get_node(info.classes[0]).unwrap();
+        assert!(matches!(
+            node.properties.get("is_abstract"),
+            Some(PropertyValue::Bool(true))
+        ));
+        assert_eq!(node.properties.get_string("doc"), Some("a vector"));
+        assert_eq!(node.properties.get_string("body_prefix"), Some("public:"));
+        assert_eq!(
+            node.properties.get_string_list_compat("attributes"),
+            Some(vec!["final".to_string()])
+        );
+        assert_eq!(
+            node.properties.get_string_list_compat("type_parameters"),
+            Some(vec!["T".to_string(), "N".to_string()])
+        );
+    }
+
+    #[test]
+    fn method_records_doc_and_body_prefix() {
+        let mut ir = CodeIR::new(PathBuf::from("test.cpp"));
+        let class = ClassEntity::new("Widget", 1, 30).with_methods(vec![FunctionEntity::new(
+            "render", 5, 9,
+        )
+        .with_doc("draws it")
+        .with_body_prefix("glClear();")]);
+        ir.add_class(class);
+        let (graph, info) = map(&ir);
+
+        let method = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(method.properties.get_string("name"), Some("Widget::render"));
+        assert_eq!(method.properties.get_string("doc"), Some("draws it"));
+        assert_eq!(
+            method.properties.get_string("body_prefix"),
+            Some("glClear();")
+        );
+    }
+
+    #[test]
+    fn resolved_call_records_is_direct_prop() {
+        // An indirect call still resolves to a Calls edge, but is_direct=false.
+        let mut ir = CodeIR::new(PathBuf::from("test.cpp"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 8));
+        ir.add_call(CallRelation::new("caller", "callee", 3).indirect());
+        let (graph, info) = map(&ir);
+
+        let edge = edge_between(&graph, info.functions[0], info.functions[1]);
+        assert!(matches!(edge.edge_type, EdgeType::Calls));
+        assert!(matches!(
+            edge.properties.get("is_direct"),
+            Some(PropertyValue::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn trait_records_doc_comment() {
+        let mut ir = CodeIR::new(PathBuf::from("test.cpp"));
+        ir.add_trait(TraitEntity::new("Drawable", 1, 5).with_doc("can be drawn"));
+        let (graph, info) = map(&ir);
+
+        let node = graph.get_node(info.traits[0]).unwrap();
+        assert!(matches!(node.node_type, NodeType::Interface));
+        assert_eq!(node.properties.get_string("doc"), Some("can be drawn"));
+    }
 }
