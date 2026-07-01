@@ -508,3 +508,332 @@ fn find_cross_project_consumers(
 
     results
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{NodeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+
+    /// Slug that `find_cross_project_consumers` treats as ephemeral, so it
+    /// short-circuits before touching the shared on-disk graph.db — keeping
+    /// these tests deterministic and off the filesystem.
+    const EPHEMERAL_SLUG: &str = "codegraph-harness-test";
+
+    /// Add a node carrying the given key/value properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, PropertyValue)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), v.clone());
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn str_prop(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// Wrap a built graph in the Arc<RwLock<>> a QueryEngine owns and build the
+    /// call indexes so get_callers resolves depth-3 caller counts from Calls edges.
+    async fn engine_for(g: CodeGraph) -> (Arc<RwLock<CodeGraph>>, QueryEngine) {
+        let graph = Arc::new(RwLock::new(g));
+        let engine = QueryEngine::new(graph.clone());
+        engine.build_indexes().await;
+        (graph, engine)
+    }
+
+    #[tokio::test]
+    async fn missing_start_node_yields_empty_impact() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            999,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert!(result.symbol_name.is_empty());
+        assert!(result.impacted.is_empty());
+        assert!(result.indirect_impacted.is_empty());
+        assert_eq!(result.total_impacted, 0);
+        assert_eq!(result.direct_impacted, 0);
+        assert_eq!(result.files_affected, 0);
+        assert_eq!(result.risk_level, "low");
+        assert!(result.used_fallback.is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_caller_flagged_as_caller_impact() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.symbol_name, "target");
+        assert_eq!(result.impacted.len(), 1);
+        let sym = &result.impacted[0];
+        assert_eq!(sym.name, "caller");
+        assert_eq!(sym.impact_type, "caller");
+        assert_eq!(sym.severity, "warning");
+        assert_eq!(sym.depth, 1);
+        assert_eq!(sym.edge_type_str, "Calls");
+        assert_eq!(result.breaking_changes, 0);
+        assert_eq!(result.warnings, 1);
+        assert_eq!(result.files_affected, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_change_marks_breaking_and_elevates_risk() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "delete",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted[0].severity, "breaking");
+        assert_eq!(result.breaking_changes, 1);
+        // get_callers finds 1 caller at depth<=3 -> "delete" n>0 -> "high"
+        assert_eq!(result.risk_level, "high");
+    }
+
+    #[tokio::test]
+    async fn reference_edge_maps_to_reference_impact_type() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let referrer = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("referrer")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, referrer, target, EdgeType::References);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted.len(), 1);
+        assert_eq!(result.impacted[0].impact_type, "reference");
+        assert_eq!(result.impacted[0].edge_type_str, "References");
+        // References edges are not Calls, so get_callers is empty -> modify risk "low"
+        assert_eq!(result.risk_level, "low");
+    }
+
+    #[tokio::test]
+    async fn indirect_impact_reached_via_bfs_on_distinct_file() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        let indirect = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("indirect")), ("path", str_prop("b.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        edge(&mut g, indirect, caller, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.direct_impacted, 1);
+        assert_eq!(result.indirect_impacted.len(), 1);
+        let ind = &result.indirect_impacted[0];
+        assert_eq!(ind.path, "b.rs");
+        assert_eq!(ind.via_path, vec!["a.rs".to_string(), "b.rs".to_string()]);
+        assert_eq!(ind.severity, "warning");
+        // total = direct(1) + indirect(1); warnings = direct warning(1) + indirect(1)
+        assert_eq!(result.total_impacted, 2);
+        assert_eq!(result.warnings, 2);
+    }
+
+    #[tokio::test]
+    async fn indirect_impact_skipped_when_same_file_as_direct() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        // indirect shares the direct impact's file, so it is excluded
+        let indirect = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("indirect")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        edge(&mut g, indirect, caller, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.direct_impacted, 1);
+        assert!(result.indirect_impacted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn used_fallback_populates_message_with_requested_line() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            true,
+            Some(42),
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.used_fallback, Some(true));
+        let msg = result.fallback_message.expect("fallback message present");
+        assert!(msg.contains("line 42"), "message was: {msg}");
+        assert!(msg.contains("target"), "message was: {msg}");
+    }
+
+    #[tokio::test]
+    async fn distinct_caller_files_counted_once_each() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let c1 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("c1")), ("path", str_prop("a.rs"))],
+        );
+        let c2 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("c2")), ("path", str_prop("a.rs"))],
+        );
+        let c3 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("c3")), ("path", str_prop("b.rs"))],
+        );
+        edge(&mut g, c1, target, EdgeType::Calls);
+        edge(&mut g, c2, target, EdgeType::Calls);
+        edge(&mut g, c3, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.direct_impacted, 3);
+        // three callers across two distinct files
+        assert_eq!(result.files_affected, 2);
+    }
+
+    #[tokio::test]
+    async fn test_caller_sets_is_test_flag() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("test_caller")),
+                ("path", str_prop("a_test.rs")),
+                ("is_test", PropertyValue::Bool(true)),
+            ],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted.len(), 1);
+        assert!(result.impacted[0].is_test);
+    }
+}
