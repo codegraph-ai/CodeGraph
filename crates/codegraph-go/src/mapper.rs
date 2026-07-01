@@ -403,7 +403,9 @@ fn detect_go_http_handler(signature: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{ClassEntity, FunctionEntity, ImportRelation, TraitEntity};
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, TraitEntity,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -620,6 +622,452 @@ mod tests {
             ),
             "is_async should be Bool(true), got {:?}",
             func_node.properties.get("is_async")
+        );
+    }
+
+    // ---- detect_go_http_handler (pure) ----
+
+    #[test]
+    fn test_detect_go_http_handler_stdlib() {
+        assert!(detect_go_http_handler(
+            "func h(w http.ResponseWriter, r *http.Request)"
+        ));
+    }
+
+    #[test]
+    fn test_detect_go_http_handler_frameworks() {
+        assert!(detect_go_http_handler("func h(c *gin.Context)"));
+        assert!(detect_go_http_handler("func h(c echo.Context)"));
+        assert!(detect_go_http_handler("func h(c *fiber.Ctx)"));
+    }
+
+    #[test]
+    fn test_detect_go_http_handler_case_insensitive() {
+        // Lowercasing means an all-caps signature still matches.
+        assert!(detect_go_http_handler(
+            "FUNC H(W HTTP.RESPONSEWRITER, R *HTTP.REQUEST)"
+        ));
+    }
+
+    #[test]
+    fn test_detect_go_http_handler_negative() {
+        assert!(!detect_go_http_handler("func add(a int, b int) int"));
+        // ResponseWriter alone without Request is not enough.
+        assert!(!detect_go_http_handler("func h(w http.ResponseWriter)"));
+    }
+
+    #[test]
+    fn test_function_http_handler_props_stamped() {
+        let mut ir = CodeIR::new(PathBuf::from("h.go"));
+        ir.add_function(
+            FunctionEntity::new("Serve", 1, 5)
+                .with_signature("func Serve(w http.ResponseWriter, r *http.Request)"),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("h.go")).unwrap();
+
+        let node = graph.get_node(fi.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("http_method"),
+            Some(&codegraph::PropertyValue::String("ANY".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("route"),
+            Some(&codegraph::PropertyValue::String("/".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("is_entry_point"),
+            Some(&codegraph::PropertyValue::Bool(true))
+        );
+    }
+
+    // ---- file node fallback / module doc ----
+
+    #[test]
+    fn test_file_stem_fallback_no_module() {
+        let ir = CodeIR::new(PathBuf::from("handlers.go"));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("pkg/handlers.go")).unwrap();
+
+        let node = graph.get_node(fi.file_id).unwrap();
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&codegraph::PropertyValue::String("handlers".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("language"),
+            Some(&codegraph::PropertyValue::String("go".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_module_doc_prop() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        // The mapper stamps a module's doc_comment onto the file node's `doc` prop.
+        ir.set_module(
+            codegraph_parser_api::ModuleEntity::new("main", "test.go", "go")
+                .with_doc("package docs"),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let node = graph.get_node(fi.file_id).unwrap();
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&codegraph::PropertyValue::String(
+                "package docs".to_string()
+            ))
+        );
+    }
+
+    // ---- function optional / complexity props ----
+
+    #[test]
+    fn test_function_optional_props_present() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_function(
+            FunctionEntity::new("f", 1, 5)
+                .with_doc("does f")
+                .with_return_type("error")
+                .with_body_prefix("return nil"),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let node = graph.get_node(fi.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&codegraph::PropertyValue::String("does f".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("return_type"),
+            Some(&codegraph::PropertyValue::String("error".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&codegraph::PropertyValue::String("return nil".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_function_optional_props_absent() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_function(FunctionEntity::new("f", 1, 5));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let node = graph.get_node(fi.functions[0]).unwrap();
+        assert!(node.properties.get("doc").is_none());
+        assert!(node.properties.get("return_type").is_none());
+        assert!(node.properties.get("body_prefix").is_none());
+        assert!(node.properties.get("complexity").is_none());
+    }
+
+    #[test]
+    fn test_function_complexity_all_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 12,
+            branches: 3,
+            loops: 2,
+            logical_operators: 4,
+            max_nesting_depth: 5,
+            exception_handlers: 1,
+            early_returns: 2,
+        };
+        ir.add_function(FunctionEntity::new("f", 1, 20).with_complexity(metrics));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let p = &graph.get_node(fi.functions[0]).unwrap().properties;
+        use codegraph::PropertyValue::{Int, String as S};
+        assert_eq!(p.get("complexity"), Some(&Int(12)));
+        assert_eq!(p.get("complexity_grade"), Some(&S("C".to_string())));
+        assert_eq!(p.get("complexity_branches"), Some(&Int(3)));
+        assert_eq!(p.get("complexity_loops"), Some(&Int(2)));
+        assert_eq!(p.get("complexity_logical_ops"), Some(&Int(4)));
+        assert_eq!(p.get("complexity_nesting"), Some(&Int(5)));
+        assert_eq!(p.get("complexity_exceptions"), Some(&Int(1)));
+        assert_eq!(p.get("complexity_early_returns"), Some(&Int(2)));
+    }
+
+    // ---- class / method / interface props ----
+
+    #[test]
+    fn test_class_optional_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_class(
+            ClassEntity::new("Base", 1, 10)
+                .with_visibility("public")
+                .abstract_class()
+                .with_doc("base struct")
+                .with_body_prefix("type Base struct {"),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let p = &graph.get_node(fi.classes[0]).unwrap().properties;
+        use codegraph::PropertyValue::{Bool, String as S};
+        assert_eq!(p.get("visibility"), Some(&S("public".to_string())));
+        assert_eq!(p.get("is_abstract"), Some(&Bool(true)));
+        assert_eq!(p.get("doc"), Some(&S("base struct".to_string())));
+        assert_eq!(
+            p.get("body_prefix"),
+            Some(&S("type Base struct {".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_method_qualified_name_and_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        let mut class = ClassEntity::new("Calc", 1, 10);
+        class.methods.push(
+            FunctionEntity::new("Add", 2, 4)
+                .with_doc("adds")
+                .with_body_prefix("return a + b"),
+        );
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let p = &graph.get_node(fi.functions[0]).unwrap().properties;
+        use codegraph::PropertyValue::String as S;
+        assert_eq!(p.get("name"), Some(&S("Calc.Add".to_string())));
+        assert_eq!(p.get("is_method"), Some(&S("true".to_string())));
+        assert_eq!(p.get("parent_class"), Some(&S("Calc".to_string())));
+        assert_eq!(p.get("doc"), Some(&S("adds".to_string())));
+        assert_eq!(p.get("body_prefix"), Some(&S("return a + b".to_string())));
+
+        // Method is contained by the class node, not the file node.
+        let edges = graph
+            .get_edges_between(fi.classes[0], fi.functions[0])
+            .unwrap();
+        assert!(!edges.is_empty());
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    #[test]
+    fn test_method_http_handler_detected() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        let mut class = ClassEntity::new("Server", 1, 10);
+        class.methods.push(
+            FunctionEntity::new("Handle", 2, 4)
+                .with_signature("func (s *Server) Handle(c *gin.Context)"),
+        );
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let p = &graph.get_node(fi.functions[0]).unwrap().properties;
+        assert_eq!(
+            p.get("is_entry_point"),
+            Some(&codegraph::PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_interface_props_and_containment() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_trait(
+            TraitEntity::new("Reader", 3, 8)
+                .with_visibility("public")
+                .with_doc("reads bytes"),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let p = &graph.get_node(fi.traits[0]).unwrap().properties;
+        use codegraph::PropertyValue::{Int, String as S};
+        assert_eq!(p.get("visibility"), Some(&S("public".to_string())));
+        assert_eq!(p.get("doc"), Some(&S("reads bytes".to_string())));
+        assert_eq!(p.get("line_start"), Some(&Int(3)));
+        assert_eq!(p.get("line_end"), Some(&Int(8)));
+
+        let edges = graph.get_edges_between(fi.file_id, fi.traits[0]).unwrap();
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    // ---- import edge props / reuse ----
+
+    #[test]
+    fn test_import_edge_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_import(
+            ImportRelation::new("main", "encoding/json")
+                .with_alias("j")
+                .with_symbols(vec!["Marshal".to_string(), "Unmarshal".to_string()])
+                .wildcard(),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let edges = graph.get_edges_between(fi.file_id, fi.imports[0]).unwrap();
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        use codegraph::PropertyValue::{String as S, StringList};
+        assert_eq!(edge.properties.get("alias"), Some(&S("j".to_string())));
+        assert_eq!(
+            edge.properties.get("is_wildcard"),
+            Some(&S("true".to_string()))
+        );
+        assert_eq!(
+            edge.properties.get("symbols"),
+            Some(&StringList(vec![
+                "Marshal".to_string(),
+                "Unmarshal".to_string()
+            ]))
+        );
+
+        // External module node is marked is_external.
+        assert_eq!(
+            graph
+                .get_node(fi.imports[0])
+                .unwrap()
+                .properties
+                .get("is_external"),
+            Some(&S("true".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_import_reuses_in_file_node() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        // A function named "helper" then an import of the same name reuses the node.
+        ir.add_function(FunctionEntity::new("helper", 1, 3));
+        ir.add_import(ImportRelation::new("main", "helper"));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        // Import id equals the existing function node id (reused, not a new Module).
+        assert_eq!(fi.imports[0], fi.functions[0]);
+        let node = graph.get_node(fi.imports[0]).unwrap();
+        // Reused Function node is NOT stamped is_external.
+        assert!(node.properties.get("is_external").is_none());
+        assert_eq!(node.node_type, NodeType::Function);
+    }
+
+    // ---- calls: direct + unresolved storage ----
+
+    #[test]
+    fn test_call_direct_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_function(FunctionEntity::new("caller", 1, 3));
+        ir.add_function(FunctionEntity::new("callee", 5, 7));
+        ir.add_call(CallRelation::new("caller", "callee", 2));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let edges = graph
+            .get_edges_between(fi.functions[0], fi.functions[1])
+            .unwrap();
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(
+            edge.properties.get("call_site_line"),
+            Some(&codegraph::PropertyValue::Int(2))
+        );
+        assert_eq!(
+            edge.properties.get("is_direct"),
+            Some(&codegraph::PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_unresolved_calls_stored_and_deduped() {
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_function(FunctionEntity::new("caller", 1, 3));
+        // callee is not defined in this file -> stored as unresolved (twice -> deduped).
+        ir.add_call(CallRelation::new("caller", "external", 2));
+        ir.add_call(CallRelation::new("caller", "external", 4));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let node = graph.get_node(fi.functions[0]).unwrap();
+        let unresolved = node
+            .properties
+            .get_string_list_compat("unresolved_calls")
+            .unwrap();
+        assert_eq!(unresolved, vec!["external".to_string()]);
+    }
+
+    // ---- type references + inheritance ----
+
+    #[test]
+    fn test_type_reference_edge() {
+        use codegraph_parser_api::TypeReference;
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_function(FunctionEntity::new("useit", 1, 3));
+        ir.add_class(ClassEntity::new("Config", 5, 10));
+        ir.add_type_reference(TypeReference::new("useit", "Config", 2));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let edges = graph
+            .get_edges_between(fi.functions[0], fi.classes[0])
+            .unwrap();
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::References
+        );
+    }
+
+    #[test]
+    fn test_unresolved_type_refs_stored() {
+        use codegraph_parser_api::TypeReference;
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_function(FunctionEntity::new("useit", 1, 3));
+        ir.add_type_reference(TypeReference::new("useit", "ExternalType", 2));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let node = graph.get_node(fi.functions[0]).unwrap();
+        let refs = node
+            .properties
+            .get_string_list_compat("unresolved_type_refs")
+            .unwrap();
+        assert_eq!(refs, vec!["ExternalType".to_string()]);
+    }
+
+    #[test]
+    fn test_inheritance_extends_edge() {
+        use codegraph_parser_api::InheritanceRelation;
+        let mut ir = CodeIR::new(PathBuf::from("test.go"));
+        ir.add_class(ClassEntity::new("Derived", 1, 5));
+        ir.add_class(ClassEntity::new("Base", 7, 10));
+        ir.add_inheritance(InheritanceRelation::new("Derived", "Base").with_order(0));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, Path::new("test.go")).unwrap();
+
+        let edges = graph
+            .get_edges_between(fi.classes[0], fi.classes[1])
+            .unwrap();
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Extends);
+        assert_eq!(
+            edge.properties.get("order"),
+            Some(&codegraph::PropertyValue::Int(0))
         );
     }
 }
