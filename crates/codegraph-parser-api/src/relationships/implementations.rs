@@ -21,3 +21,44 @@ impl ImplementationRelation {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sets_both_fields() {
+        let r = ImplementationRelation::new("MyStruct", "Display");
+        assert_eq!(r.implementor, "MyStruct");
+        assert_eq!(r.trait_name, "Display");
+    }
+
+    #[test]
+    fn accepts_string_and_str_inputs() {
+        let r = ImplementationRelation::new(String::from("S"), "T");
+        assert_eq!(r.implementor, "S");
+        assert_eq!(r.trait_name, "T");
+    }
+
+    #[test]
+    fn equality_and_hash_distinguish_pairs() {
+        use std::collections::HashSet;
+        let a = ImplementationRelation::new("S", "T");
+        let b = ImplementationRelation::new("S", "T");
+        let c = ImplementationRelation::new("S", "U");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(!set.insert(b));
+        assert!(set.insert(c));
+    }
+
+    #[test]
+    fn round_trips_through_json() {
+        let r = ImplementationRelation::new("S", "T");
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ImplementationRelation = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+}
