@@ -284,6 +284,71 @@ mod tests {
     }
 
     #[test]
+    fn test_export_csv_nodes_sparse_columns_leave_empty_fields() {
+        // Two nodes with disjoint property keys force a union header; each row
+        // must leave an empty field wherever it lacks one of the union keys,
+        // exercising the None arm of `node.properties.get(key)`.
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // node 0: CodeFile carries `language` and `path`.
+        helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        // node 1: Function carries only `name`.
+        graph
+            .add_node(
+                crate::NodeType::Function,
+                PropertyMap::new().with("name", "f"),
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.csv");
+        export_csv_nodes(&graph, &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut lines = content.lines();
+        // Union of keys, sorted: language, name, path.
+        assert_eq!(lines.next().unwrap(), "id,type,language,name,path");
+        // CodeFile row: name column is empty (missing key -> empty field).
+        assert_eq!(lines.next().unwrap(), "0,CodeFile,python,,a.py");
+        // Function row: language and path columns are empty.
+        assert_eq!(lines.next().unwrap(), "1,Function,,f,");
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn test_export_csv_edges_sparse_columns_leave_empty_fields() {
+        // Two edges with disjoint property keys likewise exercise the empty-field
+        // (None) arm of `edge.properties.get(key)` in the edge writer.
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        // edge 0: Imports carries only `symbols`.
+        helpers::add_import(&mut graph, a, b, vec!["foo"]).unwrap();
+        // edge 1: Calls carries only `line`.
+        graph
+            .add_edge(
+                a,
+                b,
+                crate::EdgeType::Calls,
+                PropertyMap::new().with("line", 5),
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edges.csv");
+        export_csv_edges(&graph, &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut lines = content.lines();
+        // Union of edge keys, sorted: line, symbols.
+        assert_eq!(lines.next().unwrap(), "id,source,target,type,line,symbols");
+        // Imports edge: line column is empty, symbols is present.
+        assert_eq!(lines.next().unwrap(), "0,0,1,Imports,,foo");
+        // Calls edge: line is present, symbols column is empty.
+        assert_eq!(lines.next().unwrap(), "1,0,1,Calls,5,");
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
     fn test_export_csv_writes_both_files() {
         let mut graph = CodeGraph::in_memory().unwrap();
         let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();

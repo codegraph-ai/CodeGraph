@@ -314,9 +314,7 @@ mod tests {
 
     #[test]
     fn test_get_float_and_wrong_type() {
-        let props = PropertyMap::new()
-            .with("score", 0.75f64)
-            .with("name", "fn");
+        let props = PropertyMap::new().with("score", 0.75f64).with("name", "fn");
 
         assert_eq!(props.get_float("score"), Some(0.75));
         // Non-float value returns None (no coercion)
