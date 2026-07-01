@@ -187,9 +187,7 @@ impl<'a> GroovyVisitor<'a> {
             .map(|body| self.calculate_complexity(body));
 
         // Return type: `type` field (may be `def` keyword text or an actual type)
-        let return_type = node
-            .child_by_field_name("type")
-            .map(|n| self.node_text(n));
+        let return_type = node.child_by_field_name("type").map(|n| self.node_text(n));
 
         let is_test = self.node_is_test(node);
 
@@ -264,9 +262,8 @@ impl<'a> GroovyVisitor<'a> {
                     if let Some(name_node) = child.child_by_field_name("name") {
                         let name = self.node_text(name_node);
                         if !name.is_empty() {
-                            let type_name = child
-                                .child_by_field_name("type")
-                                .map(|t| self.node_text(t));
+                            let type_name =
+                                child.child_by_field_name("type").map(|t| self.node_text(t));
                             let mut p = Parameter::new(name);
                             if let Some(t) = type_name {
                                 p = p.with_type(t);
@@ -308,7 +305,9 @@ impl<'a> GroovyVisitor<'a> {
             "else_clause" => {
                 builder.add_branch();
             }
-            "for_statement" | "enhanced_for_statement" | "while_statement"
+            "for_statement"
+            | "enhanced_for_statement"
+            | "while_statement"
             | "do_while_statement" => {
                 builder.add_loop();
                 builder.enter_scope();
