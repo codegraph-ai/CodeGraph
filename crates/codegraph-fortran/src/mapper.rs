@@ -247,91 +247,268 @@ pub fn ir_to_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{ClassEntity, FunctionEntity, ImportRelation, ModuleEntity};
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
+    };
     use std::path::PathBuf;
+
+    fn map(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(ir, &mut graph, Path::new("test.f90")).unwrap();
+        (graph, info)
+    }
+
+    /// Assert exactly one edge between src and dst and return its id.
+    fn edge_between(graph: &CodeGraph, src: NodeId, dst: NodeId) -> codegraph::EdgeId {
+        let edges = graph.get_edges_between(src, dst).unwrap();
+        assert_eq!(edges.len(), 1, "expected exactly one edge {src}->{dst}");
+        edges[0]
+    }
 
     #[test]
     fn test_ir_to_graph_empty() {
         let ir = CodeIR::new(PathBuf::from("test.f90"));
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.f90").as_path());
+        let (graph, info) = map(&ir);
 
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.functions.len(), 0);
-        assert_eq!(file_info.classes.len(), 0);
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.imports.len(), 0);
+        assert_eq!(graph.node_count(), 1);
+
+        // File node name comes from the path stem, language is fortran.
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("test"));
+        assert_eq!(file.properties.get_string("language"), Some("fortran"));
+        assert_eq!(info.line_count, 0);
     }
 
     #[test]
-    fn test_ir_to_graph_with_program_unit() {
+    fn test_unknown_name_fallback() {
+        let ir = CodeIR::new(PathBuf::from(".."));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, Path::new("..")).unwrap();
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("unknown"));
+    }
+
+    #[test]
+    fn test_module_drives_file_metadata() {
         let mut ir = CodeIR::new(PathBuf::from("test.f90"));
-        ir.add_class(ClassEntity::new("hello", 1, 5));
+        ir.set_module(
+            ModuleEntity::new("mymod", "test.f90", "fortran")
+                .with_line_count(42)
+                .with_doc("module doc"),
+        );
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.f90").as_path());
-
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.classes.len(), 1);
+        let (graph, info) = map(&ir);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("mymod"));
+        assert_eq!(file.properties.get_int("line_count"), Some(42));
+        assert_eq!(file.properties.get_string("doc"), Some("module doc"));
+        assert_eq!(info.line_count, 42);
     }
 
     #[test]
-    fn test_ir_to_graph_with_function() {
+    fn test_program_unit_class_node_and_contains() {
+        let mut ir = CodeIR::new(PathBuf::from("test.f90"));
+        ir.add_class(ClassEntity::new("hello", 1, 5).with_visibility("public"));
+
+        let (graph, info) = map(&ir);
+        assert_eq!(info.classes.len(), 1);
+        assert_eq!(graph.node_count(), 2);
+
+        let class = graph.get_node(info.classes[0]).unwrap();
+        assert_eq!(class.node_type, NodeType::Class);
+        assert_eq!(class.properties.get_string("name"), Some("hello"));
+        assert_eq!(class.properties.get_int("line_start"), Some(1));
+        assert_eq!(class.properties.get_int("line_end"), Some(5));
+        assert_eq!(class.properties.get_bool("is_abstract"), Some(false));
+
+        // File contains the class.
+        let edge_id = edge_between(&graph, info.file_id, info.classes[0]);
+        let edge = graph.get_edge(edge_id).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Contains);
+    }
+
+    #[test]
+    fn test_free_function_file_contains_and_flags() {
         let mut ir = CodeIR::new(PathBuf::from("test.f90"));
         ir.add_function(FunctionEntity::new("add", 2, 6));
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.f90").as_path());
+        let (graph, info) = map(&ir);
+        assert_eq!(info.functions.len(), 1);
 
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.functions.len(), 1);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.node_type, NodeType::Function);
+        assert_eq!(func.properties.get_string("name"), Some("add"));
+        assert_eq!(func.properties.get_bool("is_async"), Some(false));
+        assert_eq!(func.properties.get_bool("is_static"), Some(false));
+        // No parent_class prop for a free function.
+        assert_eq!(func.properties.get_string("parent_class"), None);
+
+        let edge_id = edge_between(&graph, info.file_id, info.functions[0]);
+        assert_eq!(
+            graph.get_edge(edge_id).unwrap().edge_type,
+            EdgeType::Contains
+        );
     }
 
     #[test]
-    fn test_ir_to_graph_with_imports() {
+    fn test_function_complexity_props() {
         let mut ir = CodeIR::new(PathBuf::from("test.f90"));
-        ir.add_import(ImportRelation::new("file", "iso_fortran_env"));
+        let complexity = ComplexityMetrics::new()
+            .with_branches(3)
+            .with_loops(2)
+            .finalize();
+        ir.add_function(FunctionEntity::new("compute", 1, 20).with_complexity(complexity));
+
+        let (graph, info) = map(&ir);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.properties.get_int("complexity_branches"), Some(3));
+        assert_eq!(func.properties.get_int("complexity_loops"), Some(2));
+        assert!(func.properties.get_string("complexity_grade").is_some());
+    }
+
+    #[test]
+    fn test_function_contained_by_known_parent() {
+        let mut ir = CodeIR::new(PathBuf::from("test.f90"));
+        ir.add_class(ClassEntity::new("hello", 1, 10));
+        ir.add_function(FunctionEntity::new("inner", 2, 4).with_parent_class("hello"));
+
+        let (graph, info) = map(&ir);
+        let class_id = info.classes[0];
+        let func_id = info.functions[0];
+
+        // Contained by the class, not the file (classes map before functions).
+        let edge_id = edge_between(&graph, class_id, func_id);
+        assert_eq!(
+            graph.get_edge(edge_id).unwrap().edge_type,
+            EdgeType::Contains
+        );
+        assert!(graph
+            .get_edges_between(info.file_id, func_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_function_unknown_parent_falls_back_to_file() {
+        let mut ir = CodeIR::new(PathBuf::from("test.f90"));
+        ir.add_function(FunctionEntity::new("orphan", 2, 4).with_parent_class("missing"));
+
+        let (graph, info) = map(&ir);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        // parent_class prop is still recorded even though the parent is absent.
+        assert_eq!(func.properties.get_string("parent_class"), Some("missing"));
+
+        let edge_id = edge_between(&graph, info.file_id, info.functions[0]);
+        assert_eq!(
+            graph.get_edge(edge_id).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    #[test]
+    fn test_import_external_module_with_symbols_and_wildcard() {
+        let mut ir = CodeIR::new(PathBuf::from("test.f90"));
+        ir.add_import(
+            ImportRelation::new("file", "iso_fortran_env")
+                .with_symbols(vec!["real64".to_string(), "int32".to_string()])
+                .wildcard(),
+        );
+
+        let (graph, info) = map(&ir);
+        assert_eq!(info.imports.len(), 1);
+
+        let module = graph.get_node(info.imports[0]).unwrap();
+        assert_eq!(module.node_type, NodeType::Module);
+        assert_eq!(
+            module.properties.get_string("name"),
+            Some("iso_fortran_env")
+        );
+        assert_eq!(module.properties.get_string("is_external"), Some("true"));
+
+        // Fortran records symbols (StringList) and is_wildcard on the Imports edge.
+        let edge_id = edge_between(&graph, info.file_id, info.imports[0]);
+        let edge = graph.get_edge(edge_id).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert_eq!(edge.properties.get_string("is_wildcard"), Some("true"));
+        assert_eq!(
+            edge.properties.get_string_list_compat("symbols"),
+            Some(vec!["real64".to_string(), "int32".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_duplicate_import_dedup() {
+        let mut ir = CodeIR::new(PathBuf::from("test.f90"));
+        ir.add_import(ImportRelation::new("file", "mylib"));
         ir.add_import(ImportRelation::new("file", "mylib"));
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.f90").as_path());
+        let (graph, info) = map(&ir);
+        assert_eq!(info.imports.len(), 2);
+        // Both imports resolve to a single Module node (file + one module = 2 nodes).
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(info.imports[0], info.imports[1]);
+        // Two Imports edges from the file to the same module.
+        assert_eq!(
+            graph
+                .get_edges_between(info.file_id, info.imports[0])
+                .unwrap()
+                .len(),
+            2
+        );
+    }
 
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.imports.len(), 2);
+    #[test]
+    fn test_resolved_and_unresolved_calls() {
+        let mut ir = CodeIR::new(PathBuf::from("test.f90"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        // Resolved: both endpoints known.
+        ir.add_call(CallRelation::new("caller", "callee", 3));
+        // Unresolved: callee not in node_map.
+        ir.add_call(CallRelation::new("caller", "external_sub", 4));
+
+        let (graph, info) = map(&ir);
+        let caller_id = info.functions[0];
+        let callee_id = info.functions[1];
+
+        // Resolved call becomes a Calls edge with call_site_line + is_direct.
+        let edge_id = edge_between(&graph, caller_id, callee_id);
+        let edge = graph.get_edge(edge_id).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(edge.properties.get_int("call_site_line"), Some(3));
+        assert_eq!(edge.properties.get_bool("is_direct"), Some(true));
+
+        // Unresolved call stored as a list prop on the caller, no edge created.
+        let caller = graph.get_node(caller_id).unwrap();
+        assert_eq!(
+            caller.properties.get_string_list_compat("unresolved_calls"),
+            Some(vec!["external_sub".to_string()])
+        );
     }
 
     #[test]
     fn test_property_types() {
-        use codegraph::PropertyValue;
-
         let mut ir = CodeIR::new(PathBuf::from("test.f90"));
         ir.set_module(ModuleEntity::new("test", "test.f90", "fortran").with_line_count(50));
-        let func = FunctionEntity::new("compute", 5, 15);
-        ir.add_function(func);
+        ir.add_function(FunctionEntity::new("compute", 5, 15));
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let file_info = ir_to_graph(&ir, &mut graph, std::path::Path::new("test.f90")).unwrap();
+        let (graph, info) = map(&ir);
 
-        let file_node = graph.get_node(file_info.file_id).unwrap();
-        assert!(
-            matches!(
-                file_node.properties.get("line_count"),
-                Some(PropertyValue::Int(50))
-            ),
-            "line_count should be Int, got {:?}",
-            file_node.properties.get("line_count")
-        );
+        let file_node = graph.get_node(info.file_id).unwrap();
+        assert!(matches!(
+            file_node.properties.get("line_count"),
+            Some(PropertyValue::Int(50))
+        ));
 
-        let func_node = graph.get_node(file_info.functions[0]).unwrap();
-        assert!(
-            matches!(
-                func_node.properties.get("line_start"),
-                Some(PropertyValue::Int(5))
-            ),
-            "line_start should be Int(5), got {:?}",
-            func_node.properties.get("line_start")
-        );
+        let func_node = graph.get_node(info.functions[0]).unwrap();
+        assert!(matches!(
+            func_node.properties.get("line_start"),
+            Some(PropertyValue::Int(5))
+        ));
     }
 }
