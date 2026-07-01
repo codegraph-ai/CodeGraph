@@ -276,4 +276,67 @@ end
             "Expected process -> helper call"
         );
     }
+
+    #[test]
+    fn test_extract_module_metadata_assembly() {
+        let source = r#"
+def noop
+end
+"#;
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("sample.rb"), &config).unwrap();
+
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "sample");
+        assert_eq!(module.path, Path::new("sample.rb").display().to_string());
+        assert_eq!(module.language, "ruby");
+        assert_eq!(module.line_count, source.lines().count());
+        assert_eq!(module.doc_comment, None);
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_extract_unknown_module_name_fallback() {
+        // Path::new("") has no file_stem, so the name falls back to "unknown".
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new(""), &config).unwrap();
+
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_extract_empty_source_zero_line_count() {
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new("empty.rb"), &config).unwrap();
+
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.line_count, 0);
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_extract_line_count_tracks_blank_lines() {
+        // line_count derives from source.lines().count(), independent of entities.
+        let source = "\n\n\ndef only\nend\n\n\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("blanks.rb"), &config).unwrap();
+
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.line_count, source.lines().count());
+    }
+
+    #[test]
+    fn test_extract_syntax_error_returns_err() {
+        // An unclosed class body produces an ERROR node, hitting the has_error() branch.
+        let source = "class Broken\n  def oops\n";
+        let config = ParserConfig::default();
+        let result = extract(source, Path::new("broken.rb"), &config);
+
+        assert!(matches!(result, Err(ParserError::SyntaxError(..))));
+    }
 }
