@@ -7,10 +7,9 @@
 //! and extracts functions, structs, enums, traits, and their relationships.
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, Field, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, ParserConfig,
-    TraitEntity, TypeReference, BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, Field,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    ParserConfig, TraitEntity, TypeReference, BODY_PREFIX_MAX_CHARS,
 };
 use tree_sitter::Node;
 
@@ -319,9 +318,7 @@ impl<'a> RustVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -412,9 +409,7 @@ impl<'a> RustVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let class = ClassEntity {
@@ -455,9 +450,7 @@ impl<'a> RustVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let class = ClassEntity {
@@ -628,9 +621,7 @@ impl<'a> RustVisitor<'a> {
                             .child_by_field_name("body")
                             .and_then(|b| b.utf8_text(self.source).ok())
                             .filter(|t| !t.is_empty())
-                            .map(|t| {
-                                truncate_body_prefix(t)
-                            })
+                            .map(|t| truncate_body_prefix(t))
                             .map(|t| t.to_string()),
                     };
 
@@ -1162,7 +1153,9 @@ mod tests {
 
     fn parse_and_visit(source: &str) -> RustVisitor<'_> {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = RustVisitor::new(source.as_bytes(), ParserConfig::default());
@@ -1952,6 +1945,244 @@ impl MyStruct {
     }
 
     #[test]
+    fn test_visitor_doc_comment_never_populated() {
+        // Pin a real latent gap: outer `///` doc comments and `#[doc = "..."]`
+        // attributes both parse as *preceding siblings* of the item, not as
+        // children. extract_doc_comment only walks children, so doc_comment is
+        // effectively never populated for top-level Rust items.
+        let via_slashes = parse_and_visit("/// Line one.\n/// Line two.\nfn documented() {}\n");
+        assert_eq!(
+            via_slashes.functions[0].doc_comment, None,
+            "/// doc comments are siblings, not children — currently dropped"
+        );
+
+        let via_attr = parse_and_visit("#[doc = \"attr docs\"]\nfn adoc() {}\n");
+        assert_eq!(
+            via_attr.functions[0].doc_comment, None,
+            "#[doc] attribute is a preceding sibling — currently dropped"
+        );
+    }
+
+    #[test]
+    fn test_visitor_pub_super_is_protected() {
+        // pub(crate) -> internal is already covered; pin pub(super) -> protected.
+        let visitor = parse_and_visit("pub(super) fn restricted() {}\n");
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "protected");
+    }
+
+    #[test]
+    fn test_visitor_return_type_arrow_stripped() {
+        let visitor = parse_and_visit("fn make() -> String { String::new() }\n");
+        assert_eq!(
+            visitor.functions[0].return_type,
+            Some("String".to_string()),
+            "return type should have the -> and surrounding whitespace stripped"
+        );
+    }
+
+    #[test]
+    fn test_visitor_self_parameter_typed() {
+        // A method's &self parameter is captured with name "self" and type "Self".
+        let source = r#"
+struct Foo;
+impl Foo {
+    fn method(&self, count: i32) {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "method")
+            .unwrap();
+        assert_eq!(method.parameters.len(), 2);
+        assert_eq!(method.parameters[0].name, "self");
+        assert_eq!(
+            method.parameters[0].type_annotation,
+            Some("Self".to_string())
+        );
+        assert_eq!(method.parameters[1].name, "count");
+    }
+
+    #[test]
+    fn test_visitor_impl_static_vs_instance_method() {
+        // is_static is derived from the absence of a self parameter.
+        let source = r#"
+struct Foo;
+impl Foo {
+    fn make() -> Self { Foo }
+    fn use_it(&self) {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let make = visitor.functions.iter().find(|f| f.name == "make").unwrap();
+        let use_it = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "use_it")
+            .unwrap();
+        assert!(make.is_static, "associated fn without self is static");
+        assert!(!use_it.is_static, "method with &self is not static");
+    }
+
+    #[test]
+    fn test_visitor_body_prefix_captured() {
+        let visitor = parse_and_visit("fn work() {\n    let x = 1;\n}\n");
+        let bp = visitor.functions[0]
+            .body_prefix
+            .as_ref()
+            .expect("body_prefix should be captured");
+        assert!(bp.starts_with('{'), "body_prefix should include the braces");
+        assert!(bp.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn test_visitor_trait_supertraits() {
+        // `trait Sub: Base + Clone` records the supertrait bounds as parent_traits.
+        let source = r#"
+pub trait Sub: Base + Clone {
+    fn need(&self);
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let sub = visitor.traits.iter().find(|t| t.name == "Sub").unwrap();
+        assert_eq!(
+            sub.parent_traits,
+            vec!["Base".to_string(), "Clone".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_visitor_field_expression_call() {
+        // obj.bar() on a non-self receiver records the field name as the callee.
+        let source = r#"
+fn caller() {
+    obj.bar();
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let callees: Vec<&str> = visitor.calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(
+            callees.contains(&"bar"),
+            "field-expression call obj.bar() should record callee `bar`, got {:?}",
+            callees
+        );
+    }
+
+    #[test]
+    fn test_visitor_constrained_type_parameter() {
+        // `struct Foo<T: Clone>` extracts just the bound name `T`, dropping `Clone`.
+        let visitor = parse_and_visit("struct Foo<T: Clone> { value: T }\n");
+        let foo = visitor.classes.iter().find(|c| c.name == "Foo").unwrap();
+        assert_eq!(
+            foo.type_parameters,
+            vec!["T".to_string()],
+            "constrained type param should yield only the parameter name"
+        );
+    }
+
+    #[test]
+    fn test_visitor_struct_field_visibility() {
+        // pub field -> public, bare field -> private.
+        let source = r#"
+struct S {
+    pub open: i32,
+    closed: i32,
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let s = visitor.classes.iter().find(|c| c.name == "S").unwrap();
+        let open = s.fields.iter().find(|f| f.name == "open").unwrap();
+        let closed = s.fields.iter().find(|f| f.name == "closed").unwrap();
+        assert_eq!(open.visibility, "public");
+        assert_eq!(closed.visibility, "private");
+    }
+
+    #[test]
+    fn test_type_refs_tuple_and_array() {
+        // Tuple and array type annotations recurse to their element types.
+        let source = r#"
+struct A; struct B; struct C;
+fn tup(x: (A, B)) {}
+fn arr(x: [C; 3]) {}
+"#;
+        let visitor = parse_and_visit(source);
+        let tup: Vec<&str> = visitor
+            .type_references
+            .iter()
+            .filter(|r| r.referrer == "tup")
+            .map(|r| r.type_name.as_str())
+            .collect();
+        assert!(
+            tup.contains(&"A") && tup.contains(&"B"),
+            "tuple type (A, B) -> A, B, got {:?}",
+            tup
+        );
+        let arr: Vec<&str> = visitor
+            .type_references
+            .iter()
+            .filter(|r| r.referrer == "arr")
+            .map(|r| r.type_name.as_str())
+            .collect();
+        assert!(arr.contains(&"C"), "array type [C; 3] -> C, got {:?}", arr);
+    }
+
+    #[test]
+    fn test_type_refs_dyn_trait() {
+        // `Box<dyn MyTrait>` return type extracts the trait name through the
+        // generic + dynamic_type nesting.
+        let source = r#"
+trait MyTrait {}
+fn factory() -> Box<dyn MyTrait> { unimplemented!() }
+"#;
+        let visitor = parse_and_visit(source);
+        let refs: Vec<&str> = visitor
+            .type_references
+            .iter()
+            .filter(|r| r.referrer == "factory")
+            .map(|r| r.type_name.as_str())
+            .collect();
+        assert!(
+            refs.contains(&"MyTrait"),
+            "dyn MyTrait should be extracted, got {:?}",
+            refs
+        );
+    }
+
+    #[test]
+    fn test_complexity_while_let_loop() {
+        // `while let` is counted as a loop just like a plain `while`.
+        let source = r#"
+fn drain(mut it: std::vec::IntoIter<i32>) {
+    while let Some(_x) = it.next() {}
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let cx = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(cx.loops, 1, "while let should increment the loop count");
+    }
+
+    #[test]
+    fn test_visitor_skip_private_config() {
+        // With skip_private set, private top-level functions are dropped.
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        let source = "fn priv_fn() {}\npub fn pub_fn() {}\n";
+        let tree = parser.parse(source, None).unwrap();
+        let config = ParserConfig {
+            skip_private: true,
+            ..ParserConfig::default()
+        };
+        let mut visitor = RustVisitor::new(source.as_bytes(), config);
+        visitor.visit_node(tree.root_node());
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["pub_fn"], "private fn should be skipped");
+    }
+
+    #[test]
     fn test_type_refs_primitives_filtered() {
         let source = r#"
 fn add(a: i32, b: u64) -> f64 { 0.0 }
@@ -1963,5 +2194,4 @@ fn add(a: i32, b: u64) -> f64 { 0.0 }
             visitor.type_references
         );
     }
-
 }
