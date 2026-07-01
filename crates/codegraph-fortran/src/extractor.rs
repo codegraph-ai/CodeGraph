@@ -150,6 +150,60 @@ mod tests {
     }
 
     #[test]
+    fn module_metadata_full_assembly() {
+        // test_extract_module_info asserts name/language/line_count>0 but never
+        // the remaining ModuleEntity fields set directly by extract().
+        let source = "program test\nend program test\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("dir/my_prog.f90"), &config).unwrap();
+        let module = ir.module.unwrap();
+        assert_eq!(module.path, "dir/my_prog.f90");
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn module_name_unknown_stem_fallback() {
+        // A path with no usable file_stem reaches the unwrap_or("unknown") arm.
+        let config = ParserConfig::default();
+        let ir = extract("program p\nend program p\n", Path::new(""), &config).unwrap();
+        assert_eq!(ir.module.unwrap().name, "unknown");
+    }
+
+    #[test]
+    fn empty_source_yields_zero_line_count() {
+        // Empty source parses to a valid empty tree: module present, line_count 0,
+        // and no entities of any kind.
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new("empty.f90"), &config).unwrap();
+        let module = ir.module.clone().unwrap();
+        assert_eq!(module.line_count, 0);
+        assert!(ir.classes.is_empty());
+        assert!(ir.functions.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn line_count_tracks_blank_lines() {
+        // line_count reflects source.lines().count(), independent of entity count.
+        let source = "program p\n\n\n\nend program p\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("p.f90"), &config).unwrap();
+        assert_eq!(ir.module.unwrap().line_count, 5);
+    }
+
+    #[test]
+    fn imports_empty_for_program_without_use() {
+        // Mirror of test_extract_use_statement: a program with no use statement
+        // leaves ir.imports empty.
+        let source = "program main\n  implicit none\nend program main\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("main.f90"), &config).unwrap();
+        assert!(ir.imports.is_empty());
+    }
+
+    #[test]
     fn test_extract_with_preprocessor_directives() {
         // Fortran with C preprocessor directives (common in scientific code)
         let source = concat!(
