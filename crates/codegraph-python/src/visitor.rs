@@ -203,6 +203,15 @@ mod tests {
     }
 
     #[test]
+    fn prefixed_string_statement_is_not_treated_as_docstring() {
+        // A byte-string literal parses as an `expression_statement > string`, but its
+        // text starts with `b"` - matching neither the triple-quote nor the single
+        // `"`/`'` arms - so it falls through without yielding a docstring.
+        let src = "def f():\n    b\"not a doc\"\n    pass\n";
+        assert_eq!(docstring_of(src), None);
+    }
+
+    #[test]
     fn class_body_docstring_is_extracted() {
         let src = "class C:\n    \"\"\"class doc\"\"\"\n    pass\n";
         let tree = parse(src);
