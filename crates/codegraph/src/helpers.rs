@@ -653,3 +653,252 @@ pub fn circular_deps(graph: &CodeGraph) -> Result<Vec<Vec<NodeId>>> {
 
     Ok(file_cycles)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::CodeGraph;
+
+    fn graph() -> CodeGraph {
+        CodeGraph::in_memory().expect("in-memory graph")
+    }
+
+    #[test]
+    fn add_function_creates_contains_edge_from_file() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let func = add_function(&mut g, file, "foo", 1, 5).unwrap();
+
+        // The function is contained by the file.
+        assert_eq!(get_functions_in_file(&g, file).unwrap(), vec![func]);
+        let node = g.get_node(func).unwrap();
+        assert_eq!(node.node_type, NodeType::Function);
+        assert_eq!(node.properties.get_string("name"), Some("foo"));
+        assert_eq!(node.properties.get_int("line_start"), Some(1));
+        assert_eq!(node.properties.get_int("line_end"), Some(5));
+    }
+
+    #[test]
+    fn add_function_with_metadata_stores_all_fields() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let func = add_function_with_metadata(
+            &mut g,
+            file,
+            FunctionMetadata {
+                name: "bar",
+                line_start: 10,
+                line_end: 20,
+                visibility: "public",
+                signature: "fn bar()",
+                is_async: true,
+                is_test: true,
+            },
+        )
+        .unwrap();
+
+        let node = g.get_node(func).unwrap();
+        assert_eq!(node.properties.get_string("visibility"), Some("public"));
+        assert_eq!(node.properties.get_string("signature"), Some("fn bar()"));
+        assert_eq!(node.properties.get_bool("is_async"), Some(true));
+        assert_eq!(node.properties.get_bool("is_test"), Some(true));
+        // Auto-linked to its file.
+        assert_eq!(get_functions_in_file(&g, file).unwrap(), vec![func]);
+    }
+
+    #[test]
+    fn add_method_links_to_class_and_is_a_function() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let class = add_class(&mut g, file, "Widget", 1, 30).unwrap();
+        let method = add_method(&mut g, class, "render", 5, 10).unwrap();
+
+        assert_eq!(g.get_node(class).unwrap().node_type, NodeType::Class);
+        // A method is a Function node contained by the class, so scanning the
+        // class for functions surfaces it.
+        assert_eq!(get_functions_in_file(&g, class).unwrap(), vec![method]);
+    }
+
+    #[test]
+    fn add_module_has_name_and_path() {
+        let mut g = graph();
+        let m = add_module(&mut g, "utils", "src/utils.rs").unwrap();
+        let node = g.get_node(m).unwrap();
+        assert_eq!(node.node_type, NodeType::Module);
+        assert_eq!(node.properties.get_string("name"), Some("utils"));
+        assert_eq!(node.properties.get_string("path"), Some("src/utils.rs"));
+    }
+
+    #[test]
+    fn get_callers_and_callees_only_follow_calls_edges() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let caller = add_function(&mut g, file, "caller", 1, 5).unwrap();
+        let callee = add_function(&mut g, file, "callee", 6, 10).unwrap();
+        add_call(&mut g, caller, callee, 3).unwrap();
+
+        assert_eq!(get_callers(&g, callee).unwrap(), vec![caller]);
+        assert_eq!(get_callees(&g, caller).unwrap(), vec![callee]);
+        // No incoming Calls edge to the caller, no outgoing from the callee.
+        assert!(get_callers(&g, caller).unwrap().is_empty());
+        assert!(get_callees(&g, callee).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_callees_ignores_non_calls_edges() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        // The file Contains the function, but a Contains edge is not a Calls edge.
+        let func = add_function(&mut g, file, "foo", 1, 5).unwrap();
+        assert!(get_callees(&g, file).unwrap().is_empty());
+        assert!(get_callers(&g, func).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_functions_in_file_excludes_non_functions() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let func = add_function(&mut g, file, "foo", 1, 5).unwrap();
+        let class = add_class(&mut g, file, "Widget", 6, 30).unwrap();
+        // Both are contained, but only the Function is returned.
+        let funcs = get_functions_in_file(&g, file).unwrap();
+        assert_eq!(funcs, vec![func]);
+        assert!(!funcs.contains(&class));
+    }
+
+    #[test]
+    fn file_dependencies_and_dependents_follow_import_edges() {
+        let mut g = graph();
+        let a = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "src/b.rs", "rust").unwrap();
+        add_import(&mut g, a, b, vec!["thing"]).unwrap();
+
+        assert_eq!(get_file_dependencies(&g, a).unwrap(), vec![b]);
+        assert_eq!(get_file_dependents(&g, b).unwrap(), vec![a]);
+        // Reverse directions are empty.
+        assert!(get_file_dependencies(&g, b).unwrap().is_empty());
+        assert!(get_file_dependents(&g, a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn find_file_by_path_matches_and_misses() {
+        let mut g = graph();
+        let a = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        assert_eq!(find_file_by_path(&g, "src/a.rs").unwrap(), Some(a));
+        assert_eq!(find_file_by_path(&g, "src/missing.rs").unwrap(), None);
+    }
+
+    #[test]
+    fn node_ids_to_paths_skips_missing_and_pathless_nodes() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        // A function has no "path" property, and 9999 is a nonexistent id.
+        let func = add_function(&mut g, file, "foo", 1, 5).unwrap();
+        let resolved = node_ids_to_paths(&g, &[file, func, 9999]).unwrap();
+        assert_eq!(resolved, vec![(file, "src/a.rs".to_string())]);
+    }
+
+    #[test]
+    fn transitive_dependencies_walks_chain_and_respects_depth() {
+        let mut g = graph();
+        let a = add_file(&mut g, "a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "b.rs", "rust").unwrap();
+        let c = add_file(&mut g, "c.rs", "rust").unwrap();
+        add_import(&mut g, a, b, vec![]).unwrap();
+        add_import(&mut g, b, c, vec![]).unwrap();
+
+        let mut all = transitive_dependencies(&g, a, None).unwrap();
+        all.sort_unstable();
+        let mut expected = vec![b, c];
+        expected.sort_unstable();
+        assert_eq!(all, expected);
+
+        // Depth 1 only reaches the direct dependency.
+        assert_eq!(transitive_dependencies(&g, a, Some(1)).unwrap(), vec![b]);
+    }
+
+    #[test]
+    fn transitive_dependents_reverse_walks_chain() {
+        let mut g = graph();
+        let a = add_file(&mut g, "a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "b.rs", "rust").unwrap();
+        let c = add_file(&mut g, "c.rs", "rust").unwrap();
+        add_import(&mut g, a, b, vec![]).unwrap();
+        add_import(&mut g, b, c, vec![]).unwrap();
+
+        // c is imported by b, which is imported by a.
+        let mut all = transitive_dependents(&g, c, None).unwrap();
+        all.sort_unstable();
+        let mut expected = vec![a, b];
+        expected.sort_unstable();
+        assert_eq!(all, expected);
+    }
+
+    #[test]
+    fn transitive_dependencies_handles_cycles() {
+        let mut g = graph();
+        let a = add_file(&mut g, "a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "b.rs", "rust").unwrap();
+        add_import(&mut g, a, b, vec![]).unwrap();
+        add_import(&mut g, b, a, vec![]).unwrap();
+
+        // Cycle must not loop forever; a's only dependency is b.
+        assert_eq!(transitive_dependencies(&g, a, None).unwrap(), vec![b]);
+    }
+
+    #[test]
+    fn circular_deps_reports_file_cycles_only() {
+        let mut g = graph();
+        let a = add_file(&mut g, "a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "b.rs", "rust").unwrap();
+        add_import(&mut g, a, b, vec![]).unwrap();
+        add_import(&mut g, b, a, vec![]).unwrap();
+
+        let cycles = circular_deps(&g).unwrap();
+        assert_eq!(cycles.len(), 1);
+        let mut cycle = cycles[0].clone();
+        cycle.sort_unstable();
+        let mut expected = vec![a, b];
+        expected.sort_unstable();
+        assert_eq!(cycle, expected);
+    }
+
+    #[test]
+    fn circular_deps_empty_without_cycle() {
+        let mut g = graph();
+        let a = add_file(&mut g, "a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "b.rs", "rust").unwrap();
+        add_import(&mut g, a, b, vec![]).unwrap();
+        assert!(circular_deps(&g).unwrap().is_empty());
+    }
+
+    #[test]
+    fn call_chain_finds_path_between_functions() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let a = add_function(&mut g, file, "a", 1, 5).unwrap();
+        let b = add_function(&mut g, file, "b", 6, 10).unwrap();
+        let c = add_function(&mut g, file, "c", 11, 15).unwrap();
+        add_call(&mut g, a, b, 2).unwrap();
+        add_call(&mut g, b, c, 7).unwrap();
+
+        let chains = call_chain(&g, a, c, Some(10)).unwrap();
+        assert_eq!(chains, vec![vec![a, b, c]]);
+    }
+
+    #[test]
+    fn link_to_file_creates_contains_edge() {
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        // A bare Function node with no auto-link, then wire it manually.
+        let func = g
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new().with("name", "orphan"),
+            )
+            .unwrap();
+        assert!(get_functions_in_file(&g, file).unwrap().is_empty());
+        link_to_file(&mut g, file, func).unwrap();
+        assert_eq!(get_functions_in_file(&g, file).unwrap(), vec![func]);
+    }
+}
