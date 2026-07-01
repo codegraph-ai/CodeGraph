@@ -1624,4 +1624,103 @@ mod tests {
         assert!(desc.contains("runner"));
         assert!(desc.contains("do_work"));
     }
+
+    #[test]
+    fn estimate_tokens_is_len_over_four_floor() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abc"), 0); // 3/4 floors to 0
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcdefg"), 1); // 7/4 floors to 1
+        assert_eq!(estimate_tokens("abcdefgh"), 2);
+    }
+
+    #[test]
+    fn token_budget_consume_and_has_budget() {
+        let mut b = TokenBudget::new(10);
+        assert!(b.has_budget());
+        // Partial consume within budget succeeds.
+        assert!(b.consume(4));
+        assert!(b.has_budget());
+        // Consuming exactly up to the total succeeds and exhausts budget.
+        assert!(b.consume(6));
+        assert!(!b.has_budget()); // used == total is not < total
+                                  // Any further consume is rejected and leaves `used` unchanged.
+        assert!(!b.consume(1));
+        assert!(!b.has_budget());
+    }
+
+    #[test]
+    fn token_budget_over_budget_consume_does_not_mutate() {
+        let mut b = TokenBudget::new(10);
+        // A single request exceeding the total is rejected outright.
+        assert!(!b.consume(11));
+        // Budget was untouched, so a smaller request still fits.
+        assert!(b.consume(10));
+        // Zero-total budget has no budget from the start.
+        assert!(!TokenBudget::new(0).has_budget());
+    }
+
+    #[test]
+    fn make_location_prefixes_absolute_paths_with_file_scheme() {
+        let loc = make_location("/src/a.rs", 3, 7);
+        assert_eq!(loc.uri, "file:///src/a.rs");
+        assert_eq!(loc.range.start.line, 3);
+        assert_eq!(loc.range.start.character, 0);
+        assert_eq!(loc.range.end.line, 7);
+        assert_eq!(loc.range.end.character, 0);
+    }
+
+    #[test]
+    fn make_location_leaves_relative_paths_unscheme() {
+        let loc = make_location("src/a.rs", 0, 0);
+        assert_eq!(loc.uri, "src/a.rs");
+        assert_eq!(loc.range.start.line, 0);
+        assert_eq!(loc.range.end.line, 0);
+    }
+
+    #[test]
+    fn truncate_to_call_site_near_top_keeps_all_without_omission() {
+        // Target on line 1 (idx=1) => start=0, so no signature-prepend and
+        // no omitted markers for a short snippet fully inside the window.
+        let code = "fn sig() {\n    do_work();\n    more();\n}";
+        let out = truncate_to_call_site(code, "do_work");
+        assert!(out.contains("fn sig() {"));
+        assert!(out.contains("do_work();"));
+        assert!(out.contains("more();"));
+        assert!(!out.contains("lines omitted"));
+    }
+
+    #[test]
+    fn truncate_to_call_site_deep_prepends_signature_and_omits_both_sides() {
+        // 40 lines, target on line index 12 => start=7 (>1) prepends the
+        // signature plus a leading "6 lines omitted" (start-1) marker, and
+        // end=18 leaves a trailing "22 lines omitted" (40-18) marker.
+        let mut lines: Vec<String> = vec!["fn signature() {".to_string()];
+        for i in 1..40 {
+            if i == 12 {
+                lines.push("    target_call();".to_string());
+            } else {
+                lines.push(format!("    line_{i}();"));
+            }
+        }
+        let code = lines.join("\n");
+        let out = truncate_to_call_site(&code, "target_call");
+        assert!(out.contains("fn signature() {"));
+        assert!(out.contains("target_call();"));
+        assert!(out.contains("// ... (6 lines omitted)"));
+        assert!(out.contains("// ... (22 lines omitted)"));
+    }
+
+    #[test]
+    fn truncate_to_call_site_not_found_falls_back_to_max_related_lines() {
+        // 40 lines, none containing the target => fallback takes the first
+        // MAX_RELATED_LINES (30) and reports the remaining 10 as omitted.
+        let lines: Vec<String> = (0..40).map(|i| format!("stmt_{i}();")).collect();
+        let code = lines.join("\n");
+        let out = truncate_to_call_site(&code, "never_present");
+        assert!(out.contains("stmt_0();"));
+        assert!(out.contains("stmt_29();"));
+        assert!(!out.contains("stmt_30();"));
+        assert!(out.contains("// ... (10 lines omitted)"));
+    }
 }
