@@ -185,4 +185,133 @@ mod tests {
             .expect("ARG missing");
         assert!(arg.body_prefix.as_deref().unwrap_or("").contains("SECRET"));
     }
+
+    #[test]
+    fn test_line_numbers_are_one_indexed() {
+        // FROM is on the first physical line, so line_start == line_end == 1.
+        let source = b"FROM alpine:3\n";
+        let visitor = parse_and_visit(source);
+        let from = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "FROM")
+            .expect("FROM missing");
+        assert_eq!(from.line_start, 1);
+        assert_eq!(from.line_end, 1);
+    }
+
+    #[test]
+    fn test_second_directive_reports_later_line() {
+        // The RUN directive sits on physical line 2.
+        let source = b"FROM alpine:3\nRUN echo hi\n";
+        let visitor = parse_and_visit(source);
+        let run = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "RUN")
+            .expect("RUN missing");
+        assert_eq!(run.line_start, 2);
+    }
+
+    #[test]
+    fn test_emitted_entity_uses_default_fields() {
+        // Every directive is a plain public FunctionEntity with no params,
+        // flags, or class - the IaC scanner only relies on name/body_prefix.
+        let source = b"FROM alpine:3\n";
+        let visitor = parse_and_visit(source);
+        let from = &visitor.functions[0];
+        assert_eq!(from.visibility, "public");
+        assert!(from.parameters.is_empty());
+        assert!(!from.is_async);
+        assert!(!from.is_test);
+        assert!(!from.is_static);
+        assert!(!from.is_abstract);
+        assert!(from.return_type.is_none());
+        assert!(from.doc_comment.is_none());
+        assert!(from.attributes.is_empty());
+        assert!(from.parent_class.is_none());
+        assert!(from.complexity.is_none());
+    }
+
+    #[test]
+    fn test_signature_is_first_line_of_multiline_directive() {
+        // A RUN with a line continuation spans two physical lines. The
+        // signature keeps only the first line while body_prefix keeps both.
+        let source = b"RUN apt-get update && \\\n    apt-get install -y curl\n";
+        let visitor = parse_and_visit(source);
+        let run = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "RUN")
+            .expect("RUN missing");
+        assert!(
+            !run.signature.contains('\n'),
+            "signature should be a single line, got {:?}",
+            run.signature
+        );
+        assert!(run.signature.contains("apt-get update"));
+        // body_prefix retains the continuation content.
+        let body = run.body_prefix.as_deref().unwrap_or("");
+        assert!(body.contains("apt-get install"), "body was {body:?}");
+        // The directive spans two physical lines.
+        assert!(run.line_end > run.line_start);
+    }
+
+    #[test]
+    fn test_latest_tag_preserved_in_body() {
+        // The IaC scanner flags `:latest`; ensure the tag survives extraction.
+        let source = b"FROM nginx:latest\n";
+        let visitor = parse_and_visit(source);
+        let from = &visitor.functions[0];
+        assert!(from
+            .body_prefix
+            .as_deref()
+            .unwrap_or("")
+            .contains(":latest"));
+        assert!(from.signature.contains(":latest"));
+    }
+
+    #[test]
+    fn test_comment_only_source_yields_no_directives() {
+        let source = b"# just a comment\n# another comment\n";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.functions.is_empty(),
+            "expected no directives from comments, got {:?}",
+            visitor
+                .functions
+                .iter()
+                .map(|f| &f.name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_empty_source_yields_no_directives() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+    }
+
+    #[test]
+    fn test_copy_directive_extracted() {
+        let source = b"COPY . /app\n";
+        let visitor = parse_and_visit(source);
+        let copy = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "COPY")
+            .expect("COPY missing");
+        assert!(copy.body_prefix.as_deref().unwrap_or("").contains("/app"));
+    }
+
+    #[test]
+    fn test_directive_names_are_uppercased() {
+        // Directives written in lowercase still map to the uppercase name
+        // derived from the `<name>_instruction` node kind.
+        let source = b"from alpine:3\nrun echo hi\n";
+        let visitor = parse_and_visit(source);
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"FROM"), "missing FROM in {names:?}");
+        assert!(names.contains(&"RUN"), "missing RUN in {names:?}");
+    }
 }
