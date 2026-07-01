@@ -172,6 +172,36 @@ mod tests {
     }
 
     #[test]
+    fn mark_falls_back_to_userprofile_when_home_absent() {
+        // Windows path: HOME is unset, so codegraph_dir() must fall through the
+        // `.or_else` arm to USERPROFILE rather than short-circuiting on HOME.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("cg-phase-up-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let prev_home = std::env::var_os("HOME");
+        let prev_up = std::env::var_os("USERPROFILE");
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", &tmp);
+
+        mark("onnx_load");
+
+        let content = std::fs::read_to_string(marker_path(&tmp))
+            .expect("marker written under USERPROFILE when HOME is absent");
+        let v: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+        assert_eq!(v["phase"], "onnx_load");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_up {
+            Some(h) => std::env::set_var("USERPROFILE", h),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn mark_without_home_is_noop() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_home = std::env::var_os("HOME");
