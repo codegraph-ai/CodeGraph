@@ -224,3 +224,84 @@ fn build_fallback(
         (None, None)
     }
 }
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{NodeType, PropertyMap, PropertyValue};
+
+    /// Add a node with a `name` property, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, name: &str) -> NodeId {
+        let mut props = PropertyMap::new();
+        props.insert("name".to_string(), PropertyValue::String(name.to_string()));
+        graph.add_node(ty, props).expect("add_node")
+    }
+
+    #[test]
+    fn variants_finds_same_name_functions_excluding_self() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f32bit = add_node(&mut g, NodeType::Function, "backdoor");
+        let f64bit = add_node(&mut g, NodeType::Function, "backdoor");
+
+        let variants = find_same_name_variants(&g, "backdoor", f32bit);
+        assert_eq!(variants, vec![f64bit]);
+    }
+
+    #[test]
+    fn variants_excludes_the_query_node_itself() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let only = add_node(&mut g, NodeType::Function, "solo");
+
+        let variants = find_same_name_variants(&g, "solo", only);
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn variants_ignores_different_names() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, "alpha");
+        let _other = add_node(&mut g, NodeType::Function, "beta");
+
+        let variants = find_same_name_variants(&g, "alpha", target);
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn variants_ignores_non_function_nodes_with_same_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let func = add_node(&mut g, NodeType::Function, "shared");
+        // A Module sharing the name must not be treated as a call-graph variant.
+        let _module = add_node(&mut g, NodeType::Module, "shared");
+
+        let variants = find_same_name_variants(&g, "shared", func);
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn build_fallback_disabled_returns_none() {
+        let (used, message) = build_fallback(false, Some(42), "foo");
+        assert_eq!(used, None);
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn build_fallback_enabled_includes_line_and_name() {
+        let (used, message) = build_fallback(true, Some(42), "foo");
+        assert_eq!(used, Some(true));
+        assert_eq!(
+            message.as_deref(),
+            Some("No symbol at line 42. Using nearest symbol 'foo' instead.")
+        );
+    }
+
+    #[test]
+    fn build_fallback_missing_line_defaults_to_zero() {
+        let (used, message) = build_fallback(true, None, "bar");
+        assert_eq!(used, Some(true));
+        assert!(message.as_deref().unwrap().contains("line 0"));
+    }
+}
