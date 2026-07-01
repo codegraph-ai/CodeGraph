@@ -32,3 +32,159 @@ pub(crate) fn get_symbol_source(graph: &CodeGraph, node_id: NodeId) -> Option<St
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{NodeType, PropertyMap, PropertyValue};
+    use std::io::Write;
+
+    /// Add a Function node from a set of properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, props: PropertyMap) -> NodeId {
+        graph.add_node(NodeType::Function, props).expect("add_node")
+    }
+
+    fn props_with(pairs: &[(&str, PropertyValue)]) -> PropertyMap {
+        let mut props = PropertyMap::new();
+        for (k, v) in pairs {
+            props.insert((*k).to_string(), v.clone());
+        }
+        props
+    }
+
+    #[test]
+    fn missing_node_returns_none() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        // NodeId 999 was never added.
+        assert_eq!(get_symbol_source(&g, 999), None);
+    }
+
+    #[test]
+    fn inline_source_takes_precedence_over_disk() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Both an inline source and a (nonexistent) path are set; the inline
+        // source must win without any disk I/O being attempted.
+        let n = add_node(
+            &mut g,
+            props_with(&[
+                (
+                    "source",
+                    PropertyValue::String("fn inline() {}".to_string()),
+                ),
+                (
+                    "path",
+                    PropertyValue::String("/nonexistent/file.rs".to_string()),
+                ),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(1)),
+            ]),
+        );
+        assert_eq!(get_symbol_source(&g, n), Some("fn inline() {}".to_string()));
+    }
+
+    #[test]
+    fn missing_path_returns_none() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No inline source and no path property.
+        let n = add_node(
+            &mut g,
+            props_with(&[
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(2)),
+            ]),
+        );
+        assert_eq!(get_symbol_source(&g, n), None);
+    }
+
+    #[test]
+    fn missing_line_range_returns_none() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Path present but no line_start/line_end.
+        let n = add_node(
+            &mut g,
+            props_with(&[(
+                "path",
+                PropertyValue::String("/tmp/whatever.rs".to_string()),
+            )]),
+        );
+        assert_eq!(get_symbol_source(&g, n), None);
+    }
+
+    #[test]
+    fn reads_line_range_from_disk() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        writeln!(file, "line one\nline two\nline three\nline four").expect("write");
+        let path = file.path().to_str().expect("utf8 path").to_string();
+
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Lines 2..=3 (1-indexed, inclusive) => "line two\nline three".
+        let n = add_node(
+            &mut g,
+            props_with(&[
+                ("path", PropertyValue::String(path)),
+                ("line_start", PropertyValue::Int(2)),
+                ("line_end", PropertyValue::Int(3)),
+            ]),
+        );
+        assert_eq!(
+            get_symbol_source(&g, n),
+            Some("line two\nline three".to_string())
+        );
+    }
+
+    #[test]
+    fn end_line_past_eof_returns_none() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        writeln!(file, "only line").expect("write");
+        let path = file.path().to_str().expect("utf8 path").to_string();
+
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // end_line 5 exceeds the single line in the file.
+        let n = add_node(
+            &mut g,
+            props_with(&[
+                ("path", PropertyValue::String(path)),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ]),
+        );
+        assert_eq!(get_symbol_source(&g, n), None);
+    }
+
+    #[test]
+    fn zero_start_line_returns_none() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        writeln!(file, "a\nb\nc").expect("write");
+        let path = file.path().to_str().expect("utf8 path").to_string();
+
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // start_line 0 fails the `start_line > 0` guard.
+        let n = add_node(
+            &mut g,
+            props_with(&[
+                ("path", PropertyValue::String(path)),
+                ("line_start", PropertyValue::Int(0)),
+                ("line_end", PropertyValue::Int(2)),
+            ]),
+        );
+        assert_eq!(get_symbol_source(&g, n), None);
+    }
+
+    #[test]
+    fn nonexistent_path_returns_none() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Valid line range but the file does not exist on disk.
+        let n = add_node(
+            &mut g,
+            props_with(&[
+                (
+                    "path",
+                    PropertyValue::String("/nonexistent/does/not/exist.rs".to_string()),
+                ),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(1)),
+            ]),
+        );
+        assert_eq!(get_symbol_source(&g, n), None);
+    }
+}
