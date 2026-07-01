@@ -424,6 +424,7 @@ impl<'a> ScalaVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> ScalaVisitor<'_> {
         use tree_sitter::Parser;
@@ -702,5 +703,130 @@ mod tests {
         let source = b"def a(): Int = 1\ndef b(): Int = 2\ndef c(): Int = 3";
         let visitor = parse_and_visit(source);
         assert_eq!(visitor.functions.len(), 3);
+    }
+
+    #[test]
+    fn test_function_line_offset_by_blank_lines() {
+        let source = b"\n\ndef add(a: Int, b: Int): Int = a + b";
+        let visitor = parse_and_visit(source);
+        // two leading blank lines push the 1-indexed def onto line 3
+        assert_eq!(visitor.functions[0].line_start, 3);
+        assert_eq!(visitor.functions[0].line_end, 3);
+    }
+
+    #[test]
+    fn test_function_body_prefix_truncated() {
+        // build a body whose text far exceeds BODY_PREFIX_MAX_CHARS
+        let filler = "x + ".repeat(BODY_PREFIX_MAX_CHARS);
+        let source = format!("def big(): Int = {{\n  {filler}0\n}}");
+        let visitor = parse_and_visit(source.as_bytes());
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(bp.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_while_expression_raises_complexity() {
+        let source = b"def loop(): Unit = {\n  while (true) println(1)\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_logical_operator_raises_complexity() {
+        let source = b"def both(a: Boolean, b: Boolean): Boolean = {\n  a && b\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_call_extraction_default_metadata() {
+        let source = b"def helper(): Int = 1\ndef caller(): Int = {\n  helper()\n}";
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("helper() call extracted");
+        assert_eq!(call.caller, "caller");
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+        // call sits on the 3rd line of the source (1-indexed)
+        assert_eq!(call.call_site_line, 3);
+    }
+
+    #[test]
+    fn test_trait_metadata_defaults() {
+        let source = b"trait Greeter {\n  def greet(): String\n}";
+        let visitor = parse_and_visit(source);
+        let t = &visitor.traits[0];
+        assert_eq!(t.visibility, "public");
+        assert_eq!(t.line_start, 1);
+        assert!(t.parent_traits.is_empty());
+        assert!(t.required_methods.is_empty());
+        assert!(t.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_object_body_prefix_present() {
+        let source = b"object Config {\n  val port = 8080\n}";
+        let visitor = parse_and_visit(source);
+        let c = &visitor.classes[0];
+        assert!(c.body_prefix.is_some());
+        assert!(c.body_prefix.as_ref().unwrap().contains("port"));
+    }
+
+    #[test]
+    fn test_object_method_parented_and_not_static() {
+        let source = b"object Util {\n  def helper(): Int = 1\n}";
+        let visitor = parse_and_visit(source);
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "helper")
+            .expect("object method extracted");
+        // methods inside an object take the object as their enclosing class
+        assert_eq!(f.parent_class.as_deref(), Some("Util"));
+        assert!(!f.is_static);
+    }
+
+    #[test]
+    fn test_class_body_prefix_present() {
+        let source = b"class Calc {\n  def add(a: Int): Int = a\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Calc")
+            .expect("class extracted");
+        assert!(c.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_multiple_imports_preserved() {
+        let source = b"import scala.collection.mutable.ListBuffer\nimport java.util.HashMap";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 2);
+        assert_eq!(
+            visitor.imports[0].imported,
+            "scala.collection.mutable.ListBuffer"
+        );
+        assert_eq!(visitor.imports[1].imported, "java.util.HashMap");
+    }
+
+    #[test]
+    fn test_case_class_line_end_spans_body() {
+        let source = b"class Box {\n  def a(): Int = 1\n  def b(): Int = 2\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Box")
+            .expect("class extracted");
+        // class spans 4 physical lines (1-indexed closing brace on line 4)
+        assert_eq!(c.line_start, 1);
+        assert_eq!(c.line_end, 4);
     }
 }
