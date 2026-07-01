@@ -360,4 +360,112 @@ mod tests {
         assert!(hb.last_index_at > 0);
         assert_eq!(hb.last_index_at, hb.heartbeat_at);
     }
+
+    #[test]
+    fn new_captures_process_and_matching_start_heartbeat() {
+        let hb = DaemonHeartbeat::new(PathBuf::from("/ws/root"), "slug-new".to_string());
+        assert_eq!(hb.pid, std::process::id());
+        assert_eq!(hb.workspace, PathBuf::from("/ws/root"));
+        assert_eq!(hb.slug, "slug-new");
+        assert_eq!(hb.last_index_at, 0);
+        // A brand-new heartbeat stamps started_at == heartbeat_at.
+        assert_eq!(hb.started_at, hb.heartbeat_at);
+    }
+
+    #[test]
+    fn touch_advances_heartbeat_only_not_last_index() {
+        let mut hb = DaemonHeartbeat::new(PathBuf::from("/tmp/ws"), "slug-touch".to_string());
+        // Backdate the liveness stamp so touch() has room to move it forward.
+        hb.heartbeat_at = now_unix().saturating_sub(5);
+        let before_index = hb.last_index_at;
+        hb.touch();
+        assert!(hb.heartbeat_at >= now_unix().saturating_sub(1));
+        // touch() is a pure liveness refresh: it must not touch last_index_at.
+        assert_eq!(hb.last_index_at, before_index);
+    }
+
+    #[test]
+    fn is_fresh_uses_strict_stale_boundary() {
+        let mut hb = DaemonHeartbeat::new(PathBuf::from("/tmp/ws"), "slug-fresh".to_string());
+        // Exactly STALE_AFTER_SECS old is NOT fresh (comparison is strict `<`).
+        hb.heartbeat_at = now_unix().saturating_sub(STALE_AFTER_SECS);
+        assert!(!hb.is_fresh());
+        // One second inside the window is fresh.
+        hb.heartbeat_at = now_unix().saturating_sub(STALE_AFTER_SECS - 1);
+        assert!(hb.is_fresh());
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_all_fields() {
+        let mut hb = DaemonHeartbeat::new(PathBuf::from("/tmp/ws-serde"), "slug-serde".to_string());
+        hb.mark_indexed();
+        let json = serde_json::to_vec(&hb).unwrap();
+        let back: DaemonHeartbeat = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.pid, hb.pid);
+        assert_eq!(back.workspace, hb.workspace);
+        assert_eq!(back.slug, hb.slug);
+        assert_eq!(back.started_at, hb.started_at);
+        assert_eq!(back.heartbeat_at, hb.heartbeat_at);
+        assert_eq!(back.last_index_at, hb.last_index_at);
+    }
+
+    #[test]
+    fn heartbeat_path_is_slug_json_under_daemons_dir() {
+        // heartbeat_path only fails if no HOME/USERPROFILE is set; in the test
+        // environment one is always present.
+        let path = heartbeat_path("my-slug").expect("home is set in test env");
+        assert_eq!(path.file_name().unwrap(), "my-slug.json");
+        assert_eq!(path.parent().unwrap(), daemons_dir().unwrap());
+        assert!(path.ends_with("daemons/my-slug.json"));
+    }
+
+    #[test]
+    fn write_read_remove_round_trip() {
+        // Use a distinctive slug so we never collide with a real daemon file,
+        // and clean it up regardless of assertion outcome ordering.
+        let slug = "codegraph-unit-test-daemon-rw";
+        let mut hb = DaemonHeartbeat::new(PathBuf::from("/tmp/round-trip-ws"), slug.to_string());
+        hb.mark_indexed();
+        hb.write().expect("write heartbeat");
+
+        let read = DaemonHeartbeat::read(slug).expect("heartbeat should be readable");
+        assert_eq!(read.slug, slug);
+        assert_eq!(read.workspace, PathBuf::from("/tmp/round-trip-ws"));
+        assert_eq!(read.last_index_at, hb.last_index_at);
+
+        // remove() deletes the file; a subsequent read yields None.
+        DaemonHeartbeat::remove(slug).expect("remove heartbeat");
+        assert!(DaemonHeartbeat::read(slug).is_none());
+        // remove() is idempotent: absent file is Ok, not an error.
+        DaemonHeartbeat::remove(slug).expect("remove of absent file is Ok");
+    }
+
+    #[test]
+    fn live_daemon_for_returns_fresh_and_prunes_stale() {
+        // Fresh heartbeat: live_daemon_for surfaces it.
+        let fresh_slug = "codegraph-unit-test-daemon-fresh";
+        let mut fresh = DaemonHeartbeat::new(PathBuf::from("/tmp/live-ws"), fresh_slug.to_string());
+        fresh.mark_indexed();
+        fresh.write().expect("write fresh");
+        assert!(live_daemon_for(fresh_slug).is_some());
+        DaemonHeartbeat::remove(fresh_slug).ok();
+
+        // Stale heartbeat: live_daemon_for returns None and prunes the file.
+        let stale_slug = "codegraph-unit-test-daemon-stale";
+        let mut stale = DaemonHeartbeat::new(PathBuf::from("/tmp/live-ws"), stale_slug.to_string());
+        stale.heartbeat_at = now_unix().saturating_sub(STALE_AFTER_SECS + 5);
+        stale.write().expect("write stale");
+        assert!(live_daemon_for(stale_slug).is_none());
+        // The stale file was removed opportunistically.
+        assert!(DaemonHeartbeat::read(stale_slug).is_none());
+    }
+
+    #[test]
+    fn no_daemon_when_heartbeat_absent() {
+        // A slug that was never written has no live daemon and reads as None.
+        let slug = "codegraph-unit-test-daemon-never-written";
+        DaemonHeartbeat::remove(slug).ok();
+        assert!(DaemonHeartbeat::read(slug).is_none());
+        assert!(live_daemon_for(slug).is_none());
+    }
 }
