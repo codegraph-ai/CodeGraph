@@ -511,4 +511,66 @@ mod tests {
         assert_eq!(result["files_indexed"], json!(0));
         assert_eq!(result["status"], json!("success"));
     }
+
+    #[tokio::test]
+    async fn index_directory_skips_non_directory_path() {
+        let backend = test_backend();
+        // `path` points at a regular file, not a directory: the per-path loop
+        // hits the `!path.is_dir()` skip branch, so nothing is indexed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir.rs");
+        std::fs::write(&file, "fn f() {}\n").expect("write file");
+
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexDirectory",
+                json!({ "path": file.to_string_lossy() }),
+            )
+            .await
+            .expect("dispatch should succeed even when the path is skipped");
+        // Note the distinct response shape: index_directory returns `indexed`,
+        // not the `files_indexed`/`status` shape used by index_files/reindex.
+        assert_eq!(result, json!({ "indexed": 0 }));
+    }
+
+    #[tokio::test]
+    async fn index_directory_indexes_a_real_directory() {
+        let backend = test_backend();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("sample.rs"), "fn hello() -> i32 { 1 }\n")
+            .expect("write file");
+
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexDirectory",
+                json!({ "path": dir.path().to_string_lossy() }),
+            )
+            .await
+            .expect("dispatch should succeed");
+        assert_eq!(result["indexed"], json!(1));
+
+        // The parsed function should now be present in the graph.
+        let count = {
+            let graph = backend.graph.read().await;
+            graph.node_count()
+        };
+        assert!(count > 0, "graph should contain the indexed function");
+    }
+
+    #[tokio::test]
+    async fn index_directory_accepts_paths_array_alias() {
+        let backend = test_backend();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("sample.rs"), "fn world() {}\n").expect("write file");
+
+        // The `paths` array alias should be accepted just like the singular `path`.
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexDirectory",
+                json!({ "paths": [dir.path().to_string_lossy()] }),
+            )
+            .await
+            .expect("dispatch should succeed via the paths alias");
+        assert_eq!(result["indexed"], json!(1));
+    }
 }
