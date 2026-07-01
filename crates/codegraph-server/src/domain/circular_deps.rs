@@ -275,3 +275,101 @@ fn canonical_cycle(cycle: &[NodeId]) -> Vec<NodeId> {
     rotated.extend_from_slice(&body[..min_pos]);
     rotated
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adjacency(edges: &[(NodeId, &[NodeId])]) -> HashMap<NodeId, Vec<NodeId>> {
+        edges
+            .iter()
+            .map(|(id, neighbors)| (*id, neighbors.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn empty_result_has_no_cycles() {
+        let result = CircularDepsResult::empty();
+        assert!(result.cycles.is_empty());
+        assert_eq!(result.total_cycles, 0);
+        assert!(!result.has_circular_deps);
+    }
+
+    #[test]
+    fn canonical_cycle_rotates_to_min_first() {
+        // [3, 1, 2, 3] -> body [3, 1, 2] -> min (1) at pos 1 -> [1, 2, 3].
+        assert_eq!(canonical_cycle(&[3, 1, 2, 3]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn canonical_cycle_already_min_first_is_unchanged() {
+        // [1, 2, 3, 1] -> body [1, 2, 3] already starts at min.
+        assert_eq!(canonical_cycle(&[1, 2, 3, 1]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn canonical_cycle_normalizes_rotations_to_same_form() {
+        // A→B→C and B→C→A canonicalize identically.
+        assert_eq!(
+            canonical_cycle(&[1, 2, 3, 1]),
+            canonical_cycle(&[2, 3, 1, 2])
+        );
+    }
+
+    #[test]
+    fn canonical_cycle_without_repeated_tail() {
+        // No repeated last element: whole slice is the body.
+        assert_eq!(canonical_cycle(&[2, 3, 1]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn canonical_cycle_empty_is_empty() {
+        assert_eq!(canonical_cycle(&[]), Vec::<NodeId>::new());
+    }
+
+    #[test]
+    fn dfs_finds_two_node_cycle() {
+        // 1 -> 2 -> 1
+        let adj = adjacency(&[(1, &[2]), (2, &[1])]);
+        let scc: HashSet<NodeId> = [1, 2].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 10);
+        assert_eq!(cycle, Some(vec![1, 2, 1]));
+    }
+
+    #[test]
+    fn dfs_finds_three_node_cycle() {
+        // 1 -> 2 -> 3 -> 1
+        let adj = adjacency(&[(1, &[2]), (2, &[3]), (3, &[1])]);
+        let scc: HashSet<NodeId> = [1, 2, 3].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 10);
+        assert_eq!(cycle, Some(vec![1, 2, 3, 1]));
+    }
+
+    #[test]
+    fn dfs_returns_none_without_cycle() {
+        // 1 -> 2, dead end.
+        let adj = adjacency(&[(1, &[2]), (2, &[])]);
+        let scc: HashSet<NodeId> = [1, 2].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 10);
+        assert_eq!(cycle, None);
+    }
+
+    #[test]
+    fn dfs_respects_max_cycle_length() {
+        // A 2-node cycle needs one intermediate hop; max length 1 forbids it.
+        let adj = adjacency(&[(1, &[2]), (2, &[1])]);
+        let scc: HashSet<NodeId> = [1, 2].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 1);
+        assert_eq!(cycle, None);
+    }
+
+    #[test]
+    fn dfs_ignores_neighbors_outside_scc() {
+        // 1 -> 2 (out of SCC) -> 1: the intermediate node isn't in the SCC set,
+        // so no cycle path is followed through it.
+        let adj = adjacency(&[(1, &[2]), (2, &[1])]);
+        let scc: HashSet<NodeId> = [1].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 10);
+        assert_eq!(cycle, None);
+    }
+}
