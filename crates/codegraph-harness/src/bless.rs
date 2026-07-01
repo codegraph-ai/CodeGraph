@@ -118,4 +118,74 @@ mod tests {
         let err = rewrite_expect_data(&path, &json!({})).unwrap_err();
         assert!(err.to_string().contains("expect:"));
     }
+
+    #[test]
+    fn errors_when_expect_is_not_a_mapping() {
+        // `expect` is present but a scalar, so the `.as_mapping_mut()` arm
+        // returns None — a distinct branch from the missing-key case above.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scalar_expect.case.yml");
+        std::fs::write(&path, "id: t.1\nexpect: exact\n").unwrap();
+        let err = rewrite_expect_data(&path, &json!({})).unwrap_err();
+        assert!(err.to_string().contains("expect:"));
+    }
+
+    #[test]
+    fn json_to_yaml_preserves_scalar_kinds() {
+        // Null and Bool arms — neither reached by the object/array happy path.
+        assert_eq!(json_to_yaml(&json!(null)), Yaml::Null);
+        assert_eq!(json_to_yaml(&json!(true)), Yaml::Bool(true));
+
+        // Integer stays an integer (documented: not f64-tagged 5.0) — the i64 arm.
+        match json_to_yaml(&json!(5)) {
+            Yaml::Number(ref n) => {
+                assert!(n.is_i64());
+                assert_eq!(n.as_i64(), Some(5));
+            }
+            other => panic!("expected integer number, got {other:?}"),
+        }
+
+        // A value beyond i64::MAX exercises the u64 arm.
+        match json_to_yaml(&json!(u64::MAX)) {
+            Yaml::Number(ref n) => assert_eq!(n.as_u64(), Some(u64::MAX)),
+            other => panic!("expected u64 number, got {other:?}"),
+        }
+
+        // Fractional value stays a float — the f64 arm.
+        match json_to_yaml(&json!(2.5)) {
+            Yaml::Number(ref n) => {
+                assert!(n.is_f64());
+                assert_eq!(n.as_f64(), Some(2.5));
+            }
+            other => panic!("expected float number, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_preserves_integer_numbers_end_to_end() {
+        // End-to-end guard on the number-stability contract: an integer in the
+        // blessed data must round-trip through the YAML rewrite as an integer.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nums.case.yml");
+        std::fs::write(&path, "id: t.1\nexpect:\n  match: exact\n  data: {}\n").unwrap();
+
+        rewrite_expect_data(&path, &json!({"count": 3})).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        let parsed: Yaml = serde_yaml::from_str(&after).unwrap();
+        let count = parsed
+            .get("expect")
+            .unwrap()
+            .get("data")
+            .unwrap()
+            .get("count")
+            .unwrap();
+        match count {
+            Yaml::Number(n) => {
+                assert!(n.is_i64());
+                assert_eq!(n.as_i64(), Some(3));
+            }
+            other => panic!("expected integer count, got {other:?}"),
+        }
+    }
 }
