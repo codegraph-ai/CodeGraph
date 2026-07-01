@@ -43,6 +43,7 @@ pub mod storage;
 pub mod temporal;
 
 // Re-exports for convenience
+pub use docs::{extract_identifiers, DocChunk, DocClaim, DocSearchResult, DocStore};
 pub use embedding::{CodeGraphEmbeddingModel, EmbeddingBackend, VectorEngine};
 pub use error::MemoryError;
 pub use node::{
@@ -50,6 +51,5 @@ pub use node::{
     MemorySource,
 };
 pub use search::{MemorySearch, SearchConfig, SearchResult};
-pub use docs::{extract_identifiers, DocChunk, DocClaim, DocSearchResult, DocStore};
 pub use storage::MemoryStore;
 pub use temporal::TemporalMetadata;

@@ -105,7 +105,13 @@ impl Bm25 {
         }
         let n = texts.len() as f64;
         let avgdl = dl.iter().sum::<f64>() / n.max(1.0);
-        Self { tf, dl, df, avgdl, n }
+        Self {
+            tf,
+            dl,
+            df,
+            avgdl,
+            n,
+        }
     }
 
     fn score(&self, q: &[String], i: usize) -> f64 {
@@ -196,10 +202,16 @@ fn evaluate(engine: &VectorEngine, syms: &[Sym]) -> (Scores, Scores) {
         sem_ranks.push(rank_of(i, &cos));
 
         let qterms = tokenize(&syms[i].doc);
-        let mut bm: Vec<f64> = (0..sym_texts.len()).map(|j| bm25.score(&qterms, j)).collect();
+        let mut bm: Vec<f64> = (0..sym_texts.len())
+            .map(|j| bm25.score(&qterms, j))
+            .collect();
         minmax(&mut bm);
         minmax(&mut cos);
-        let hyb: Vec<f64> = bm.iter().zip(&cos).map(|(b, c)| 0.4 * b + 0.6 * c).collect();
+        let hyb: Vec<f64> = bm
+            .iter()
+            .zip(&cos)
+            .map(|(b, c)| 0.4 * b + 0.6 * c)
+            .collect();
         hyb_ranks.push(rank_of(i, &hyb));
     }
 
@@ -220,12 +232,7 @@ fn report(label: &str, engine: Result<VectorEngine, impl std::fmt::Display>, sym
             );
             println!(
                 "{:<8} {:<28} HYBRID    R@1 {:.3}  R@5 {:.3}  R@10 {:.3}  MRR {:.3}",
-                "",
-                "(0.4 bm25 + 0.6 cos)",
-                hyb.r1,
-                hyb.r5,
-                hyb.r10,
-                hyb.mrr
+                "", "(0.4 bm25 + 0.6 cos)", hyb.r1, hyb.r5, hyb.r10, hyb.mrr
             );
         }
         Err(e) => println!("{label:<8} skipped ({e})"),
@@ -247,9 +254,19 @@ fn main() {
 
     let static_dir = std::env::var("CODEGRAPH_STATIC_MODEL")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M"));
-    report("static", VectorEngine::with_static_model(&static_dir), &syms);
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M")
+        });
+    report(
+        "static",
+        VectorEngine::with_static_model(&static_dir),
+        &syms,
+    );
 
     let cache = std::path::PathBuf::from(&home).join(".codegraph/fastembed_cache");
-    report("onnx-bge", VectorEngine::with_model(cache, CodeGraphEmbeddingModel::BgeSmall), &syms);
+    report(
+        "onnx-bge",
+        VectorEngine::with_model(cache, CodeGraphEmbeddingModel::BgeSmall),
+        &syms,
+    );
 }

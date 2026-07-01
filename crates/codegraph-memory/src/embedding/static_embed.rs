@@ -227,11 +227,20 @@ mod tests {
         // vocab 2, dim 2: row0 = [3,0], row1 = [0,4].
         let matrix = vec![3.0, 0.0, 0.0, 4.0];
         // unweighted: mean of the two rows
-        assert_eq!(weighted_mean_l2(&matrix, None, &[0, 1], 2, 2, false), vec![1.5, 2.0]);
+        assert_eq!(
+            weighted_mean_l2(&matrix, None, &[0, 1], 2, 2, false),
+            vec![1.5, 2.0]
+        );
         // out-of-vocab id (99) skipped -> only row0 counts
-        assert_eq!(weighted_mean_l2(&matrix, None, &[0, 99], 2, 2, false), vec![3.0, 0.0]);
+        assert_eq!(
+            weighted_mean_l2(&matrix, None, &[0, 99], 2, 2, false),
+            vec![3.0, 0.0]
+        );
         // all-OOV -> zero vector, no NaN even with normalize
-        assert_eq!(weighted_mean_l2(&matrix, None, &[7], 2, 2, true), vec![0.0, 0.0]);
+        assert_eq!(
+            weighted_mean_l2(&matrix, None, &[7], 2, 2, true),
+            vec![0.0, 0.0]
+        );
         // normalize -> unit length
         let v = weighted_mean_l2(&matrix, None, &[0, 1], 2, 2, true);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -255,7 +264,10 @@ mod tests {
         let v = m.embed_text("database connection pool").unwrap();
         assert_eq!(v.len(), expected_dim);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-3, "should be L2-normalized, norm={norm}");
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "should be L2-normalized, norm={norm}"
+        );
 
         let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
         let a = m.embed_text("open a database connection").unwrap();
@@ -277,7 +289,10 @@ mod tests {
             return;
         }
         let m = StaticEmbedding::from_pretrained(&dir).expect("load potion-base-8M");
-        assert!(m.weights.is_none(), "potion-base-8M bakes weights into embeddings");
+        assert!(
+            m.weights.is_none(),
+            "potion-base-8M bakes weights into embeddings"
+        );
         assert_semantically_sane(&m, 256);
     }
 
@@ -289,7 +304,10 @@ mod tests {
             return;
         }
         let m = StaticEmbedding::from_pretrained(&dir).expect("load jina-code-static-256");
-        assert!(m.weights.is_some(), "model2vec 0.7 stores SIF weights separately");
+        assert!(
+            m.weights.is_some(),
+            "model2vec 0.7 stores SIF weights separately"
+        );
         assert_semantically_sane(&m, 256);
     }
 }

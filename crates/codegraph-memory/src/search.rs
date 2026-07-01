@@ -332,6 +332,18 @@ impl MemorySearch {
 mod tests {
     use super::*;
 
+    /// Build a Convention memory whose searchable_text is title + content + tags.
+    fn mem(title: &str, content: &str, tags: &[&str]) -> MemoryNode {
+        let mut b = MemoryNode::builder()
+            .convention(title, content)
+            .title(title);
+        b = b.content(content);
+        for t in tags {
+            b = b.tag(*t);
+        }
+        b.build().unwrap()
+    }
+
     #[test]
     fn test_bm25_tokenize() {
         let tokens = BM25Index::tokenize("Hello, World! This is a test.");
@@ -341,6 +353,184 @@ mod tests {
         // Short words should be filtered
         assert!(!tokens.contains(&"is".to_string()));
         assert!(!tokens.contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_keeps_alphanumeric_and_lowercases() {
+        let tokens = BM25Index::tokenize("Rust123 SPLIT-on/punct");
+        // Digits are alphanumeric so tokens containing them survive.
+        assert!(tokens.contains(&"rust123".to_string()));
+        // Split boundaries include - and /.
+        assert!(tokens.contains(&"split".to_string()));
+        assert!(tokens.contains(&"punct".to_string()));
+        // Everything is lowercased.
+        assert!(tokens.iter().all(|t| t == &t.to_lowercase()));
+    }
+
+    #[test]
+    fn test_tokenize_filters_len_le_two() {
+        // Exactly-two-char tokens are dropped; three-char kept.
+        let tokens = BM25Index::tokenize("ab abc abcd");
+        assert!(!tokens.contains(&"ab".to_string()));
+        assert!(tokens.contains(&"abc".to_string()));
+        assert!(tokens.contains(&"abcd".to_string()));
+    }
+
+    #[test]
+    fn test_build_empty_corpus() {
+        let index = BM25Index::build(&[]);
+        assert_eq!(index.num_docs, 0);
+        assert_eq!(index.avg_doc_length, 0.0);
+        assert!(index.inverted.is_empty());
+        assert!(index.doc_lengths.is_empty());
+        // Searching an empty index yields nothing and does not panic.
+        assert!(index.search("anything", 10).is_empty());
+    }
+
+    #[test]
+    fn test_build_indexes_terms_and_lengths() {
+        let m = mem("Alpha Beta", "gamma delta", &["epsilon"]);
+        let id = m.id.to_string();
+        let index = BM25Index::build(&[m]);
+
+        assert_eq!(index.num_docs, 1);
+        // Five tokens all > 2 chars: alpha beta gamma delta epsilon.
+        assert_eq!(index.doc_lengths.get(&id).copied(), Some(5.0));
+        assert_eq!(index.avg_doc_length, 5.0);
+        // Each term maps to this single document.
+        let postings = index.inverted.get("gamma").expect("gamma indexed");
+        assert_eq!(postings, &vec![(id.clone(), 1.0)]);
+        assert!(index.inverted.contains_key("epsilon"));
+    }
+
+    #[test]
+    fn test_build_counts_term_frequency() {
+        let m = mem("repeat repeat repeat", "once", &[]);
+        let id = m.id.to_string();
+        let index = BM25Index::build(&[m]);
+        let postings = index.inverted.get("repeat").expect("repeat indexed");
+        assert_eq!(postings, &vec![(id, 3.0)]);
+    }
+
+    #[test]
+    fn test_avg_doc_length_across_docs() {
+        // Doc A has 2 tokens, Doc B has 4 -> avg 3.0.
+        let a = mem("alpha beta", "", &[]);
+        let b = mem("gamma delta epsilon zeta", "", &[]);
+        let index = BM25Index::build(&[a, b]);
+        assert_eq!(index.num_docs, 2);
+        assert_eq!(index.avg_doc_length, 3.0);
+    }
+
+    #[test]
+    fn test_search_matches_relevant_doc() {
+        let hit = mem("database migration", "schema change", &[]);
+        let miss = mem("frontend styling", "css layout", &[]);
+        let hit_id = hit.id.to_string();
+        let index = BM25Index::build(&[hit, miss]);
+
+        let results = index.search("migration", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, hit_id);
+        assert!(results[0].1 > 0.0);
+    }
+
+    #[test]
+    fn test_search_no_match_returns_empty() {
+        let m = mem("hello world", "foo bar", &[]);
+        let index = BM25Index::build(&[m]);
+        assert!(index.search("nonexistentterm", 10).is_empty());
+    }
+
+    #[test]
+    fn test_search_respects_limit_and_sorts_desc() {
+        let a = mem("shared token", "extra shared token filler", &[]);
+        let b = mem("shared", "one occurrence only here", &[]);
+        let index = BM25Index::build(&[a, b]);
+
+        let all = index.search("shared", 10);
+        assert_eq!(all.len(), 2);
+        // Descending by score.
+        assert!(all[0].1 >= all[1].1);
+
+        let limited = index.search("shared", 1);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].0, all[0].0);
+    }
+
+    #[test]
+    fn test_idf_rarer_term_scores_higher() {
+        // 3 documents; idf(1) (rare) should exceed idf(3) (in every doc).
+        let docs = vec![
+            mem("apple", "", &[]),
+            mem("banana", "", &[]),
+            mem("cherry", "", &[]),
+        ];
+        let index = BM25Index::build(&docs);
+        assert!(index.idf(1) > index.idf(3));
+        // With Robertson-Sparck-Jones +1 smoothing idf stays positive.
+        assert!(index.idf(3) > 0.0);
+    }
+
+    #[test]
+    fn test_bm25_score_monotonic_in_tf_and_idf() {
+        let docs = vec![mem("alpha beta gamma", "", &[])];
+        let index = BM25Index::build(&docs);
+        let dl = index.avg_doc_length;
+
+        // Higher term frequency yields a higher (saturating) score.
+        let low = index.bm25_score(1.0, dl, 2.0);
+        let high = index.bm25_score(5.0, dl, 2.0);
+        assert!(high > low);
+        // Score scales linearly with idf.
+        let doubled = index.bm25_score(1.0, dl, 4.0);
+        assert!((doubled - 2.0 * low).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_memory_kind_filter_matches_all_variants() {
+        use crate::node::{IssueSeverity, MemoryKind};
+
+        let arch = MemoryKind::ArchitecturalDecision {
+            decision: "d".into(),
+            rationale: "r".into(),
+            alternatives_considered: None,
+            stakeholders: vec![],
+        };
+        let known = MemoryKind::KnownIssue {
+            description: "bug".into(),
+            severity: IssueSeverity::High,
+            workaround: None,
+            tracking_id: None,
+        };
+        let conv = MemoryKind::Convention {
+            name: "n".into(),
+            description: "d".into(),
+            pattern: None,
+            anti_pattern: None,
+        };
+        let proj = MemoryKind::ProjectContext {
+            topic: "t".into(),
+            description: "d".into(),
+            tags: vec![],
+        };
+
+        assert!(MemoryKindFilter::ArchitecturalDecision.matches(&arch));
+        assert!(MemoryKindFilter::KnownIssue.matches(&known));
+        assert!(MemoryKindFilter::Convention.matches(&conv));
+        assert!(MemoryKindFilter::ProjectContext.matches(&proj));
+
+        // Cross-variant mismatches all reject.
+        assert!(!MemoryKindFilter::ArchitecturalDecision.matches(&known));
+        assert!(!MemoryKindFilter::Convention.matches(&proj));
+        assert!(!MemoryKindFilter::ProjectContext.matches(&arch));
+    }
+
+    #[test]
+    fn test_memory_kind_filter_partial_eq_and_clone() {
+        let f = MemoryKindFilter::DebugContext;
+        assert_eq!(f.clone(), MemoryKindFilter::DebugContext);
+        assert_ne!(f, MemoryKindFilter::KnownIssue);
     }
 
     #[test]

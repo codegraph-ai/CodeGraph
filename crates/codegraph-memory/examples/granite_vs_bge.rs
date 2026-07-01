@@ -114,7 +114,11 @@ fn main() {
                 continue;
             }
         };
-        println!("\n=== Top-5 neighbors of '{}' ({}) ===", q, inventory[q_idx].location_str());
+        println!(
+            "\n=== Top-5 neighbors of '{}' ({}) ===",
+            q,
+            inventory[q_idx].location_str()
+        );
         print_topk(q_idx, &inventory, &bge_vecs, "BGE-Small", 5);
         print_topk(q_idx, &inventory, &granite_vecs, "Granite-97M", 5);
     }
@@ -127,10 +131,7 @@ fn main() {
         ("convert_whiteout", "unpack"),
         ("try_hardlink_fallback", "unpack"),
     ];
-    println!(
-        "  {:35} {:35}  BGE     Granite  Δ",
-        "FN A", "FN B"
-    );
+    println!("  {:35} {:35}  BGE     Granite  Δ", "FN A", "FN B");
     for (a, b) in pairs {
         let a_idx = inventory.iter().position(|f| f.name == a);
         let b_idx = inventory.iter().position(|f| f.name == b);
@@ -196,10 +197,7 @@ impl FnEntry {
     fn location_str(&self) -> String {
         format!(
             "{}:{}",
-            self.file
-                .rsplit('/')
-                .next()
-                .unwrap_or(&self.file),
+            self.file.rsplit('/').next().unwrap_or(&self.file),
             self.line_start
         )
     }
@@ -310,9 +308,7 @@ fn find_matching(bytes: &[u8], open_pos: usize, open: u8, close: u8) -> Option<u
 fn embed_all(engine: &VectorEngine, inventory: &[FnEntry], label: &str) -> Vec<Vec<f32>> {
     let texts: Vec<&str> = inventory.iter().map(|f| f.embed_text.as_str()).collect();
     let start = std::time::Instant::now();
-    let vecs = engine
-        .embed_batch(&texts)
-        .expect("embed_batch failed");
+    let vecs = engine.embed_batch(&texts).expect("embed_batch failed");
     let elapsed = start.elapsed();
     println!(
         "  {} embedded {} fns in {:.2}s ({} dim)",
@@ -350,13 +346,7 @@ fn topk_indices(query_idx: usize, vecs: &[Vec<f32>], k: usize) -> Vec<usize> {
     sims.into_iter().take(k).map(|(i, _)| i).collect()
 }
 
-fn print_topk(
-    query_idx: usize,
-    inventory: &[FnEntry],
-    vecs: &[Vec<f32>],
-    label: &str,
-    k: usize,
-) {
+fn print_topk(query_idx: usize, inventory: &[FnEntry], vecs: &[Vec<f32>], label: &str, k: usize) {
     let mut sims: Vec<(usize, f32)> = vecs
         .iter()
         .enumerate()
@@ -386,7 +376,9 @@ fn truncate_str(s: &str, max: usize) -> String {
 
 fn default_cache_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".codegraph").join("fastembed_cache")
+        PathBuf::from(home)
+            .join(".codegraph")
+            .join("fastembed_cache")
     } else {
         PathBuf::from(".fastembed_cache")
     }

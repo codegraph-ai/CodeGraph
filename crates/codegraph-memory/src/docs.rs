@@ -74,7 +74,9 @@ const INJECTION_NEEDLES: &[&str] = &[
 
 fn is_suspicious(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    INJECTION_NEEDLES.iter().any(|needle| lower.contains(needle))
+    INJECTION_NEEDLES
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 // ─── Markdown heading-tree parser ────────────────────────────────────
@@ -265,7 +267,15 @@ fn collect_leaf_chunks(
         }
 
         for child in &node.children {
-            collect_leaf_chunks(child, &path, source_file, now, max_chunk_words, out, counter);
+            collect_leaf_chunks(
+                child,
+                &path,
+                source_file,
+                now,
+                max_chunk_words,
+                out,
+                counter,
+            );
         }
     }
 }
@@ -356,7 +366,8 @@ fn backtick_identifiers(text: &str) -> Vec<String> {
                 && !trimmed.starts_with('$')
                 && !trimmed.starts_with('-')
                 && !trimmed.contains('/')
-                && !trimmed.contains(' ') || trimmed.contains("::")
+                && !trimmed.contains(' ')
+                || trimmed.contains("::")
             {
                 // Strip trailing () for function references
                 let clean = trimmed.trim_end_matches("()").trim_end_matches("()");
@@ -467,10 +478,7 @@ impl DocStore {
                             self.db.get(format!("docvec:{}", id).as_bytes())
                         {
                             if let Ok(vector) = bincode::deserialize::<Vec<f32>>(&vec_bytes) {
-                                points.push(DocPoint {
-                                    id,
-                                    vector,
-                                });
+                                points.push(DocPoint { id, vector });
                             }
                         }
                     }
@@ -553,11 +561,7 @@ impl DocStore {
         all_points.extend(new_points);
         self.rebuild_hnsw(all_points)?;
 
-        log::info!(
-            "DocStore: indexed {} chunks from {}",
-            chunks.len(),
-            source
-        );
+        log::info!("DocStore: indexed {} chunks from {}", chunks.len(), source);
         Ok(chunks)
     }
 
@@ -676,10 +680,7 @@ mod tests {
             parse_heading_line("## Sub Title"),
             Some((2, "Sub Title".into()))
         );
-        assert_eq!(
-            parse_heading_line("#### Deep"),
-            Some((4, "Deep".into()))
-        );
+        assert_eq!(parse_heading_line("#### Deep"), Some((4, "Deep".into())));
         assert_eq!(parse_heading_line("Not a heading"), None);
         assert_eq!(parse_heading_line("#NoSpace"), None);
     }
@@ -729,9 +730,7 @@ Details A.
 Details B.
 ";
         let chunks = parse_markdown(md, "test.md", 500);
-        let overview = chunks
-            .iter()
-            .find(|c| c.title.contains("overview"));
+        let overview = chunks.iter().find(|c| c.title.contains("overview"));
         assert!(
             overview.is_some(),
             "preamble body on non-leaf should produce an overview chunk"
@@ -740,7 +739,10 @@ Details B.
 
     #[test]
     fn long_leaf_paragraph_split() {
-        let long_body = (0..200).map(|i| format!("word{}", i)).collect::<Vec<_>>().join(" ");
+        let long_body = (0..200)
+            .map(|i| format!("word{}", i))
+            .collect::<Vec<_>>()
+            .join(" ");
         let md = format!("## Section\n{}", long_body);
         // max_chunk_words=100 should produce 2-3 chunks from 200 words
         let chunks = parse_markdown(&md, "test.md", 100);

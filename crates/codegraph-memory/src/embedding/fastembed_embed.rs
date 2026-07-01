@@ -15,8 +15,8 @@
 
 use crate::error::{MemoryError, Result};
 use fastembed::{
-    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding,
-    TokenizerFiles, UserDefinedEmbeddingModel,
+    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
+    UserDefinedEmbeddingModel,
 };
 use std::path::PathBuf;
 
@@ -157,9 +157,7 @@ impl FastembedEmbedding {
         model_type: CodeGraphEmbeddingModel,
     ) -> Result<TextEmbedding> {
         let (repo, pooling) = match model_type {
-            CodeGraphEmbeddingModel::Granite97mMultilingualR2 => {
-                (GRANITE_97M_REPO, Pooling::Cls)
-            }
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2 => (GRANITE_97M_REPO, Pooling::Cls),
             other => {
                 return Err(MemoryError::model(format!(
                     "load_user_defined called for non-user-defined model: {other:?}"
@@ -299,9 +297,7 @@ fn download_user_defined_model(
         _ => GRANITE_97M_ONNX_PATH,
     };
     let onnx_local = model_repo.get(onnx_path).map_err(|e| {
-        MemoryError::model(format!(
-            "Failed to download {onnx_path} from {repo}: {e}"
-        ))
+        MemoryError::model(format!("Failed to download {onnx_path} from {repo}: {e}"))
     })?;
     let onnx_bytes = std::fs::read(&onnx_local).map_err(|e| {
         MemoryError::model(format!(
@@ -310,15 +306,13 @@ fn download_user_defined_model(
         ))
     })?;
 
-    let read_required =
-        |name: &str, repo: &hf_hub::api::sync::ApiRepo| -> Result<Vec<u8>> {
-            let local = repo.get(name).map_err(|e| {
-                MemoryError::model(format!("Failed to download {name}: {e}"))
-            })?;
-            std::fs::read(&local).map_err(|e| {
-                MemoryError::model(format!("Failed to read {}: {e}", local.display()))
-            })
-        };
+    let read_required = |name: &str, repo: &hf_hub::api::sync::ApiRepo| -> Result<Vec<u8>> {
+        let local = repo
+            .get(name)
+            .map_err(|e| MemoryError::model(format!("Failed to download {name}: {e}")))?;
+        std::fs::read(&local)
+            .map_err(|e| MemoryError::model(format!("Failed to read {}: {e}", local.display())))
+    };
 
     Ok(UserDefinedModelBundle {
         onnx_bytes,
@@ -344,7 +338,10 @@ fn ensure_ort_dll(cache_dir: &std::path::Path) -> Result<()> {
         if let Some(exe_dir) = exe_path.parent() {
             let bundled_dll = exe_dir.join("onnxruntime.dll");
             if bundled_dll.exists() {
-                log::info!("ONNX Runtime DLL found alongside binary: {}", bundled_dll.display());
+                log::info!(
+                    "ONNX Runtime DLL found alongside binary: {}",
+                    bundled_dll.display()
+                );
                 std::env::set_var("ORT_DYLIB_PATH", &bundled_dll);
                 return Ok(());
             }
@@ -449,8 +446,12 @@ mod tests {
         assert!(CodeGraphEmbeddingModel::Granite97mMultilingualR2
             .to_fastembed_builtin()
             .is_none());
-        assert!(CodeGraphEmbeddingModel::BgeSmall.to_fastembed_builtin().is_some());
-        assert!(CodeGraphEmbeddingModel::JinaCodeV2.to_fastembed_builtin().is_some());
+        assert!(CodeGraphEmbeddingModel::BgeSmall
+            .to_fastembed_builtin()
+            .is_some());
+        assert!(CodeGraphEmbeddingModel::JinaCodeV2
+            .to_fastembed_builtin()
+            .is_some());
     }
 
     #[test]

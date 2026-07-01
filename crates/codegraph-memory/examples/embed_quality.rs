@@ -44,7 +44,10 @@ const QUERIES: &[(&str, &str)] = &[
     ("run a SQL statement against the db", "execute_sql_query"),
     ("turn the request body into an object", "parse_json_request"),
     ("find the nearest vectors quickly", "build_hnsw_index"),
-    ("measure how similar two embeddings are", "compute_cosine_similarity"),
+    (
+        "measure how similar two embeddings are",
+        "compute_cosine_similarity",
+    ),
     ("try the operation again if it fails", "retry_with_backoff"),
     ("limit how many requests per second", "rate_limiter"),
     ("load settings from a config file", "parse_config_file"),
@@ -72,7 +75,10 @@ fn evaluate(engine: &VectorEngine) -> Scores {
             .map(|(i, sv)| (i, engine.similarity(&qv, sv)))
             .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        let rank = 1 + ranked.iter().position(|(i, _)| SYMBOLS[*i].0 == *target).unwrap();
+        let rank = 1 + ranked
+            .iter()
+            .position(|(i, _)| SYMBOLS[*i].0 == *target)
+            .unwrap();
         if rank == 1 {
             r1 += 1.0;
         }
@@ -117,9 +123,14 @@ fn main() {
     // jina-code-static-256), else the potion-base-8M floor.
     let static_dir = std::env::var("CODEGRAPH_STATIC_MODEL")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M"));
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M")
+        });
     report("static", VectorEngine::with_static_model(&static_dir));
 
     let cache = std::path::PathBuf::from(&home).join(".codegraph/fastembed_cache");
-    report("onnx", VectorEngine::with_model(cache, CodeGraphEmbeddingModel::BgeSmall));
+    report(
+        "onnx",
+        VectorEngine::with_model(cache, CodeGraphEmbeddingModel::BgeSmall),
+    );
 }

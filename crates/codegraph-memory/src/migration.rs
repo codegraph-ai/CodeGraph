@@ -242,7 +242,9 @@ fn migrate_v3_to_v4(db: &DB) -> Result<()> {
 /// Same pattern as v3→v4: deletes all `vec:` keys and clears `embedding`
 /// fields. Vectors are regenerated with Jina Code V2 (768d) on next `load_cache()`.
 fn migrate_v4_to_v5(db: &DB) -> Result<()> {
-    log::info!("Migrating v4→v5: clearing 384d BGE-Small vectors for Jina Code V2 768d re-embedding...");
+    log::info!(
+        "Migrating v4→v5: clearing 384d BGE-Small vectors for Jina Code V2 768d re-embedding..."
+    );
 
     let mut vec_keys_deleted = 0;
     let mut embeddings_cleared = 0;
