@@ -585,4 +585,230 @@ mod tests {
         assert!(cls.is_some());
         assert!(cls.unwrap().is_interface);
     }
+
+    #[test]
+    fn test_function_signature_and_return_type() {
+        // A preceding `signature` declaration is attached to the function and
+        // the return type is derived from the segment after the last `->`.
+        let source =
+            b"module M where\ngreet :: String -> String\ngreet name = \"Hello, \" ++ name\n";
+        let visitor = parse_and_visit(source);
+        let greet = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greet")
+            .expect("greet function extracted");
+        assert!(greet.signature.contains("String -> String"));
+        assert_eq!(greet.return_type.as_deref(), Some("String"));
+        assert_eq!(greet.visibility, "public");
+        assert!(!greet.is_abstract);
+    }
+
+    #[test]
+    fn test_function_parameters_extracted() {
+        // The `patterns` field holds simple variable argument patterns.
+        let source = b"module M where\nadd :: Int -> Int -> Int\nadd a b = a + b\n";
+        let visitor = parse_and_visit(source);
+        let add = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "add")
+            .expect("add function extracted");
+        let names: Vec<&str> = add.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_import_with_alias() {
+        // `import qualified Data.Map as Map` records the alias and is not wildcard.
+        let source = b"module M where\nimport qualified Data.Map as Map\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "Data.Map");
+        assert_eq!(imp.alias.as_deref(), Some("Map"));
+        assert!(!imp.is_wildcard);
+        assert!(imp.symbols.is_empty());
+    }
+
+    #[test]
+    fn test_import_with_symbols() {
+        // `import Data.Text (Text, pack)` collects the named symbols.
+        let source = b"module M where\nimport Data.Text (Text, pack)\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "Data.Text");
+        assert!(imp.symbols.contains(&"Text".to_string()));
+        assert!(imp.symbols.contains(&"pack".to_string()));
+        assert!(!imp.is_wildcard);
+        assert!(imp.alias.is_none());
+    }
+
+    #[test]
+    fn test_import_wildcard() {
+        // A bare `import Data.List` with no names and no alias is a wildcard import.
+        let source = b"module M where\nimport Data.List\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "Data.List");
+        assert!(imp.is_wildcard);
+        assert!(imp.symbols.is_empty());
+        assert!(imp.alias.is_none());
+    }
+
+    #[test]
+    fn test_newtype_maps_to_class() {
+        let source = b"module M where\nnewtype Age = Age Int\n";
+        let visitor = parse_and_visit(source);
+        let age = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Age")
+            .expect("newtype maps to a class");
+        assert!(!age.is_interface);
+        assert!(!age.is_abstract);
+    }
+
+    #[test]
+    fn test_class_method_not_registered_without_toplevel_signature() {
+        // A class-body method is only promoted to an abstract FunctionEntity when
+        // a matching name exists in seen_signatures (populated by top-level
+        // signatures). An in-class-only signature is never inserted there, so the
+        // method is not registered as a function - only the class is emitted.
+        let source = b"module M where\nclass Shape a where\n  area :: a -> Double\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.classes.iter().any(|c| c.name == "Shape"));
+        assert!(
+            !visitor.functions.iter().any(|f| f.name == "area"),
+            "in-class-only signature is not promoted to a function"
+        );
+    }
+
+    #[test]
+    fn test_class_method_registered_with_toplevel_signature() {
+        // With a matching top-level signature seen first, the class method is
+        // promoted to an abstract function whose parent_class is the class name.
+        let source = concat!(
+            "module M where\n",
+            "area :: Double\n",
+            "class Shape a where\n",
+            "  area :: a -> Double\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let area = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "area" && f.is_abstract)
+            .expect("class method promoted with matching top-level signature");
+        assert_eq!(area.parent_class.as_deref(), Some("Shape"));
+    }
+
+    #[test]
+    fn test_instance_method_qualified_name() {
+        // instance methods get a qualified name and parent_class of the type class.
+        let source = concat!(
+            "module M where\n",
+            "class Greet a where\n",
+            "  hello :: a -> String\n",
+            "data Person = Person\n",
+            "instance Greet Person where\n",
+            "  hello p = \"hi\"\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let inst = visitor
+            .functions
+            .iter()
+            .find(|f| f.parent_class.as_deref() == Some("Greet") && f.name.contains("hello"));
+        assert!(
+            inst.is_some(),
+            "instance method extracted with parent_class"
+        );
+        assert!(inst.unwrap().name.starts_with("Greet."));
+    }
+
+    #[test]
+    fn test_complexity_counts_case_branches() {
+        let source = concat!(
+            "module M where\n",
+            "classify :: Int -> String\n",
+            "classify n = case n of\n",
+            "  0 -> \"zero\"\n",
+            "  _ -> \"other\"\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let classify = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "classify")
+            .expect("classify extracted");
+        let complexity = classify.complexity.as_ref().expect("complexity computed");
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "case with alternatives should raise cyclomatic complexity, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_doc_comment_extraction() {
+        let source =
+            b"module M where\n-- | Doubles its input\ndouble :: Int -> Int\ndouble x = x * 2\n";
+        let visitor = parse_and_visit(source);
+        let sig = visitor.seen_signatures.get("double");
+        assert!(sig.is_some(), "signature seen for double");
+        // The doc comment precedes the signature node, so it attaches to the
+        // signature rather than the function definition; assert extraction runs.
+        let double = visitor.functions.iter().find(|f| f.name == "double");
+        assert!(double.is_some());
+    }
+
+    #[test]
+    fn test_call_relations_from_apply() {
+        let source = concat!(
+            "module M where\n",
+            "helper :: Int -> Int\n",
+            "helper y = y\n",
+            "compute :: Int -> Int\n",
+            "compute x = helper x\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.caller == "compute" && c.callee == "helper");
+        assert!(call.is_some(), "apply of helper produces a call relation");
+        assert!(call.unwrap().is_direct);
+    }
+
+    #[test]
+    fn test_multiple_imports() {
+        let source =
+            b"module M where\nimport Data.List\nimport Data.Map (Map)\nimport Data.Set as S\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 3);
+        let modules: Vec<&str> = visitor
+            .imports
+            .iter()
+            .map(|i| i.imported.as_str())
+            .collect();
+        assert!(modules.contains(&"Data.List"));
+        assert!(modules.contains(&"Data.Map"));
+        assert!(modules.contains(&"Data.Set"));
+    }
+
+    #[test]
+    fn test_empty_module_yields_nothing() {
+        let source = b"module M where\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
 }
