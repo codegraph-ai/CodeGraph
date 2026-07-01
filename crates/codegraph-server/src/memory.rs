@@ -805,4 +805,64 @@ mod tests {
         // Invalidate it
         manager.invalidate(&id, "testing").await.unwrap();
     }
+
+    #[test]
+    fn migrate_data_moves_dir_and_removes_empty_codegraph_parent() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        // old layout: <ws>/.codegraph/memory/graph.db
+        let old_dir = tmp.path().join("ws").join(".codegraph").join("memory");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("graph.db"), b"payload").unwrap();
+        // new_dir does not exist and its parent must be created by migrate_data
+        let new_dir = tmp.path().join("global").join("slug").join("memory");
+
+        MemoryManager::migrate_data(&old_dir, &new_dir).expect("migration should succeed");
+
+        // Data landed at the new location...
+        assert!(new_dir.join("graph.db").exists());
+        assert_eq!(std::fs::read(new_dir.join("graph.db")).unwrap(), b"payload");
+        // ...the old memory dir is gone...
+        assert!(!old_dir.exists());
+        // ...and its now-empty .codegraph parent is cleaned up.
+        assert!(!tmp.path().join("ws").join(".codegraph").exists());
+    }
+
+    #[test]
+    fn migrate_data_keeps_nonempty_codegraph_parent() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let codegraph_dir = tmp.path().join("ws").join(".codegraph");
+        let old_dir = codegraph_dir.join("memory");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("graph.db"), b"x").unwrap();
+        // A sibling of memory/ keeps .codegraph non-empty after the move.
+        std::fs::write(codegraph_dir.join("config.toml"), b"y").unwrap();
+        let new_dir = tmp.path().join("global").join("memory");
+
+        MemoryManager::migrate_data(&old_dir, &new_dir).unwrap();
+
+        assert!(new_dir.join("graph.db").exists());
+        assert!(!old_dir.exists());
+        // The parent survives because the sibling file still lives in it.
+        assert!(codegraph_dir.exists());
+        assert!(codegraph_dir.join("config.toml").exists());
+    }
+
+    #[test]
+    fn migrate_data_errors_when_source_is_missing() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let old_dir = tmp.path().join("does-not-exist").join("memory");
+        let new_dir = tmp.path().join("global").join("memory");
+
+        let err = MemoryManager::migrate_data(&old_dir, &new_dir)
+            .expect_err("renaming a missing source must fail");
+        assert!(
+            err.contains("rename failed"),
+            "unexpected error message: {err}"
+        );
+        // Nothing was created at the destination on failure.
+        assert!(!new_dir.exists());
+    }
 }
