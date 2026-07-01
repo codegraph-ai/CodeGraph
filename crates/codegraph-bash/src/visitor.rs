@@ -394,4 +394,97 @@ mod tests {
         assert!(visitor.imports.is_empty());
         assert!(visitor.calls.is_empty());
     }
+
+    #[test]
+    fn test_complexity_while_loop() {
+        let source = b"greet() {\n    while true; do\n        echo hi\n    done\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_until_loop() {
+        let source = b"greet() {\n    until false; do\n        echo hi\n    done\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_c_style_for() {
+        let source = b"greet() {\n    for ((i=0; i<3; i++)); do\n        echo $i\n    done\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_elif_adds_branch() {
+        let plain = b"greet() {\n    if [ -n \"$1\" ]; then\n        echo a\n    fi\n}\n";
+        let with_elif = b"greet() {\n    if [ -n \"$1\" ]; then\n        echo a\n    elif [ -n \"$2\" ]; then\n        echo b\n    fi\n}\n";
+        let cc_plain = parse_and_visit(plain).functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        let cc_elif = parse_and_visit(with_elif).functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        assert!(cc_elif > cc_plain);
+    }
+
+    #[test]
+    fn test_call_site_line_and_is_direct() {
+        let source = b"greet() {\n    echo hi\n}\n";
+        let visitor = parse_and_visit(source);
+        let call = visitor.calls.iter().find(|c| c.callee == "echo").unwrap();
+        assert_eq!(call.call_site_line, 2);
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+    }
+
+    #[test]
+    fn test_import_default_fields() {
+        let source = b"source ./lib.sh\n";
+        let imp = &parse_and_visit(source).imports[0];
+        assert_eq!(imp.importer, "main");
+        assert!(imp.symbols.is_empty());
+        assert!(!imp.is_wildcard);
+        assert!(imp.alias.is_none());
+    }
+
+    #[test]
+    fn test_multiple_imports_recorded() {
+        let source = b"source ./a.sh\n. ./b.sh\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 2);
+        assert_eq!(visitor.imports[0].imported, "./a.sh");
+        assert_eq!(visitor.imports[1].imported, "./b.sh");
+    }
+
+    #[test]
+    fn test_nested_call_tracked() {
+        let source = b"greet() {\n    if true; then\n        printf hi\n    fi\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "greet" && c.callee == "printf"));
+    }
+
+    #[test]
+    fn test_keyword_form_signature() {
+        let source = b"function do_work {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert_eq!(f.signature, "function do_work {");
+    }
+
+    #[test]
+    fn test_function_line_numbers_offset() {
+        let source = b"\n\ngreet() {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert_eq!(f.line_start, 3);
+        assert_eq!(f.line_end, 5);
+    }
 }
