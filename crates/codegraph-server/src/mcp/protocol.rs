@@ -558,4 +558,69 @@ mod tests {
         assert!(json.contains("\"serverInfo\""));
         assert!(json.contains("\"listChanged\":false"));
     }
+
+    #[test]
+    fn test_tool_result_content_resource_tag() {
+        // The third enum arm (Resource) is never serialized elsewhere - only
+        // Text and Image are exercised. It nests a ResourceReference and skips
+        // that reference's None-valued optionals.
+        let content = ToolResultContent::Resource {
+            resource: ResourceReference {
+                uri: "file:///tmp/x.rs".to_string(),
+                text: Some("fn main() {}".to_string()),
+                mime_type: None,
+            },
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"type\":\"resource\""));
+        assert!(json.contains("\"uri\":\"file:///tmp/x.rs\""));
+        assert!(json.contains("\"text\":\"fn main() {}\""));
+        // mime_type is None on the nested reference, so it is skipped.
+        assert!(!json.contains("mime_type"));
+    }
+
+    #[test]
+    fn test_initialize_params_parses_roots() {
+        // Complements test_initialize_params_all_defaults (roots absent): the
+        // roots-present branch deserializes a Root, exercising its required
+        // `uri` and #[serde(default)] `name` (present and absent).
+        let json = r#"{
+            "roots": [
+                {"uri": "file:///work/a", "name": "a"},
+                {"uri": "file:///work/b"}
+            ]
+        }"#;
+        let params: InitializeParams = serde_json::from_str(json).unwrap();
+        let roots = params.roots.expect("roots present");
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].uri, "file:///work/a");
+        assert_eq!(roots[0].name.as_deref(), Some("a"));
+        assert_eq!(roots[1].uri, "file:///work/b");
+        assert!(roots[1].name.is_none());
+    }
+
+    #[test]
+    fn test_resource_content_camel_case_and_skips_none() {
+        // mime_type renames to camelCase; text/blob/mime_type are all skipped
+        // when None, leaving only the required uri.
+        let bare = ResourceContent {
+            uri: "file:///a".to_string(),
+            mime_type: None,
+            text: None,
+            blob: None,
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert_eq!(json, r#"{"uri":"file:///a"}"#);
+
+        let full = ResourceContent {
+            uri: "file:///b".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            text: Some("hi".to_string()),
+            blob: None,
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        assert!(json.contains("\"mimeType\":\"text/plain\""));
+        assert!(json.contains("\"text\":\"hi\""));
+        assert!(!json.contains("\"blob\""));
+    }
 }
