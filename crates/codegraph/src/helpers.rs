@@ -887,6 +887,103 @@ mod tests {
     }
 
     #[test]
+    fn add_file_sets_codefile_type_and_language() {
+        // Prior tests use add_file only for setup and check `path` indirectly via
+        // find_file_by_path; the node type and the `language` property were never
+        // asserted directly.
+        let mut g = graph();
+        let file = add_file(&mut g, "src/lib.rs", "rust").unwrap();
+        let node = g.get_node(file).unwrap();
+        assert_eq!(node.node_type, NodeType::CodeFile);
+        assert_eq!(node.properties.get_string("path"), Some("src/lib.rs"));
+        assert_eq!(node.properties.get_string("language"), Some("rust"));
+    }
+
+    #[test]
+    fn add_class_stores_props_and_links_to_file() {
+        // add_method_links_to_class asserts the Class node_type but not its
+        // name/line properties, and add_class's own Contains edge from the file
+        // is never pinned separately from add_method's setup.
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let class = add_class(&mut g, file, "Widget", 3, 42).unwrap();
+        let node = g.get_node(class).unwrap();
+        assert_eq!(node.node_type, NodeType::Class);
+        assert_eq!(node.properties.get_string("name"), Some("Widget"));
+        assert_eq!(node.properties.get_int("line_start"), Some(3));
+        assert_eq!(node.properties.get_int("line_end"), Some(42));
+        // The file Contains the class (outgoing neighbor).
+        let contained = g.get_neighbors(file, Direction::Outgoing).unwrap();
+        assert!(contained.contains(&class));
+    }
+
+    #[test]
+    fn add_call_stores_line_on_calls_edge() {
+        // The Calls edge's `line` property is the only payload add_call adds
+        // beyond the edge itself, and no existing test reads it back.
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let caller = add_function(&mut g, file, "caller", 1, 5).unwrap();
+        let callee = add_function(&mut g, file, "callee", 6, 10).unwrap();
+        let edge_id = add_call(&mut g, caller, callee, 7).unwrap();
+        let edge = g.get_edge(edge_id).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(edge.properties.get_int("line"), Some(7));
+    }
+
+    #[test]
+    fn add_import_stores_symbols_on_edge() {
+        // add_import's `symbols` list property is never asserted; existing import
+        // tests only check the resulting dependency direction.
+        let mut g = graph();
+        let a = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "src/b.rs", "rust").unwrap();
+        let edge_id = add_import(&mut g, a, b, vec!["foo", "bar"]).unwrap();
+        let edge = g.get_edge(edge_id).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert_eq!(
+            edge.properties.get_string_list("symbols"),
+            Some(["foo".to_string(), "bar".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn file_dependencies_follow_imports_from_edges() {
+        // get_file_dependencies/dependents accept both Imports AND ImportsFrom,
+        // but add_import only ever creates Imports edges, so the ImportsFrom arm
+        // is unexercised. Wire one manually to cover it.
+        let mut g = graph();
+        let a = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "src/b.rs", "rust").unwrap();
+        g.add_edge(a, b, EdgeType::ImportsFrom, PropertyMap::new())
+            .unwrap();
+        assert_eq!(get_file_dependencies(&g, a).unwrap(), vec![b]);
+        assert_eq!(get_file_dependents(&g, b).unwrap(), vec![a]);
+    }
+
+    #[test]
+    fn transitive_dependencies_depth_zero_is_empty() {
+        // Some(0) hits the `depth >= max` guard on the very first node, so no
+        // dependency is ever collected - a boundary the Some(1)/None tests miss.
+        let mut g = graph();
+        let a = add_file(&mut g, "a.rs", "rust").unwrap();
+        let b = add_file(&mut g, "b.rs", "rust").unwrap();
+        add_import(&mut g, a, b, vec![]).unwrap();
+        assert!(transitive_dependencies(&g, a, Some(0)).unwrap().is_empty());
+        assert!(transitive_dependents(&g, b, Some(0)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn call_chain_returns_empty_when_no_path() {
+        // Two functions with no connecting Calls edge yield no chains.
+        let mut g = graph();
+        let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
+        let a = add_function(&mut g, file, "a", 1, 5).unwrap();
+        let b = add_function(&mut g, file, "b", 6, 10).unwrap();
+        assert!(call_chain(&g, a, b, Some(10)).unwrap().is_empty());
+    }
+
+    #[test]
     fn link_to_file_creates_contains_edge() {
         let mut g = graph();
         let file = add_file(&mut g, "src/a.rs", "rust").unwrap();
