@@ -220,6 +220,38 @@ mod tests {
     }
 
     #[test]
+    fn remaining_sourceless_variants_have_no_source() {
+        use std::error::Error as _;
+        // io_error_exposes_source_and_others_have_none only spot-checks GraphError and
+        // FileTooLarge; pin the source() == None contract for the three sourceless
+        // variants it omits, so a stray #[source] added to any of them is caught.
+        assert!(ParseError::syntax_error("m.py", 1, 1, "x")
+            .source()
+            .is_none());
+        assert!(ParseError::invalid_config("bad").source().is_none());
+        assert!(ParseError::unsupported_feature("m.py", "f")
+            .source()
+            .is_none());
+    }
+
+    #[test]
+    fn io_error_source_downcast_preserves_kind_and_message() {
+        use std::error::Error as _;
+        // The existing source test asserts only ErrorKind; also pin that the wrapped
+        // io::Error's Display message survives the downcast, confirming source() returns
+        // the original error object intact rather than a re-synthesized kind-only stub.
+        let src = io::Error::new(io::ErrorKind::NotFound, "no such file");
+        let err = ParseError::io_error("/x/y.py", src);
+        let io_src = err
+            .source()
+            .expect("IoError should expose its source")
+            .downcast_ref::<io::Error>()
+            .expect("source should be an io::Error");
+        assert_eq!(io_src.kind(), io::ErrorKind::NotFound);
+        assert_eq!(io_src.to_string(), "no such file");
+    }
+
+    #[test]
     fn result_alias_carries_parse_error() {
         let r: Result<u32> = Err(ParseError::graph_error("boom"));
         assert!(r.is_err());
