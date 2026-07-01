@@ -1419,4 +1419,161 @@ mod tests {
         let m = visitor.functions.iter().find(|f| f.name == "doIt").unwrap();
         assert!(m.body_prefix.is_none());
     }
+
+    #[test]
+    fn test_function_body_prefix_truncated() {
+        // An oversized function body is truncated to exactly BODY_PREFIX_MAX_CHARS bytes
+        let filler = "a".repeat(BODY_PREFIX_MAX_CHARS + 200);
+        let source = format!("void big() {{ const char* s = \"{}\"; }}", filler);
+        let visitor = parse_and_visit(source.as_bytes());
+
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(bp.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_class_body_prefix_captured() {
+        let source = b"class Widget { public: int width; int height; };";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.classes.iter().find(|c| c.name == "Widget").unwrap();
+        let bp = c.body_prefix.as_ref().unwrap();
+        assert!(bp.contains("width"));
+    }
+
+    #[test]
+    fn test_class_doc_comment_block() {
+        // A /** */ block comment before a class is captured as its doc_comment
+        let source = b"/** A documented class */\nclass Documented {};";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Documented")
+            .unwrap();
+        assert!(c.doc_comment.is_some());
+    }
+
+    #[test]
+    fn test_class_line_bounds() {
+        let source = b"\n\nclass Multi {\n  int x;\n};";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.classes.iter().find(|c| c.name == "Multi").unwrap();
+        assert_eq!(c.line_start, 3);
+        assert_eq!(c.line_end, 5);
+    }
+
+    #[test]
+    fn test_do_while_counts_as_loop() {
+        let source = b"void loop(int n) { do { n--; } while (n > 0); }";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.loops >= 1);
+    }
+
+    #[test]
+    fn test_ternary_adds_branch() {
+        let source = b"int pick(int a, int b) { return a > b ? a : b; }";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.branches >= 1);
+    }
+
+    #[test]
+    fn test_switch_case_adds_branch() {
+        let source =
+            b"int classify(int x) { switch (x) { case 1: return 1; case 2: return 2; default: return 0; } }";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.branches >= 2,
+            "expected case/default to add branches, got {}",
+            complexity.branches
+        );
+    }
+
+    #[test]
+    fn test_multiple_base_classes_order() {
+        let source = b"class A {};\nclass B {};\nclass C : public A, public B {};";
+        let visitor = parse_and_visit(source);
+
+        let rels: Vec<_> = visitor
+            .inheritance
+            .iter()
+            .filter(|r| r.child == "C")
+            .collect();
+        assert_eq!(rels.len(), 2);
+        let a = rels.iter().find(|r| r.parent == "A").unwrap();
+        let b = rels.iter().find(|r| r.parent == "B").unwrap();
+        assert_eq!(a.order, 0);
+        assert_eq!(b.order, 1);
+    }
+
+    #[test]
+    fn test_coroutine_by_co_return_body() {
+        // A void function whose return type is not coroutine-like is still detected
+        // as a coroutine when its body uses co_return (a co_return_statement node)
+        let source = b"void gen() { co_return; }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[0].is_async);
+    }
+
+    #[test]
+    fn test_co_yield_body_not_detected_gap() {
+        // Regression pin: tree-sitter-cpp emits `co_yield_statement` for a co_yield,
+        // but has_coroutine_keyword only matches `co_yield_expression`, so a body that
+        // only uses co_yield (with a non-coroutine return type) is NOT flagged async.
+        let source = b"void gen() { co_yield 1; }";
+        let visitor = parse_and_visit(source);
+
+        assert!(!visitor.functions[0].is_async);
+    }
+
+    #[test]
+    fn test_qualified_callee_name() {
+        let source = b"void run() { std::sort(nullptr); }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "std::sort"));
+    }
+
+    #[test]
+    fn test_method_call_attribution() {
+        let source =
+            b"int helper() { return 1; } class Foo { public: int run() { return helper(); } };";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "helper"));
+    }
+
+    #[test]
+    fn test_unnamed_parameter_empty_name() {
+        // An unnamed parameter (int) yields a parameter with an empty name
+        let source = b"void sink(int) {}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert_eq!(f.parameters.len(), 1);
+        assert_eq!(f.parameters[0].name, "");
+    }
+
+    #[test]
+    fn test_include_importer_is_file() {
+        let source = b"#include <vector>";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports[0].importer, "file");
+    }
 }
