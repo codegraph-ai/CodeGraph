@@ -923,4 +923,175 @@ mod tests {
         assert!(answer.parent_class.is_none());
         assert!(answer.attributes.is_empty());
     }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        // A body longer than BODY_PREFIX_MAX_CHARS bytes is truncated to that many.
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        let long = "x".repeat(BODY_PREFIX_MAX_CHARS + 100);
+        let source = format!("module Main exposing (..)\n\nbig =\n    \"{long}\"\n");
+        let visitor = parse_and_visit(source.as_bytes());
+
+        let big = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "big")
+            .expect("big not found");
+        let body = big.body_prefix.as_deref().expect("body_prefix missing");
+        assert_eq!(body.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_line_comment_doc_comment() {
+        // A `--` single-line comment immediately preceding a declaration is
+        // captured as the doc comment.
+        let source = b"module Main exposing (..)\n\n-- greets politely\ngreeting =\n    \"hi\"\n";
+        let visitor = parse_and_visit(source);
+
+        let greeting = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greeting")
+            .expect("greeting not found");
+        let doc = greeting.doc_comment.as_deref().unwrap_or("");
+        assert!(doc.starts_with("--"), "doc_comment was: {doc:?}");
+        assert!(doc.contains("greets politely"), "doc_comment was: {doc:?}");
+    }
+
+    #[test]
+    fn test_or_operator_raises_complexity() {
+        let source = b"module Main exposing (..)\n\neither a b =\n    a || b\n";
+        let visitor = parse_and_visit(source);
+
+        let either = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "either")
+            .expect("either not found");
+        let cx = either.complexity.as_ref().expect("complexity missing");
+        assert!(
+            cx.cyclomatic_complexity > 1,
+            "expected || to raise complexity, got {}",
+            cx.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_three_parameters_order_preserved() {
+        let source = b"module Main exposing (..)\n\ncombine a b c =\n    a\n";
+        let visitor = parse_and_visit(source);
+
+        let combine = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "combine")
+            .expect("combine not found");
+        assert_eq!(combine.parameters.len(), 3);
+        assert_eq!(combine.parameters[0].name, "a");
+        assert_eq!(combine.parameters[1].name, "b");
+        assert_eq!(combine.parameters[2].name, "c");
+    }
+
+    #[test]
+    fn test_simple_function_baseline_complexity() {
+        // A branch-free value has the baseline cyclomatic complexity of 1.
+        let source = b"module Main exposing (..)\n\nanswer =\n    42\n";
+        let visitor = parse_and_visit(source);
+
+        let answer = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "answer")
+            .expect("answer not found");
+        let cx = answer.complexity.as_ref().expect("complexity missing");
+        assert_eq!(cx.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_multiple_case_branches_raise_complexity() {
+        // Each case_of_branch adds a branch, so three arms exceed a two-arm case.
+        let three = b"module Main exposing (..)\n\nc3 n =\n    case n of\n        0 -> \"a\"\n        1 -> \"b\"\n        _ -> \"c\"\n";
+        let two = b"module Main exposing (..)\n\nc2 n =\n    case n of\n        0 -> \"a\"\n        _ -> \"b\"\n";
+        let vx3 = parse_and_visit(three);
+        let vx2 = parse_and_visit(two);
+
+        let cx3 = vx3.functions[0].complexity.as_ref().unwrap();
+        let cx2 = vx2.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            cx3.cyclomatic_complexity > cx2.cyclomatic_complexity,
+            "three arms ({}) should exceed two arms ({})",
+            cx3.cyclomatic_complexity,
+            cx2.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_without_declaration_creates_no_function() {
+        // A lone `type_annotation` with no matching value_declaration produces
+        // no FunctionEntity - annotations are only collected, never emitted.
+        let source = b"module Main exposing (..)\n\nghost : Int -> Int\n";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions.iter().all(|f| f.name != "ghost"));
+    }
+
+    #[test]
+    fn test_single_type_annotation_return_type_is_whole_signature() {
+        // With no `->` in the annotation, split("->").last() yields the whole
+        // trimmed annotation text as the return type.
+        let source = b"module Main exposing (..)\n\nanswer : Int\nanswer =\n    42\n";
+        let visitor = parse_and_visit(source);
+
+        let answer = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "answer")
+            .expect("answer not found");
+        assert_eq!(answer.return_type.as_deref(), Some("answer : Int"));
+    }
+
+    #[test]
+    fn test_multiple_functions_source_order() {
+        let source =
+            b"module Main exposing (..)\n\nfirst =\n    1\n\nsecond =\n    2\n\nthird =\n    3\n";
+        let visitor = parse_and_visit(source);
+
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn test_port_line_numbers_one_indexed() {
+        // The port declaration sits on physical line 3 (1-indexed).
+        let source =
+            b"port module Main exposing (..)\n\nport sendMessage : String -> Cmd msg\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let port = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "sendMessage")
+            .expect("sendMessage not found");
+        assert_eq!(port.line_start, 3);
+        assert!(port.line_end >= port.line_start);
+    }
+
+    #[test]
+    fn test_let_in_body_still_extracts_function() {
+        // A `let .. in` body opens a scope but does not by itself add a branch;
+        // the function is still extracted with its body captured.
+        let source =
+            b"module Main exposing (..)\n\ncompute =\n    let\n        x = 1\n    in\n    x\n";
+        let visitor = parse_and_visit(source);
+
+        let compute = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "compute")
+            .expect("compute not found");
+        let cx = compute.complexity.as_ref().expect("complexity missing");
+        assert_eq!(cx.cyclomatic_complexity, 1);
+        let body = compute.body_prefix.as_deref().unwrap_or("");
+        assert!(body.contains("let"), "body_prefix was: {body:?}");
+    }
 }
