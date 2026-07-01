@@ -387,6 +387,49 @@ mod tests {
     }
 
     #[test]
+    fn general_only_match_in_throws_mode_is_classified_as_throws() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Body trips only the general table (no throw/catch pattern). Under
+        // "throws" mode, passes_mode's second clause (!has_catches &&
+        // !general_hits.is_empty()) keeps it, and the role-classification
+        // fallback labels it "throws" rather than "any".
+        add_fn(
+            &mut g,
+            "count",
+            "/a.rs",
+            "fn count()",
+            "let error_count = 0;",
+            1,
+            2,
+        );
+        let result = search_by_error(&g, None, "throws", 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.functions[0].error_role, "throws");
+        assert_eq!(result.mode, "throws");
+    }
+
+    #[test]
+    fn general_only_match_in_catches_mode_is_classified_as_catches() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Mirror of the throws case: a general-only body under "catches" mode
+        // passes via (!has_throws && !general_hits.is_empty()) and is labeled
+        // "catches" by the classification fallback.
+        add_fn(
+            &mut g,
+            "count",
+            "/a.rs",
+            "fn count()",
+            "let error_count = 0;",
+            1,
+            2,
+        );
+        let result = search_by_error(&g, None, "catches", 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.functions[0].error_role, "catches");
+        assert_eq!(result.mode, "catches");
+    }
+
+    #[test]
     fn signature_is_scanned_for_patterns() {
         let mut g = CodeGraph::in_memory().expect("in_memory");
         // Pattern lives in the signature (Result<...>), body is clean.
