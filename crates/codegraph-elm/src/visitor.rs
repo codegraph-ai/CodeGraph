@@ -1094,4 +1094,198 @@ mod tests {
         let body = compute.body_prefix.as_deref().unwrap_or("");
         assert!(body.contains("let"), "body_prefix was: {body:?}");
     }
+
+    #[test]
+    fn test_import_importer_field_is_main() {
+        // Every ImportRelation is attributed to the synthetic "main" importer.
+        let source = b"module App exposing (..)\n\nimport Html\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "Html")
+            .expect("import not found");
+        assert_eq!(imp.importer, "main");
+    }
+
+    #[test]
+    fn test_exposed_operator_is_captured_as_symbol() {
+        // `exposing ((+), map)` records the operator token `(+)` alongside `map`;
+        // exposed_operator nodes are handled the same as exposed_value/exposed_type.
+        let source =
+            b"module Main exposing (..)\n\nimport Basics exposing ((+), map)\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "Basics")
+            .expect("import not found");
+        assert!(
+            imp.symbols.iter().any(|s| s == "(+)"),
+            "symbols: {:?}",
+            imp.symbols
+        );
+        assert!(
+            imp.symbols.iter().any(|s| s == "map"),
+            "symbols: {:?}",
+            imp.symbols
+        );
+        assert!(!imp.is_wildcard);
+    }
+
+    #[test]
+    fn test_underscore_parameter_is_not_counted() {
+        // A wildcard `_` argument parses as an `anything_pattern`, not a
+        // `lower_pattern`, so extract_parameters skips it entirely.
+        let source = b"module Main exposing (..)\n\nconst _ = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "const")
+            .expect("const not found");
+        assert!(f.parameters.is_empty(), "params: {:?}", f.parameters);
+    }
+
+    #[test]
+    fn test_plain_block_comment_not_captured_as_doc() {
+        // A `{- .. -}` block comment without the `|` marker is not a doc comment;
+        // extract_doc_comment only accepts `{-|` (or `--`) prefixes.
+        let source = b"module Main exposing (..)\n\n{- internal note -}\ngreeting =\n    \"hi\"\n";
+        let visitor = parse_and_visit(source);
+
+        let greeting = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greeting")
+            .expect("greeting not found");
+        assert_eq!(greeting.doc_comment, None);
+    }
+
+    #[test]
+    fn test_type_declaration_doc_comment() {
+        // A `{-| .. -}` block comment preceding a type declaration attaches.
+        let source =
+            b"module Main exposing (..)\n\n{-| The messages. -}\ntype Msg\n    = Inc\n    | Dec\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let msg = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Msg")
+            .expect("Msg not found");
+        let doc = msg.doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("The messages"), "doc_comment was: {doc:?}");
+    }
+
+    #[test]
+    fn test_type_alias_doc_comment() {
+        let source =
+            b"module Main exposing (..)\n\n{-| Application state. -}\ntype alias Model =\n    { count : Int }\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let model = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Model")
+            .expect("Model not found");
+        let doc = model.doc_comment.as_deref().unwrap_or("");
+        assert!(
+            doc.contains("Application state"),
+            "doc_comment was: {doc:?}"
+        );
+    }
+
+    #[test]
+    fn test_port_doc_comment() {
+        let source =
+            b"port module Main exposing (..)\n\n{-| Sends a message out. -}\nport sendMessage : String -> Cmd msg\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let port = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "sendMessage")
+            .expect("sendMessage not found");
+        let doc = port.doc_comment.as_deref().unwrap_or("");
+        assert!(
+            doc.contains("Sends a message out"),
+            "doc_comment was: {doc:?}"
+        );
+    }
+
+    #[test]
+    fn test_annotation_after_declaration_is_ignored() {
+        // seen_annotations is populated in source order, so an annotation placed
+        // AFTER its value_declaration is never associated: the signature falls
+        // back to the decl's first line and return_type stays None.
+        let source = b"module Main exposing (..)\n\nanswer =\n    42\n\nanswer : Int\n";
+        let visitor = parse_and_visit(source);
+
+        let answer = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "answer")
+            .expect("answer not found");
+        assert_eq!(answer.signature, "answer =");
+        assert_eq!(answer.return_type, None);
+    }
+
+    #[test]
+    fn test_type_parameters_and_base_classes_are_empty() {
+        // Elm parameterised types (`type Maybe a = ..`) carry a `lower_type_name`
+        // that the visitor does not surface: type_parameters and base_classes stay
+        // empty because ClassEntity is built with fixed empty vecs.
+        let source =
+            b"module Main exposing (..)\n\ntype Maybe a\n    = Just a\n    | Nothing\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let maybe = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Maybe")
+            .expect("Maybe not found");
+        assert!(maybe.type_parameters.is_empty());
+        assert!(maybe.base_classes.is_empty());
+        assert!(maybe.implemented_traits.is_empty());
+        assert!(maybe.methods.is_empty());
+        assert!(maybe.fields.is_empty());
+    }
+
+    #[test]
+    fn test_nested_case_raises_complexity_further() {
+        // A case whose arm contains another case accumulates more branches than a
+        // single flat case, exercising enter_scope/exit_scope recursion.
+        let nested = b"module Main exposing (..)\n\nf n m =\n    case n of\n        0 ->\n            case m of\n                0 -> \"a\"\n                _ -> \"b\"\n        _ -> \"c\"\n";
+        let flat = b"module Main exposing (..)\n\nf n =\n    case n of\n        0 -> \"a\"\n        _ -> \"b\"\n";
+        let vn = parse_and_visit(nested);
+        let vf = parse_and_visit(flat);
+
+        let cn = vn.functions[0].complexity.as_ref().unwrap();
+        let cf = vf.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            cn.cyclomatic_complexity > cf.cyclomatic_complexity,
+            "nested ({}) should exceed flat ({})",
+            cn.cyclomatic_complexity,
+            cf.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_multiple_imports_all_extracted() {
+        let source = b"module Main exposing (..)\n\nimport Html\nimport Html.Attributes as Attr\nimport Browser exposing (element)\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 3);
+        assert!(visitor.imports.iter().all(|i| i.importer == "main"));
+        let attr = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "Html.Attributes")
+            .expect("Html.Attributes not found");
+        assert_eq!(attr.alias.as_deref(), Some("Attr"));
+    }
 }
