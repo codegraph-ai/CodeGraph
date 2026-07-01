@@ -231,7 +231,12 @@ impl<'a> RVisitor<'a> {
                         params.push(Parameter::new(self.node_text(child)));
                     }
                     "parameter" => {
-                        if let Some(name_node) = child.child_by_field_name("name") {
+                        // Variadic `...` parses as a `dots` child of the
+                        // `parameter` node rather than a top-level `dots`, so
+                        // detect it here and emit a variadic parameter.
+                        if child.child(0).is_some_and(|c| c.kind() == "dots") {
+                            params.push(Parameter::new("...").variadic());
+                        } else if let Some(name_node) = child.child_by_field_name("name") {
                             let mut param = Parameter::new(self.node_text(name_node));
                             if let Some(default_node) = child.child_by_field_name("default") {
                                 param = param.with_default(self.node_text(default_node));
@@ -352,5 +357,203 @@ mod tests {
 
         assert_eq!(visitor.imports.len(), 1);
         assert_eq!(visitor.imports[0].imported, "ggplot2");
+    }
+
+    #[test]
+    fn test_empty_source_is_empty() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = b"add <- function(a, b) {\n    a + b\n}";
+        let visitor = parse_and_visit(source);
+
+        let func = &visitor.functions[0];
+        assert_eq!(func.visibility, "public");
+        assert!(!func.is_async);
+        assert!(!func.is_static);
+        assert!(!func.is_abstract);
+        assert!(!func.is_test);
+        assert_eq!(func.return_type, None);
+        assert_eq!(func.parent_class, None);
+        assert_eq!(func.line_start, 1);
+        assert_eq!(func.line_end, 3);
+    }
+
+    #[test]
+    fn test_signature_lists_parameter_names() {
+        let source = b"add <- function(a, b) {\n    a + b\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "add <- function(a, b)");
+    }
+
+    #[test]
+    fn test_parameter_extraction() {
+        let source = b"add <- function(a, b) {\n    a + b\n}";
+        let visitor = parse_and_visit(source);
+
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "a");
+        assert_eq!(params[1].name, "b");
+    }
+
+    #[test]
+    fn test_default_parameter_captured() {
+        let source = b"f <- function(x, y = 10) {\n    x + y\n}";
+        let visitor = parse_and_visit(source);
+
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[1].name, "y");
+        assert_eq!(params[1].default_value.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn test_variadic_dots_parameter() {
+        let source = b"f <- function(x, ...) {\n    x\n}";
+        let visitor = parse_and_visit(source);
+
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[1].name, "...");
+        assert!(params[1].is_variadic);
+    }
+
+    #[test]
+    fn test_equals_assignment_form() {
+        let source = b"greet = function(name) {\n    name\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "greet");
+    }
+
+    #[test]
+    fn test_super_assign_form() {
+        let source = b"counter <<- function() {\n    1\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "counter");
+    }
+
+    #[test]
+    fn test_is_test_prefix_detection() {
+        let source = b"test_addition <- function() {\n    1\n}";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_is_test_dot_prefix_detection() {
+        let source = b"test.addition <- function() {\n    1\n}";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_doc_comment_roxygen() {
+        let source = b"#' Adds two numbers\nadd <- function(a, b) {\n    a + b\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].doc_comment.as_deref(),
+            Some("#' Adds two numbers")
+        );
+    }
+
+    #[test]
+    fn test_plain_comment_is_not_doc() {
+        let source = b"# just a note\nadd <- function(a, b) {\n    a + b\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].doc_comment, None);
+    }
+
+    #[test]
+    fn test_body_prefix_present() {
+        let source = b"add <- function(a, b) {\n    a + b\n}";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_require_import_alias() {
+        let source = b"require(dplyr)";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "dplyr");
+        assert_eq!(visitor.imports[0].alias.as_deref(), Some("require"));
+    }
+
+    #[test]
+    fn test_source_import_string_stripped() {
+        let source = b"source(\"helpers.R\")";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "helpers.R");
+        assert_eq!(visitor.imports[0].alias.as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn test_call_within_function_tracked() {
+        let source = b"main <- function() {\n    helper()\n}";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "main" && c.callee == "helper"));
+    }
+
+    #[test]
+    fn test_library_call_not_tracked_as_call() {
+        let source = b"main <- function() {\n    library(ggplot2)\n}";
+        let visitor = parse_and_visit(source);
+        assert!(!visitor.calls.iter().any(|c| c.callee == "library"));
+    }
+
+    #[test]
+    fn test_complexity_increases_with_branch() {
+        let plain = b"f <- function(x) {\n    x\n}";
+        let branchy =
+            b"g <- function(x) {\n    if (x > 0) {\n        1\n    } else {\n        2\n    }\n}";
+
+        let plain_v = parse_and_visit(plain);
+        let branchy_v = parse_and_visit(branchy);
+
+        let plain_c = plain_v.functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        let branchy_c = branchy_v.functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        assert!(branchy_c > plain_c);
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = b"a <- function() {\n    1\n}\nb <- function() {\n    2\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "a");
+        assert_eq!(visitor.functions[1].name, "b");
+    }
+
+    #[test]
+    fn test_non_function_assignment_ignored() {
+        let source = b"x <- 42";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions.is_empty());
     }
 }
