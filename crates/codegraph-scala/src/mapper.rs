@@ -946,4 +946,244 @@ mod tests {
         assert!(is_direct(id_of("direct")));
         assert!(!is_direct(id_of("indirect")));
     }
+
+    #[test]
+    fn free_function_records_line_signature_and_path_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_function(FunctionEntity::new("run", 7, 42).with_signature("def run(): Unit"));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(7))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(42))
+        );
+        assert_eq!(
+            node.properties.get("signature"),
+            Some(&PropertyValue::String("def run(): Unit".to_string()))
+        );
+        // The path prop mirrors the file path passed to ir_to_graph.
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Service.scala".to_string()))
+        );
+    }
+
+    #[test]
+    fn class_records_line_visibility_and_path_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_class(ClassEntity::new("Repo", 3, 27).with_visibility("private"));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.classes[0]).unwrap();
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(3))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(27))
+        );
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("private".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Service.scala".to_string()))
+        );
+        // A class with no abstract flag still stamps is_abstract=false.
+        assert_eq!(
+            node.properties.get("is_abstract"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn trait_records_line_visibility_and_path_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_trait(TraitEntity::new("Ordered", 2, 9).with_visibility("protected"));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.traits[0]).unwrap();
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(2))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(9))
+        );
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("protected".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Service.scala".to_string()))
+        );
+    }
+
+    #[test]
+    fn class_method_records_line_and_path_but_omits_function_only_props() {
+        // The method loop stamps a narrower prop set than free functions: no
+        // complexity, is_async/is_static/is_abstract flags, parameters, or
+        // return_type are ever written onto a method node.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 9,
+            branches: 4,
+            ..Default::default()
+        };
+        let mut class = ClassEntity::new("Repo", 1, 30);
+        class.methods.push(
+            FunctionEntity::new("save", 12, 18)
+                .with_complexity(metrics)
+                .with_return_type("Unit")
+                .with_parameters(vec![Parameter::new("row").with_type("Row")])
+                .async_fn()
+                .static_fn(),
+        );
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(12))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(18))
+        );
+        assert_eq!(
+            node.properties.get("path"),
+            Some(&PropertyValue::String("Service.scala".to_string()))
+        );
+        assert!(node.properties.get("complexity").is_none());
+        assert!(node.properties.get("is_async").is_none());
+        assert!(node.properties.get("is_static").is_none());
+        assert!(node.properties.get("is_abstract").is_none());
+        assert!(node.properties.get("parameters").is_none());
+        assert!(node.properties.get("return_type").is_none());
+    }
+
+    #[test]
+    fn inheritance_with_unknown_child_or_parent_creates_no_edge() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_class(ClassEntity::new("Derived", 1, 5));
+        // Parent names a class that was never mapped -> no Extends edge.
+        ir.add_inheritance(InheritanceRelation::new("Derived", "Ghost"));
+        // Child names an unmapped class -> also skipped.
+        ir.add_inheritance(InheritanceRelation::new("Phantom", "Derived"));
+
+        let (graph, info) = build(&ir);
+        let derived = info.classes[0];
+        let extends: Vec<_> = graph
+            .get_neighbors(derived, Direction::Outgoing)
+            .unwrap()
+            .into_iter()
+            .filter(|&n| {
+                graph
+                    .get_edges_between(derived, n)
+                    .unwrap()
+                    .iter()
+                    .any(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Extends)
+            })
+            .collect();
+        assert!(extends.is_empty());
+    }
+
+    #[test]
+    fn implementation_with_unknown_names_creates_no_edge() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_class(ClassEntity::new("Repo", 1, 5));
+        // Trait name is unmapped -> no Implements edge.
+        ir.add_implementation(ImplementationRelation::new("Repo", "Ghost"));
+        // Implementor is unmapped -> also skipped.
+        ir.add_implementation(ImplementationRelation::new("Phantom", "Repo"));
+
+        let (graph, info) = build(&ir);
+        let repo = info.classes[0];
+        let has_impl = graph
+            .get_neighbors(repo, Direction::Outgoing)
+            .unwrap()
+            .into_iter()
+            .any(|n| {
+                graph
+                    .get_edges_between(repo, n)
+                    .unwrap()
+                    .iter()
+                    .any(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Implements)
+            });
+        assert!(!has_impl);
+    }
+
+    #[test]
+    fn import_reuses_trait_node_without_marking_external() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_trait(TraitEntity::new("Drawable", 1, 4));
+        ir.add_import(ImportRelation::new("Service", "Drawable"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+        let import_id = info.imports[0];
+        assert_eq!(import_id, info.traits[0]);
+        let node = graph.get_node(import_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Interface);
+        assert!(node.properties.get("is_external").is_none());
+    }
+
+    #[test]
+    fn import_reuses_function_node_without_marking_external() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_function(FunctionEntity::new("helper", 1, 3));
+        ir.add_import(ImportRelation::new("Service", "helper"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+        let import_id = info.imports[0];
+        assert_eq!(import_id, info.functions[0]);
+        let node = graph.get_node(import_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Function);
+        assert!(node.properties.get("is_external").is_none());
+    }
+
+    #[test]
+    fn multiple_free_functions_all_contained_by_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        ir.add_function(FunctionEntity::new("a", 1, 2));
+        ir.add_function(FunctionEntity::new("b", 3, 4));
+        ir.add_function(FunctionEntity::new("c", 5, 6));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.functions.len(), 3);
+        let contained = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        for id in &info.functions {
+            assert!(contained.contains(id));
+        }
+    }
+
+    #[test]
+    fn import_matching_module_name_reuses_file_node() {
+        // When an import targets the module name, node_map already holds the
+        // file node, so the import edge is a self-loop on the CodeFile node.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Service.scala"));
+        let module = ModuleEntity::new("my.pkg", "src/Service.scala", "scala");
+        ir.set_module(module);
+        ir.add_import(ImportRelation::new("Service", "my.pkg"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+        assert_eq!(info.imports[0], info.file_id);
+        let node = graph.get_node(info.imports[0]).unwrap();
+        assert_eq!(node.node_type, NodeType::CodeFile);
+        assert!(node.properties.get("is_external").is_none());
+    }
 }
