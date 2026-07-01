@@ -1393,4 +1393,237 @@ mod tests {
 
         assert!(output.contains("sizeof(my_array)"));
     }
+
+    // --- find_matching_paren (pure helper) ---
+
+    #[test]
+    fn test_find_matching_paren_simple() {
+        let n = MacroNeutralizer::new();
+        // caller passes the slice *after* the opening paren; depth starts at 1
+        assert_eq!(n.find_matching_paren("abc)rest"), Some(3));
+    }
+
+    #[test]
+    fn test_find_matching_paren_nested() {
+        let n = MacroNeutralizer::new();
+        // "a(b)c)"; the outer close is at index 5, inner pair balances first
+        assert_eq!(n.find_matching_paren("a(b)c)"), Some(5));
+    }
+
+    #[test]
+    fn test_find_matching_paren_unbalanced_returns_none() {
+        let n = MacroNeutralizer::new();
+        assert_eq!(n.find_matching_paren("a(b"), None);
+    }
+
+    // --- split_macro_args (pure helper) ---
+
+    #[test]
+    fn test_split_macro_args_top_level_only() {
+        let n = MacroNeutralizer::new();
+        let parts = n.split_macro_args("a, b, c");
+        assert_eq!(parts, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_macro_args_respects_nested_parens() {
+        let n = MacroNeutralizer::new();
+        // the comma inside f(x, y) must not split the argument
+        let parts = n.split_macro_args("mask, f(x, y)");
+        assert_eq!(parts, vec!["mask", "f(x, y)"]);
+    }
+
+    #[test]
+    fn test_split_macro_args_trims_whitespace() {
+        let n = MacroNeutralizer::new();
+        let parts = n.split_macro_args("  a  ,   b  ");
+        assert_eq!(parts, vec!["a", "b"]);
+    }
+
+    // --- expand_define_macros: the DEFINE_/DECLARE_/*_HEAD family beyond mutex ---
+
+    #[test]
+    fn test_define_spinlock_and_rwlock() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("DEFINE_SPINLOCK(lk); DEFINE_RWLOCK(rw);");
+        assert!(out.contains("spinlock_t lk = { 0 }"));
+        assert!(out.contains("rwlock_t rw = { 0 }"));
+        assert_eq!(n.stats.define_macros_stubbed, 2);
+    }
+
+    #[test]
+    fn test_define_semaphore_ida_idr() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("DEFINE_SEMAPHORE(s); DEFINE_IDA(a); DEFINE_IDR(r);");
+        assert!(out.contains("struct semaphore s = { 0 }"));
+        assert!(out.contains("struct ida a = { 0 }"));
+        assert!(out.contains("struct idr r = { 0 }"));
+        assert_eq!(n.stats.define_macros_stubbed, 3);
+    }
+
+    #[test]
+    fn test_declare_bitmap_and_wait_queue() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("DECLARE_BITMAP(bits, 64); DECLARE_WAIT_QUEUE_HEAD(wq);");
+        assert!(out.contains("unsigned long bits[1]"));
+        assert!(out.contains("wait_queue_head_t wq = { 0 }"));
+    }
+
+    #[test]
+    fn test_list_head_and_hlist_head() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("LIST_HEAD(head); HLIST_HEAD(hhead);");
+        assert!(out.contains("struct list_head head = { 0 }"));
+        assert!(out.contains("struct hlist_head hhead = { 0 }"));
+    }
+
+    // --- RCU simplification ---
+
+    #[test]
+    fn test_rcu_read_lock_unlock_stubbed() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("rcu_read_lock(); do_thing(); rcu_read_unlock();");
+        // both barrier calls become ((void)0)
+        assert_eq!(out.matches("((void)0)").count(), 2);
+        assert!(n.stats.rcu_simplified >= 2);
+    }
+
+    #[test]
+    fn test_rcu_dereference_keeps_arg() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("x = rcu_dereference(p->field);");
+        assert!(out.contains("(p->field)"));
+        assert!(!out.contains("rcu_dereference"));
+    }
+
+    // --- memory ordering ---
+
+    #[test]
+    fn test_read_once_and_access_once_unwrapped() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("a = READ_ONCE(x); b = ACCESS_ONCE(y);");
+        assert!(out.contains("a = (x)"));
+        assert!(out.contains("b = (y)"));
+        assert!(!out.contains("READ_ONCE"));
+        assert!(!out.contains("ACCESS_ONCE"));
+    }
+
+    // --- error pointer helpers ---
+
+    #[test]
+    fn test_error_pointer_macros_unwrapped() {
+        let mut n = MacroNeutralizer::new();
+        let out =
+            n.neutralize("if (IS_ERR(p)) return PTR_ERR(p); q = ERR_PTR(-12); r = ERR_CAST(p);");
+        assert!(out.contains("if ((p))"));
+        assert!(out.contains("return (p)"));
+        assert!(out.contains("q = (-12)"));
+        assert!(!out.contains("IS_ERR"));
+        assert!(!out.contains("ERR_CAST"));
+    }
+
+    // --- misc macros: BIT / GENMASK / FIELD_* / IS_ENABLED / token concat ---
+
+    #[test]
+    fn test_bit_macros_expand_to_shift() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("m = BIT(3); w = BIT_ULL(40);");
+        assert!(out.contains("(1UL << (3))"));
+        assert!(out.contains("(1ULL << (40))"));
+    }
+
+    #[test]
+    fn test_genmask_becomes_constant() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("mask = GENMASK(7, 0);");
+        assert!(out.contains("(0xFFFFFFFFUL)"));
+        assert!(!out.contains("GENMASK"));
+    }
+
+    #[test]
+    fn test_field_prep_get_extract_second_arg() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("a = FIELD_PREP(MASK, val); b = FIELD_GET(MASK, reg);");
+        assert!(out.contains("a = (val)"));
+        assert!(out.contains("b = (reg)"));
+    }
+
+    #[test]
+    fn test_is_enabled_becomes_zero() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("if (IS_ENABLED(CONFIG_FOO)) x();");
+        assert!(out.contains("if ((0))"));
+        assert!(!out.contains("IS_ENABLED"));
+    }
+
+    #[test]
+    fn test_token_concat_becomes_underscore() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("int foo ## bar = 0;");
+        assert!(out.contains("foo_bar"));
+        assert!(!out.contains("##"));
+    }
+
+    // --- container_of ---
+
+    #[test]
+    fn test_container_of_casts_to_type() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("p = container_of(ptr, struct foo, node);");
+        assert!(out.contains("((struct foo*)ptr)"));
+        assert_eq!(n.stats.container_of_expanded, 1);
+    }
+
+    // --- module/export macros commented out line-by-line ---
+
+    #[test]
+    fn test_module_and_export_macros_commented() {
+        let n = MacroNeutralizer::new();
+        let out =
+            n.handle_module_macros("MODULE_LICENSE(\"GPL\");\nEXPORT_SYMBOL(my_fn);\nint x;\n");
+        assert!(out.contains("/* MODULE_LICENSE(\"GPL\"); */"));
+        assert!(out.contains("/* EXPORT_SYMBOL(my_fn); */"));
+        // unrelated code lines pass through untouched
+        assert!(out.contains("int x;"));
+    }
+
+    // --- iterator macros converted to for-loop headers ---
+
+    #[test]
+    fn test_list_for_each_entry_uses_first_arg() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.neutralize("list_for_each_entry(pos, head, member) { use(pos); }");
+        // list_/entry macros take the first arg as the iterator variable
+        assert!(out.contains("for (;pos;)"));
+        assert!(n.stats.list_for_each_expanded >= 1);
+    }
+
+    // --- statement expression stats accumulate ---
+
+    #[test]
+    fn test_statement_expression_stats_counted() {
+        let mut n = MacroNeutralizer::new();
+        let _ = n.neutralize("int a = ({ 7; });");
+        assert_eq!(n.stats.statement_expressions_simplified, 1);
+    }
+
+    // --- stats() accessor + Default parity ---
+
+    #[test]
+    fn test_stats_accessor_and_default() {
+        let mut n = MacroNeutralizer::default();
+        assert_eq!(n.stats().likely_unlikely_stripped, 0);
+        n.neutralize("if (likely(x)) {}");
+        assert_eq!(n.stats().likely_unlikely_stripped, 1);
+    }
+
+    // --- unmatched paren leaves macro untouched (no panic) ---
+
+    #[test]
+    fn test_unmatched_paren_left_intact() {
+        let mut n = MacroNeutralizer::new();
+        // no closing paren: replace_macro_with_arg keeps the original token
+        let out = n.neutralize("x = READ_ONCE(y");
+        assert!(out.contains("READ_ONCE(y"));
+    }
 }
