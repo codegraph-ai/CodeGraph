@@ -196,7 +196,10 @@ impl<'a> DartVisitor<'a> {
 
         let complexity = body_node.map(|body| self.calculate_complexity(body));
 
-        let is_static = signature.contains("static ");
+        // The `static` keyword is a sibling of function_signature inside
+        // method_signature, so it is absent from the inner signature text;
+        // read the full method_signature node to detect it.
+        let is_static = self.node_text(node).contains("static ") || signature.contains("static ");
         let is_abstract = body_node.is_none();
 
         let is_async = body_node
@@ -695,5 +698,155 @@ mod tests {
         let visitor = parse_and_visit(source);
 
         assert!(!visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn top_level_function_records_public_visibility_and_body() {
+        let source = b"int add(int a, int b) {\n  return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "add");
+        assert_eq!(f.visibility, "public");
+        // Has a body, so not abstract.
+        assert!(!f.is_abstract);
+        assert!(!f.is_async);
+        assert_eq!(f.parent_class, None);
+    }
+
+    #[test]
+    fn underscore_prefixed_function_is_private() {
+        let source = b"void _secret() {\n  return;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn async_function_sets_is_async() {
+        let source = b"Future<void> load() async {\n  await fetch();\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "load")
+            .expect("load function extracted");
+        assert!(f.is_async);
+    }
+
+    #[test]
+    fn class_extends_records_inheritance_relation() {
+        let source = b"class Dog extends Animal {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.inheritance.len(), 1);
+        let rel = &visitor.inheritance[0];
+        assert_eq!(rel.child, "Dog");
+        assert_eq!(rel.parent, "Animal");
+        assert!(visitor.classes[0]
+            .base_classes
+            .contains(&"Animal".to_string()));
+    }
+
+    #[test]
+    fn class_implements_records_implementation_relation() {
+        let source = b"class Service implements Runnable {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.implementations.len(), 1);
+        let rel = &visitor.implementations[0];
+        assert_eq!(rel.implementor, "Service");
+        assert_eq!(rel.trait_name, "Runnable");
+    }
+
+    #[test]
+    fn abstract_class_sets_is_abstract() {
+        let source = b"abstract class Shape {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(visitor.classes[0].is_abstract);
+    }
+
+    #[test]
+    fn method_inside_class_gets_parent_class() {
+        let source = b"class Counter {\n  void increment() {\n    count += 1;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "increment")
+            .expect("method extracted");
+        assert_eq!(m.parent_class.as_deref(), Some("Counter"));
+    }
+
+    #[test]
+    fn static_method_sets_is_static() {
+        let source = b"class Util {\n  static int zero() {\n    return 0;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "zero")
+            .expect("static method extracted");
+        assert!(m.is_static);
+    }
+
+    #[test]
+    fn enum_becomes_class_with_enum_attribute() {
+        let source = b"enum Color {\n  red,\n  green,\n  blue\n}";
+        let visitor = parse_and_visit(source);
+
+        let e = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Color")
+            .expect("enum extracted as class");
+        assert!(e.attributes.contains(&"enum".to_string()));
+    }
+
+    #[test]
+    fn mixin_becomes_trait_with_mixin_attribute() {
+        let source = b"mixin Logger {\n  void log() {}\n}";
+        let visitor = parse_and_visit(source);
+
+        let t = visitor
+            .traits
+            .iter()
+            .find(|t| t.name == "Logger")
+            .expect("mixin extracted as trait");
+        assert!(t.attributes.contains(&"mixin".to_string()));
+    }
+
+    #[test]
+    fn import_uri_value_is_extracted() {
+        let source = b"import 'package:flutter/material.dart';";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .imports
+            .iter()
+            .any(|i| i.imported == "package:flutter/material.dart"));
+    }
+
+    #[test]
+    fn branching_function_has_nonzero_complexity() {
+        let source =
+            b"int classify(int n) {\n  if (n > 0) {\n    return 1;\n  } else {\n    return -1;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "classify")
+            .expect("function extracted");
+        let complexity = f.complexity.as_ref().expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
     }
 }
