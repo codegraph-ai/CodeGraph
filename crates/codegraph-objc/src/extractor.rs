@@ -58,6 +58,117 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        let config = ParserConfig::default();
+        extract(source, Path::new(path), &config).expect("extract should succeed")
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("", "Widget.m");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "Widget");
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        let ir = extract_ok("", "..");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_module_path_recorded() {
+        let ir = extract_ok("", "src/Widget.m");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "src/Widget.m");
+    }
+
+    #[test]
+    fn test_module_language_is_objc() {
+        let ir = extract_ok("", "Widget.m");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.language, "objc");
+    }
+
+    #[test]
+    fn test_module_line_count() {
+        let source = "// a\n// b\n// c\n";
+        let ir = extract_ok(source, "Widget.m");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.line_count, 3);
+    }
+
+    #[test]
+    fn test_module_doc_comment_and_attributes_empty() {
+        let ir = extract_ok("", "Widget.m");
+        let module = ir.module.expect("module should be set");
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "Widget.m");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let ir = extract_ok("// just a comment\n", "Widget.m");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_calls_populated() {
+        let source = r#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"Hello");
+}
+@end
+"#;
+        let ir = extract_ok(source, "MyClass.m");
+        assert!(
+            ir.calls.iter().any(|c| c.callee == "NSLog"),
+            "expected an NSLog call relation"
+        );
+    }
+
+    #[test]
+    fn test_mixed_source_populates_entities() {
+        let source = r#"
+#import <Foundation/Foundation.h>
+
+@protocol MyProtocol
+- (void)doSomething;
+@end
+
+@interface MyClass : NSObject
+- (void)greet;
+@end
+
+@implementation MyClass
+- (void)greet {
+    NSLog(@"Hi");
+}
+@end
+"#;
+        let ir = extract_ok(source, "MyClass.m");
+        assert!(!ir.imports.is_empty());
+        assert!(!ir.classes.is_empty());
+        assert!(!ir.traits.is_empty());
+        assert!(!ir.functions.is_empty());
+    }
+
     #[test]
     fn test_extract_class_interface() {
         let source = r#"
