@@ -289,4 +289,231 @@ mod tests {
         assert!(path_matches("/a/b/c.rs", "/a/b/"));
         assert!(path_matches(r"C:\a\b\c.rs", r"C:\a\b\"));
     }
+
+    // ---- get_module_summary aggregation -------------------------------
+
+    use codegraph::{PropertyMap, PropertyValue};
+
+    fn add(graph: &mut CodeGraph, ty: NodeType, props: PropertyMap) {
+        graph.add_node(ty, props).expect("add_node");
+    }
+
+    #[test]
+    fn summary_aggregates_files_functions_classes_imports_and_lines() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+
+        add(
+            &mut g,
+            NodeType::CodeFile,
+            PropertyMap::new()
+                .with("path", "/src/a.py")
+                .with("language", "python")
+                .with("line_count", 100i64),
+        );
+        add(
+            &mut g,
+            NodeType::CodeFile,
+            PropertyMap::new()
+                .with("path", "/src/b.py")
+                .with("language", "python")
+                .with("line_count", 50i64),
+        );
+        // A file outside the prefix is excluded entirely (including its lines).
+        add(
+            &mut g,
+            NodeType::CodeFile,
+            PropertyMap::new()
+                .with("path", "/other/c.py")
+                .with("language", "python")
+                .with("line_count", 999i64),
+        );
+        add(
+            &mut g,
+            NodeType::Function,
+            PropertyMap::new()
+                .with("path", "/src/a.py")
+                .with("language", "python")
+                .with("name", "low")
+                .with("complexity", 5i64)
+                .with("line_start", 10i64),
+        );
+        add(
+            &mut g,
+            NodeType::Function,
+            PropertyMap::new()
+                .with("path", "/src/b.py")
+                .with("language", "python")
+                .with("name", "high")
+                .with("complexity", 20i64)
+                .with("line_start", 3i64),
+        );
+        add(
+            &mut g,
+            NodeType::Class,
+            PropertyMap::new().with("path", "/src/a.py"),
+        );
+        // Internal module import living under the directory: counts as an import.
+        add(
+            &mut g,
+            NodeType::Module,
+            PropertyMap::new()
+                .with("path", "/src/a.py")
+                .with("name", "helpers")
+                .with("is_external", false),
+        );
+        // External module (workspace-wide, path-agnostic): counts as a dep.
+        add(
+            &mut g,
+            NodeType::Module,
+            PropertyMap::new()
+                .with("name", "requests")
+                .with("is_external", PropertyValue::String("true".to_string())),
+        );
+
+        let s = get_module_summary(&g, "/src", 10);
+
+        assert_eq!(s.directory, "/src");
+        assert_eq!(s.files, 2);
+        assert_eq!(s.total_functions, 2);
+        assert_eq!(s.total_classes, 1);
+        assert_eq!(s.total_imports, 1);
+        assert_eq!(s.total_lines, 150, "only in-prefix file lines are summed");
+
+        assert_eq!(s.languages.len(), 1);
+        assert_eq!(s.languages[0].language, "python");
+        assert_eq!(s.languages[0].files, 2);
+        assert_eq!(s.languages[0].functions, 2);
+
+        // top_complex_functions is sorted by complexity descending.
+        let names: Vec<&str> = s
+            .top_complex_functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["high", "low"]);
+        assert_eq!(s.top_complex_functions[0].complexity, 20);
+        assert_eq!(s.top_complex_functions[0].line_start, 3);
+
+        assert_eq!(s.external_deps, vec!["requests".to_string()]);
+    }
+
+    #[test]
+    fn summary_truncates_to_top_n_by_complexity() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        for (name, cx) in [("a", 1i64), ("b", 9i64), ("c", 5i64)] {
+            add(
+                &mut g,
+                NodeType::Function,
+                PropertyMap::new()
+                    .with("path", "/src/f.py")
+                    .with("name", name)
+                    .with("complexity", cx),
+            );
+        }
+
+        let s = get_module_summary(&g, "/src", 2);
+
+        assert_eq!(s.total_functions, 3, "all functions still counted");
+        let top: Vec<&str> = s
+            .top_complex_functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(top, vec!["b", "c"], "only the top 2 by complexity kept");
+    }
+
+    #[test]
+    fn summary_uses_unknown_for_missing_language() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No `language` property on the file or function.
+        add(
+            &mut g,
+            NodeType::CodeFile,
+            PropertyMap::new().with("path", "/src/x"),
+        );
+        add(
+            &mut g,
+            NodeType::Function,
+            PropertyMap::new().with("path", "/src/x").with("name", "f"),
+        );
+
+        let s = get_module_summary(&g, "/src", 10);
+
+        assert_eq!(s.languages.len(), 1);
+        assert_eq!(s.languages[0].language, "unknown");
+        assert_eq!(s.languages[0].files, 1);
+        assert_eq!(s.languages[0].functions, 1);
+    }
+
+    #[test]
+    fn summary_dedupes_external_deps_and_reads_bool_flag() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Two Module nodes with the same external name collapse to one dep,
+        // and the flag is honoured when stored as a native bool (get_bool path).
+        add(
+            &mut g,
+            NodeType::Module,
+            PropertyMap::new()
+                .with("name", "serde")
+                .with("is_external", true),
+        );
+        add(
+            &mut g,
+            NodeType::Module,
+            PropertyMap::new()
+                .with("name", "serde")
+                .with("is_external", true),
+        );
+        // An external module with an empty name is ignored.
+        add(
+            &mut g,
+            NodeType::Module,
+            PropertyMap::new()
+                .with("name", "")
+                .with("is_external", true),
+        );
+        // A non-external module outside the prefix is neither a dep nor an import.
+        add(
+            &mut g,
+            NodeType::Module,
+            PropertyMap::new()
+                .with("path", "/elsewhere/m")
+                .with("name", "internal")
+                .with("is_external", false),
+        );
+
+        let s = get_module_summary(&g, "/src", 10);
+
+        assert_eq!(s.external_deps, vec!["serde".to_string()]);
+        assert_eq!(s.total_imports, 0, "out-of-prefix internal module ignored");
+    }
+
+    #[test]
+    fn summary_sorts_languages_by_file_count_then_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // rust: 2 files, python: 2 files (tie -> alpha order), go: 1 file.
+        for (lang, path) in [
+            ("rust", "/src/a.rs"),
+            ("rust", "/src/b.rs"),
+            ("python", "/src/c.py"),
+            ("python", "/src/d.py"),
+            ("go", "/src/e.go"),
+        ] {
+            add(
+                &mut g,
+                NodeType::CodeFile,
+                PropertyMap::new().with("path", path).with("language", lang),
+            );
+        }
+
+        let s = get_module_summary(&g, "/src", 10);
+
+        let order: Vec<(&str, usize)> = s
+            .languages
+            .iter()
+            .map(|l| (l.language.as_str(), l.files))
+            .collect();
+        // Descending by file count; ties broken alphabetically (python < rust).
+        assert_eq!(order, vec![("python", 2), ("rust", 2), ("go", 1)]);
+    }
 }
