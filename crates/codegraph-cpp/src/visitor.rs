@@ -1220,4 +1220,212 @@ mod tests {
         assert!(complexity.branches >= 1);
         assert!(complexity.cyclomatic_complexity > 1);
     }
+
+    #[test]
+    fn test_function_parameters() {
+        let source = b"int add(int a, int b) { return a + b; }";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert_eq!(f.parameters.len(), 2);
+        assert_eq!(f.parameters[0].name, "a");
+        assert_eq!(f.parameters[1].name, "b");
+        assert_eq!(f.parameters[0].type_annotation.as_deref(), Some("int"));
+        assert_eq!(f.parameters[1].type_annotation.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_function_return_type() {
+        let source = b"double area() { return 0.0; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].return_type.as_deref(), Some("double"));
+    }
+
+    #[test]
+    fn test_void_return_type_is_none() {
+        // A void return is normalized to None rather than Some("void")
+        let source = b"void run() {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].return_type, None);
+    }
+
+    #[test]
+    fn test_namespace_qualified_function() {
+        // A free function inside a namespace gets its name qualified
+        let source = b"namespace app { int helper() { return 0; } }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "app::helper");
+    }
+
+    #[test]
+    fn test_static_free_function() {
+        let source = b"static int counter() { return 0; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0].is_static);
+    }
+
+    #[test]
+    fn test_non_static_function() {
+        let source = b"int plain() { return 0; }";
+        let visitor = parse_and_visit(source);
+
+        assert!(!visitor.functions[0].is_static);
+    }
+
+    #[test]
+    fn test_method_parent_class() {
+        let source = b"class Foo { public: int getX() { return 1; } };";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor.functions.iter().find(|f| f.name == "getX").unwrap();
+        assert_eq!(m.parent_class.as_deref(), Some("Foo"));
+    }
+
+    #[test]
+    fn test_const_method_attribute() {
+        let source = b"class Foo { public: int get() const { return 1; } };";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor.functions.iter().find(|f| f.name == "get").unwrap();
+        assert!(m.attributes.contains(&"const".to_string()));
+    }
+
+    #[test]
+    fn test_virtual_method_attribute() {
+        let source = b"class Base { public: virtual void foo() {} };";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor.functions.iter().find(|f| f.name == "foo").unwrap();
+        assert!(m.attributes.contains(&"virtual".to_string()));
+    }
+
+    #[test]
+    fn test_abstract_class_pure_virtual() {
+        // A pure virtual method (= 0) marks the class as abstract
+        let source = b"class Shape { public: virtual double area() = 0; };";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.classes.iter().find(|c| c.name == "Shape").unwrap();
+        assert!(c.is_abstract);
+    }
+
+    #[test]
+    fn test_concrete_class_not_abstract() {
+        let source = b"class Circle { public: double area() { return 3.14; } };";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.classes.iter().find(|c| c.name == "Circle").unwrap();
+        assert!(!c.is_abstract);
+    }
+
+    #[test]
+    fn test_template_class_type_parameters() {
+        let source = b"template <typename T> class Container { T value; };";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Container")
+            .unwrap();
+        assert!(c.type_parameters.contains(&"T".to_string()));
+    }
+
+    #[test]
+    fn test_call_extraction() {
+        let source = b"int helper() { return 1; } int run() { return helper(); }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "helper"));
+    }
+
+    #[test]
+    fn test_doc_comment_triple_slash() {
+        let source = b"/// documented\nint documented() { return 0; }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[0].doc_comment.is_some());
+    }
+
+    #[test]
+    fn test_no_doc_comment_plain_comment() {
+        let source = b"// plain\nint plain() { return 0; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].doc_comment, None);
+    }
+
+    #[test]
+    fn test_include_system_alias() {
+        let source = b"#include <vector>";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "vector");
+        assert_eq!(visitor.imports[0].alias.as_deref(), Some("system"));
+        assert!(visitor.imports[0].is_wildcard);
+    }
+
+    #[test]
+    fn test_include_local_no_alias() {
+        let source = b"#include \"local.h\"";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "local.h");
+        assert_eq!(visitor.imports[0].alias, None);
+    }
+
+    #[test]
+    fn test_struct_visibility_public() {
+        let source = b"struct P { int x; };";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_class_visibility_private() {
+        let source = b"class C { int x; };";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_coroutine_detection_by_return_type() {
+        // A "Task"-typed function is treated as a C++20 coroutine
+        let source = b"Task foo() { co_return; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0].is_async);
+    }
+
+    #[test]
+    fn test_plain_function_not_coroutine() {
+        let source = b"int foo() { return 0; }";
+        let visitor = parse_and_visit(source);
+
+        assert!(!visitor.functions[0].is_async);
+    }
+
+    #[test]
+    fn test_method_declaration_no_body() {
+        // A body-less method declaration is still extracted, with no body_prefix
+        let source = b"class F { public: void doIt(); };";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor.functions.iter().find(|f| f.name == "doIt").unwrap();
+        assert!(m.body_prefix.is_none());
+    }
 }
