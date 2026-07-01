@@ -120,6 +120,43 @@ mod tests {
     }
 
     #[test]
+    fn all_remaining_non_io_variants_have_no_source() {
+        // The four variants not covered by non_io_variants_have_no_source also
+        // omit #[source], so none exposes a nested cause.
+        assert!(
+            ParserError::SyntaxError(PathBuf::from("a.rs"), 1, 2, "e".to_string())
+                .source()
+                .is_none()
+        );
+        assert!(ParserError::FileTooLarge(PathBuf::from("b.rs"), 42)
+            .source()
+            .is_none());
+        assert!(
+            ParserError::UnsupportedFeature(PathBuf::from("c.rs"), "f".to_string())
+                .source()
+                .is_none()
+        );
+        assert!(
+            ParserError::ParseError(PathBuf::from("d.rs"), "p".to_string())
+                .source()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn io_error_source_downcasts_to_concrete_io_error() {
+        // The #[source] must preserve the concrete io::Error, not just its
+        // string, so consumers can match on ErrorKind (e.g. NotFound).
+        let src = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err = ParserError::IoError(PathBuf::from("locked.rs"), src);
+        let source = err.source().expect("IoError should carry a source");
+        let io_err = source
+            .downcast_ref::<std::io::Error>()
+            .expect("source should downcast to io::Error");
+        assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
     fn parser_result_alias_carries_error() {
         fn wrap(v: u32) -> ParserResult<u32> {
             Ok(v)
