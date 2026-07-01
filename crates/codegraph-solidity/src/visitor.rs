@@ -1316,4 +1316,146 @@ library SafeMath {
         assert_eq!(f.return_type.as_deref(), Some("uint256"));
         assert!(!f.is_abstract);
     }
+
+    #[test]
+    fn test_function_body_prefix_truncated_to_max() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+
+        // A body longer than the cap must be truncated to exactly the cap.
+        let filler = "        x += 1;\n".repeat(200);
+        let source = format!(
+            "pragma solidity ^0.8.0;\n\ncontract C {{\n    function big(uint256 x) public {{\n{filler}    }}\n}}\n"
+        );
+        let visitor = parse_and_visit(source.as_bytes());
+
+        let body = visitor.classes[0].methods[0]
+            .body_prefix
+            .as_ref()
+            .expect("large body should have a body_prefix");
+        assert_eq!(body.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_calls_vector_never_populated() {
+        // SolidityVisitor has no call-extraction path; the calls vector is always empty
+        // even for a function body full of function/require calls.
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f() public {\n        require(true);\n        g();\n    }\n    function g() public {}\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_complexity_while_loop_counted() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f(uint256 n) public {\n        while (n > 0) {\n            n -= 1;\n        }\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.classes[0].methods[0]
+            .complexity
+            .as_ref()
+            .expect("body yields complexity");
+        assert!(complexity.loops >= 1);
+    }
+
+    #[test]
+    fn test_complexity_do_while_loop_counted() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f(uint256 n) public {\n        do {\n            n -= 1;\n        } while (n > 0);\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.classes[0].methods[0]
+            .complexity
+            .as_ref()
+            .expect("body yields complexity");
+        assert!(complexity.loops >= 1);
+    }
+
+    #[test]
+    fn test_contract_natspec_block_comment() {
+        // A /** */ natspec block immediately preceding a contract is captured as its doc.
+        let source = b"pragma solidity ^0.8.0;\n\n/** @title My Contract */\ncontract C {\n    function f() public {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let doc = visitor.classes[0]
+            .doc_comment
+            .as_deref()
+            .expect("contract doc comment present");
+        assert!(doc.contains("@title"));
+    }
+
+    #[test]
+    fn test_unnamed_parameter_uses_type_as_name() {
+        // An unnamed parameter (`address` with no identifier) falls back to using the
+        // type text as its display name; the type_annotation is still set.
+        let source =
+            b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f(address) public {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let params = &visitor.classes[0].methods[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "address");
+        assert_eq!(params[0].type_annotation.as_deref(), Some("address"));
+    }
+
+    #[test]
+    fn test_empty_function_body_prefix_is_braces() {
+        // An empty `{}` body still has non-empty node text, so body_prefix is Some("{}").
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f() public {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        assert_eq!(f.body_prefix.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn test_constructor_no_params_signature() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    constructor() {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let ctor = visitor.classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name == "constructor")
+            .unwrap();
+        assert_eq!(ctor.signature, "constructor()");
+        assert!(ctor.parameters.is_empty());
+    }
+
+    #[test]
+    fn test_abstract_keyword_substring_false_positive() {
+        // is_abstract does a plain substring match on the whole contract text, so a
+        // member name that merely contains "abstract" flips the contract to abstract.
+        let source = b"pragma solidity ^0.8.0;\n\ncontract Registry {\n    function abstractItem() public {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        // The contract has no `abstract` keyword, yet the substring match reports it as one.
+        assert!(visitor.classes[0].is_abstract);
+    }
+
+    #[test]
+    fn test_virtual_substring_marks_function_abstract() {
+        // has_keyword("virtual") substring-matches the whole function text, so a body
+        // that merely mentions "virtual" (here a local name) flags the function abstract
+        // even though it has a full body.
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function f() public {\n        uint256 virtualBalance = 1;\n        virtualBalance += 1;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        assert!(f.is_abstract);
+    }
+
+    #[test]
+    fn test_special_fn_body_prefix_present() {
+        // extract_special_fn still records a body_prefix from the function body even
+        // though it hardcodes complexity to None.
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    receive() external payable {\n        emit Received(msg.sender);\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let recv = visitor.classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name == "receive")
+            .unwrap();
+        assert!(recv.complexity.is_none());
+        let prefix = recv.body_prefix.as_deref().expect("body prefix present");
+        assert!(prefix.contains("emit Received"));
+    }
 }
