@@ -49,10 +49,15 @@ impl<'a> PerlVisitor<'a> {
             "use_no_statement" => {
                 self.visit_use_statement(node);
             }
-            "require_expression" => {
+            "use_parent_statement" | "use_base_statement" => {
+                self.visit_use_parent_statement(node);
+            }
+            "require_expression" | "require_statement" => {
                 self.visit_require_expression(node);
             }
-            "call_expression_with_spaced_args" | "call_expression_with_bareword" | "method_call_expression" => {
+            "call_expression_with_spaced_args"
+            | "call_expression_with_bareword"
+            | "method_call_expression" => {
                 self.visit_call_expression(node);
             }
             _ => {}
@@ -192,12 +197,14 @@ impl<'a> PerlVisitor<'a> {
         String::new()
     }
 
+    #[allow(clippy::manual_find)] // Iterator::find can't return a cursor-borrowing Node
     fn find_block<'b>(&self, node: Node<'b>) -> Option<Node<'b>> {
         // function_definition has a "body" field
         if let Some(body) = node.child_by_field_name("body") {
             return Some(body);
         }
-        // Fallback: look for block child
+        // Fallback: look for block child. Cannot use Iterator::find here because
+        // the returned Node borrows the TreeCursor, which must outlive the search.
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "block" {
@@ -242,7 +249,10 @@ impl<'a> PerlVisitor<'a> {
             && module != "parent"
         {
             self.imports.push(ImportRelation {
-                importer: self.current_package.clone().unwrap_or_else(|| "main".to_string()),
+                importer: self
+                    .current_package
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string()),
                 imported: module,
                 symbols: Vec::new(),
                 is_wildcard: false,
@@ -253,13 +263,39 @@ impl<'a> PerlVisitor<'a> {
             let parent = self.extract_use_list(node);
             for p in parent {
                 self.imports.push(ImportRelation {
-                    importer: self.current_package.clone().unwrap_or_else(|| "main".to_string()),
+                    importer: self
+                        .current_package
+                        .clone()
+                        .unwrap_or_else(|| "main".to_string()),
                     imported: p,
                     symbols: Vec::new(),
                     is_wildcard: false,
                     alias: None,
                 });
             }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.visit_node(child);
+        }
+    }
+
+    fn visit_use_parent_statement(&mut self, node: Node) {
+        // use parent 'SomeClass'; / use base 'SomeClass'; — the grammar emits a
+        // dedicated use_parent_statement/use_base_statement node, so extract the
+        // quoted parent class name(s) as imports.
+        for parent in self.extract_use_list(node) {
+            self.imports.push(ImportRelation {
+                importer: self
+                    .current_package
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string()),
+                imported: parent,
+                symbols: Vec::new(),
+                is_wildcard: false,
+                alias: None,
+            });
         }
 
         let mut cursor = node.walk();
@@ -291,8 +327,9 @@ impl<'a> PerlVisitor<'a> {
         let text = self.node_text(node);
         // Extract quoted strings from the statement
         for part in text.split_whitespace() {
-            let cleaned = part
-                .trim_matches(|c| c == '\'' || c == '"' || c == ',' || c == ';' || c == '(' || c == ')');
+            let cleaned = part.trim_matches(|c| {
+                c == '\'' || c == '"' || c == ',' || c == ';' || c == '(' || c == ')'
+            });
             if !cleaned.is_empty() && cleaned.contains("::") {
                 list.push(cleaned.to_string());
             }
@@ -311,7 +348,10 @@ impl<'a> PerlVisitor<'a> {
             .replace(".pm", "");
         if !module.is_empty() {
             self.imports.push(ImportRelation {
-                importer: self.current_package.clone().unwrap_or_else(|| "main".to_string()),
+                importer: self
+                    .current_package
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string()),
                 imported: module,
                 symbols: Vec::new(),
                 is_wildcard: false,
@@ -359,7 +399,9 @@ impl<'a> PerlVisitor<'a> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
-                "call_expression" | "method_call_expression" => {
+                "call_expression_with_spaced_args"
+                | "call_expression_with_bareword"
+                | "method_call_expression" => {
                     self.visit_call_expression(child);
                     self.visit_body_for_calls(child);
                 }
@@ -372,7 +414,7 @@ impl<'a> PerlVisitor<'a> {
 
     fn extract_doc_comment(&self, node: Node) -> Option<String> {
         if let Some(prev) = node.prev_sibling() {
-            if prev.kind() == "comment" {
+            if prev.kind() == "comment" || prev.kind() == "comments" {
                 let text = self.node_text(prev);
                 if text.starts_with("##") || text.starts_with("#!") || text.starts_with("# ") {
                     return Some(text);
@@ -397,16 +439,17 @@ impl<'a> PerlVisitor<'a> {
             "elsif_clause" | "else_clause" => {
                 builder.add_branch();
             }
-            "while_statement"
-            | "until_statement"
-            | "for_statement"
-            | "foreach_statement" => {
+            "while_statement" | "until_statement" | "for_statement" | "foreach_statement" => {
                 builder.add_loop();
                 builder.enter_scope();
             }
             "binary_expression" => {
                 let text = self.node_text(node);
-                if text.contains(" && ") || text.contains(" || ") || text.contains(" and ") || text.contains(" or ") {
+                if text.contains(" && ")
+                    || text.contains(" || ")
+                    || text.contains(" and ")
+                    || text.contains(" or ")
+                {
                     builder.add_logical_operator();
                 }
             }
@@ -419,12 +462,8 @@ impl<'a> PerlVisitor<'a> {
         }
 
         match node.kind() {
-            "if_statement"
-            | "unless_statement"
-            | "while_statement"
-            | "until_statement"
-            | "for_statement"
-            | "foreach_statement" => {
+            "if_statement" | "unless_statement" | "while_statement" | "until_statement"
+            | "for_statement" | "foreach_statement" => {
                 builder.exit_scope();
             }
             _ => {}
@@ -467,5 +506,198 @@ mod tests {
         let source = b"use Moose;\nuse Data::Dumper;\n";
         let visitor = parse_and_visit(source);
         assert!(visitor.imports.len() >= 1);
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_private_function_visibility() {
+        let source = b"sub _helper {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_public_function_visibility() {
+        let source = b"sub run {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_signature_uses_bare_name_not_package_qualified() {
+        let source = b"package Foo;\nsub greet {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "sub greet");
+    }
+
+    #[test]
+    fn test_package_qualified_full_name_and_parent_class() {
+        let source = b"package MyApp::User;\nsub load {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "MyApp::User::load");
+        assert_eq!(
+            visitor.functions[0].parent_class.as_deref(),
+            Some("MyApp::User")
+        );
+    }
+
+    #[test]
+    fn test_function_without_package_has_no_parent() {
+        let source = b"sub standalone {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].name, "standalone");
+        assert!(visitor.functions[0].parent_class.is_none());
+    }
+
+    #[test]
+    fn test_is_test_prefix_detection() {
+        let source = b"sub test_login {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_non_test_function_not_flagged() {
+        let source = b"sub login {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(!visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_function_flag_defaults() {
+        let source = b"sub plain {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert!(!f.is_async);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.return_type.is_none());
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_body_prefix_present() {
+        let source = b"sub greet {\n    print \"hi\";\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_complexity_baseline() {
+        let source = b"sub straight {\n    my $x = 1;\n    return $x;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_complexity_if_increases() {
+        let source = b"sub branchy {\n    if ($x) {\n        return 1;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_loop_increases() {
+        let source = b"sub looper {\n    while ($x) {\n        $x--;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_doc_comment_extracted() {
+        let source = b"# This greets the user\nsub greet {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_some());
+    }
+
+    #[test]
+    fn test_no_doc_comment() {
+        let source = b"sub greet {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_use_strict_and_warnings_excluded() {
+        let source = b"use strict;\nuse warnings;\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_use_module_import_recorded() {
+        let source = b"use Data::Dumper;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Data::Dumper");
+        assert_eq!(visitor.imports[0].importer, "main");
+    }
+
+    #[test]
+    fn test_use_import_importer_is_current_package() {
+        let source = b"package MyApp;\nuse Data::Dumper;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].importer, "MyApp");
+    }
+
+    #[test]
+    fn test_use_parent_extracts_base_class() {
+        let source = b"use parent 'Base::Class';\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Base::Class");
+    }
+
+    #[test]
+    fn test_require_expression_recorded() {
+        let source = b"require Foo::Bar;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Foo::Bar");
+    }
+
+    #[test]
+    fn test_call_tracking_inside_function() {
+        let source = b"sub run {\n    helper();\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.calls.iter().any(|c| c.callee == "helper"),
+            "expected a call to helper, got {:?}",
+            visitor.calls
+        );
+        assert!(visitor.calls.iter().all(|c| c.caller == "run"));
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = b"sub a {\n    return 1;\n}\nsub b {\n    return 2;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+    }
+
+    #[test]
+    fn test_package_class_metadata() {
+        let source = b"package MyApp::Thing;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        let c = &visitor.classes[0];
+        assert_eq!(c.visibility, "public");
+        assert!(!c.is_abstract);
+        assert!(!c.is_interface);
+        assert!(c.base_classes.is_empty());
     }
 }
