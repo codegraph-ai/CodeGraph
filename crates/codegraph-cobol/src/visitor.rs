@@ -554,4 +554,123 @@ mod tests {
         // An IF header (branch) and a PERFORM (loop) push cyclomatic above the base 1.
         assert!(metrics.cyclomatic_complexity >= 2);
     }
+
+    #[test]
+    fn test_copy_statement_quoted_copybook() {
+        // A quoted copybook name is unwrapped by strip_string_quotes.
+        let source = b"       identification division.\n       program-id. COPYTEST.\n       data division.\n       working-storage section.\n       copy \"MYBOOK\".\n       procedure division.\n       stop run.\n";
+        let visitor = parse(source);
+
+        assert!(!visitor.imports.is_empty(), "Expected quoted COPY import");
+        assert_eq!(visitor.imports[0].imported, "MYBOOK");
+    }
+
+    #[test]
+    fn test_two_copy_imports_recorded_in_order() {
+        let source = b"       identification division.\n       program-id. TWOCOPY.\n       data division.\n       working-storage section.\n       copy BOOKA.\n       copy BOOKB.\n       procedure division.\n       stop run.\n";
+        let visitor = parse(source);
+
+        assert_eq!(visitor.imports.len(), 2);
+        assert_eq!(visitor.imports[0].imported, "BOOKA");
+        assert_eq!(visitor.imports[1].imported, "BOOKB");
+    }
+
+    #[test]
+    fn test_paragraph_body_prefix_populated() {
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           stop run.\n";
+        let visitor = parse(source);
+
+        let body = visitor.paragraphs[0].body_prefix.as_deref().unwrap();
+        assert!(body.contains("MAIN-PARA"));
+    }
+
+    #[test]
+    fn test_call_statement_default_metadata() {
+        // CALL "SUBPROG". on line 5; a direct call with no vtable metadata.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           call \"SUBPROG\".\n           stop run.\n";
+        let visitor = parse(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "SUBPROG")
+            .expect("Expected CALL to SUBPROG");
+        assert_eq!(call.call_site_line, 5);
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+    }
+
+    #[test]
+    fn test_perform_call_site_line() {
+        // PERFORM DO-WORK is on line 5 of the source.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           perform DO-WORK.\n           stop run.\n       DO-WORK.\n           display \"x\".\n";
+        let visitor = parse(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "DO-WORK")
+            .expect("Expected PERFORM of DO-WORK");
+        assert_eq!(call.call_site_line, 5);
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_call_and_perform_both_recorded() {
+        // A CALL and a PERFORM in the same paragraph both produce call relations.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           call \"SUBPROG\".\n           perform DO-WORK.\n           stop run.\n       DO-WORK.\n           display \"x\".\n";
+        let visitor = parse(source);
+
+        assert!(visitor.calls.iter().any(|c| c.callee == "SUBPROG"));
+        assert!(visitor.calls.iter().any(|c| c.callee == "DO-WORK"));
+    }
+
+    #[test]
+    fn test_evaluate_header_complexity() {
+        // An EVALUATE (COBOL's switch) raises cyclomatic complexity via evaluate_header.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       MAIN-PARA.\n           evaluate x\n               when 1\n                   display \"a\"\n           end-evaluate.\n           stop run.\n";
+        let visitor = parse(source);
+
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_cobol::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let metrics = visitor._calculate_complexity(tree.root_node());
+        assert!(metrics.cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_paragraph_line_end_defaults_to_start_before_close() {
+        // A lone paragraph closes at program end, so line_end >= line_start.
+        let source = b"       identification division.\n       program-id. TEST.\n       procedure division.\n       ONLY-PARA.\n           stop run.\n";
+        let visitor = parse(source);
+
+        let para = &visitor.paragraphs[0];
+        assert!(para.line_end >= para.line_start);
+    }
+
+    #[test]
+    fn test_call_to_program_when_no_paragraph() {
+        // A CALL directly under PROCEDURE DIVISION (no paragraph) attributes to the program.
+        let source = b"       identification division.\n       program-id. NOPARA.\n       procedure division.\n           call \"SUBPROG\".\n           stop run.\n";
+        let visitor = parse(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "SUBPROG")
+            .expect("Expected CALL to SUBPROG");
+        assert_eq!(call.caller, "NOPARA");
+    }
+
+    #[test]
+    fn test_copy_import_defaults() {
+        let source = b"       identification division.\n       program-id. COPYTEST.\n       data division.\n       working-storage section.\n       copy MYBOOK.\n       procedure division.\n       stop run.\n";
+        let visitor = parse(source);
+
+        let import = &visitor.imports[0];
+        assert!(!import.is_wildcard);
+        assert!(import.symbols.is_empty());
+        assert!(import.alias.is_none());
+    }
 }
