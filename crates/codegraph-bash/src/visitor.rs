@@ -237,6 +237,34 @@ mod tests {
     }
 
     #[test]
+    fn test_source_with_empty_quoted_path_records_no_import() {
+        // `source ""` parses as a command whose `argument` is an empty string
+        // node; stripping the quotes leaves an empty path, so the
+        // `!imported.is_empty()` guard rejects it and no import is recorded.
+        let source = b"source \"\"\n";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.imports.is_empty(),
+            "empty quoted source path should not record an import, got {:?}",
+            visitor.imports
+        );
+    }
+
+    #[test]
+    fn test_source_without_argument_records_no_import() {
+        // A bare `source` with no path parses as a command with no `argument`
+        // field, so `child_by_field_name("argument")` is None and the import
+        // branch is skipped entirely.
+        let source = b"source\n";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.imports.is_empty(),
+            "argument-less source should not record an import, got {:?}",
+            visitor.imports
+        );
+    }
+
+    #[test]
     fn test_visitor_function_extraction() {
         let source = b"greet() {\n    echo \"Hello\"\n}\n";
         let visitor = parse_and_visit(source);
