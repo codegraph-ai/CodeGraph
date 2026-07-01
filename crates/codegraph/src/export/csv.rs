@@ -190,11 +190,118 @@ fn escape_csv(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{helpers, PropertyMap, PropertyValue};
 
     #[test]
     fn test_escape_csv() {
         assert_eq!(escape_csv("hello"), "hello");
         assert_eq!(escape_csv("hello,world"), "\"hello,world\"");
         assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn test_escape_csv_newline() {
+        // A newline alone (no comma/quote) still forces quoting.
+        assert_eq!(escape_csv("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn test_format_property_value_scalars() {
+        assert_eq!(
+            format_property_value(&PropertyValue::String("hi".to_string())),
+            "hi"
+        );
+        assert_eq!(format_property_value(&PropertyValue::Int(42)), "42");
+        assert_eq!(format_property_value(&PropertyValue::Float(1.5)), "1.5");
+        assert_eq!(format_property_value(&PropertyValue::Bool(true)), "true");
+        assert_eq!(format_property_value(&PropertyValue::Null), "");
+    }
+
+    #[test]
+    fn test_format_property_value_lists_joined_with_semicolon() {
+        assert_eq!(
+            format_property_value(&PropertyValue::StringList(vec![
+                "a".to_string(),
+                "b".to_string(),
+            ])),
+            "a;b"
+        );
+        assert_eq!(
+            format_property_value(&PropertyValue::IntList(vec![1, 2, 3])),
+            "1;2;3"
+        );
+    }
+
+    #[test]
+    fn test_export_csv_nodes_header_and_rows() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        helpers::add_file(&mut graph, "a.py", "python").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.csv");
+        export_csv_nodes(&graph, &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut lines = content.lines();
+        // Keys are sorted alphabetically: language, path.
+        assert_eq!(lines.next().unwrap(), "id,type,language,path");
+        assert_eq!(lines.next().unwrap(), "0,CodeFile,python,a.py");
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn test_export_csv_nodes_escapes_values_with_commas() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let props = PropertyMap::new().with("doc", "hello, world");
+        graph.add_node(crate::NodeType::Function, props).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes.csv");
+        export_csv_nodes(&graph, &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // The comma-containing value must be quoted so it stays one CSV field.
+        assert!(content.contains("\"hello, world\""));
+    }
+
+    #[test]
+    fn test_export_csv_edges_header_and_rows() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec!["foo", "bar"]).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edges.csv");
+        export_csv_edges(&graph, &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut lines = content.lines();
+        assert_eq!(lines.next().unwrap(), "id,source,target,type,symbols");
+        // StringList symbols are joined with ';' by format_property_value.
+        assert_eq!(lines.next().unwrap(), "0,0,1,Imports,foo;bar");
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn test_export_csv_writes_both_files() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let nodes_path = dir.path().join("nodes.csv");
+        let edges_path = dir.path().join("edges.csv");
+        export_csv(&graph, &nodes_path, &edges_path).unwrap();
+
+        assert!(nodes_path.exists());
+        assert!(edges_path.exists());
+        // Two file nodes -> two data rows plus one header row.
+        let nodes = std::fs::read_to_string(&nodes_path).unwrap();
+        assert_eq!(nodes.lines().count(), 3);
+        // One import edge -> one data row plus one header row.
+        let edges = std::fs::read_to_string(&edges_path).unwrap();
+        assert_eq!(edges.lines().count(), 2);
     }
 }
