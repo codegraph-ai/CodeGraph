@@ -93,4 +93,41 @@ mod tests {
             "Memory storage error: Memory not found: missing key"
         );
     }
+
+    #[test]
+    fn from_variants_expose_wrapped_source() {
+        use std::error::Error;
+
+        // `#[from]` fields are auto-wired by thiserror as the error-chain source.
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "gone");
+        let err: GitMiningError = io_err.into();
+        let src = err.source().expect("IoError should expose a source");
+        let downcast = src
+            .downcast_ref::<io::Error>()
+            .expect("source should be an io::Error");
+        assert_eq!(downcast.kind(), io::ErrorKind::NotFound);
+
+        let utf8_err = String::from_utf8(vec![0xFF]).unwrap_err();
+        let err: GitMiningError = utf8_err.into();
+        assert!(
+            err.source()
+                .and_then(|s| s.downcast_ref::<std::string::FromUtf8Error>())
+                .is_some(),
+            "Utf8Error should expose a FromUtf8Error source"
+        );
+    }
+
+    #[test]
+    fn non_from_variants_have_no_source() {
+        use std::error::Error;
+
+        // Variants without a `#[from]`/`#[source]` field terminate the chain.
+        assert!(GitMiningError::GitNotAvailable.source().is_none());
+        assert!(GitMiningError::CommandFailed("boom".to_string())
+            .source()
+            .is_none());
+        assert!(GitMiningError::MemoryError("flattened".to_string())
+            .source()
+            .is_none());
+    }
 }
