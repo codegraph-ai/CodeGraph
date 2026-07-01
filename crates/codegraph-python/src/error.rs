@@ -201,6 +201,25 @@ mod tests {
     }
 
     #[test]
+    fn io_error_exposes_source_and_others_have_none() {
+        use std::error::Error as _;
+        let src = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
+        let err = ParseError::io_error("/tmp/foo.py", src);
+        // IoError's `source` field is auto-wired by thiserror into Error::source()
+        let chained = err.source().expect("IoError should expose its source");
+        let io_src = chained
+            .downcast_ref::<io::Error>()
+            .expect("source should be an io::Error");
+        assert_eq!(io_src.kind(), io::ErrorKind::PermissionDenied);
+
+        // Variants without a source field return None
+        assert!(ParseError::graph_error("x").source().is_none());
+        assert!(ParseError::file_too_large("big.py", 1, 2)
+            .source()
+            .is_none());
+    }
+
+    #[test]
     fn result_alias_carries_parse_error() {
         let r: Result<u32> = Err(ParseError::graph_error("boom"));
         assert!(r.is_err());
