@@ -236,6 +236,28 @@ fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph::{PropertyMap, PropertyValue};
+
+    /// Add a node from a slice of (key, PropertyValue) props, returning its id.
+    fn add_node(
+        graph: &mut CodeGraph,
+        ty: NodeType,
+        props: &[(&str, PropertyValue)],
+    ) -> codegraph::NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), v.clone());
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn s(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    fn i(v: i64) -> PropertyValue {
+        PropertyValue::Int(v)
+    }
 
     #[test]
     fn test_truncate_short() {
@@ -258,5 +280,318 @@ mod tests {
         let result = search_by_pattern(&graph, "[invalid(", None, None, 50);
         assert_eq!(result.total_matches, 0);
         assert!(result.matches.is_empty());
+    }
+
+    #[test]
+    fn name_scope_matches_only_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("parse_config")),
+                ("path", s("/src/a.rs")),
+                ("signature", s("fn parse_config() -> Config")),
+                ("line_start", i(10)),
+                ("line_end", i(20)),
+            ],
+        );
+        let result = search_by_pattern(&g, "parse_", Some("name"), None, 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.scope, "name");
+        let m = &result.matches[0];
+        assert_eq!(m.name, "parse_config");
+        assert_eq!(m.matched_in, "name");
+        assert_eq!(m.matched_text, "parse_config");
+        assert_eq!(m.kind, "function");
+        assert_eq!(m.line_start, 10);
+        assert_eq!(m.line_end, 20);
+        assert_eq!(m.signature, "fn parse_config() -> Config");
+    }
+
+    #[test]
+    fn name_scope_does_not_match_signature() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Pattern only appears in the signature, not the name.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("foo")),
+                ("path", s("/src/a.rs")),
+                ("signature", s("fn foo(cfg: Config)")),
+            ],
+        );
+        let result = search_by_pattern(&g, "Config", Some("name"), None, 50);
+        assert_eq!(result.total_matches, 0);
+    }
+
+    #[test]
+    fn signature_scope_matches() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("foo")),
+                ("path", s("/src/a.rs")),
+                ("signature", s("fn foo(cfg: Config)")),
+            ],
+        );
+        let result = search_by_pattern(&g, "Config", Some("signature"), None, 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.matches[0].matched_in, "signature");
+    }
+
+    #[test]
+    fn function_body_scope_matches_body_prefix() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("foo")),
+                ("path", s("/src/a.rs")),
+                ("body_prefix", s("let x = todo_marker();")),
+            ],
+        );
+        let result = search_by_pattern(&g, "todo_marker", Some("function_body"), None, 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.matches[0].matched_in, "body");
+    }
+
+    #[test]
+    fn docstring_scope_matches_doc() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("foo")),
+                ("path", s("/src/a.rs")),
+                ("doc", s("Deprecated: use bar instead")),
+            ],
+        );
+        let result = search_by_pattern(&g, "Deprecated", Some("docstring"), None, 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.matches[0].matched_in, "docstring");
+    }
+
+    #[test]
+    fn any_scope_prefers_name_over_other_fields() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // "target" appears in every field; "any" must report the name hit first.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/a.rs")),
+                ("signature", s("fn target()")),
+                ("body_prefix", s("target();")),
+                ("doc", s("the target")),
+            ],
+        );
+        let result = search_by_pattern(&g, "target", None, None, 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.matches[0].matched_in, "name");
+    }
+
+    #[test]
+    fn any_scope_falls_through_to_signature_then_body_then_doc() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // signature precedence when name misses
+        let mut g2 = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("foo")),
+                ("path", s("/src/a.rs")),
+                ("signature", s("fn foo(z: Zeta)")),
+                ("body_prefix", s("Zeta::new()")),
+            ],
+        );
+        assert_eq!(
+            search_by_pattern(&g, "Zeta", None, None, 50).matches[0].matched_in,
+            "signature"
+        );
+        // doc precedence when name/sig/body all miss
+        add_node(
+            &mut g2,
+            NodeType::Function,
+            &[
+                ("name", s("foo")),
+                ("path", s("/src/a.rs")),
+                ("doc", s("mentions Omega only")),
+            ],
+        );
+        assert_eq!(
+            search_by_pattern(&g2, "Omega", None, None, 50).matches[0].matched_in,
+            "docstring"
+        );
+    }
+
+    #[test]
+    fn node_type_filter_restricts_kind() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", s("widget_fn")), ("path", s("/src/a.rs"))],
+        );
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", s("widget_cls")), ("path", s("/src/a.rs"))],
+        );
+        let result = search_by_pattern(&g, "widget", Some("name"), Some("class"), 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.matches[0].kind, "class");
+        assert_eq!(result.matches[0].name, "widget_cls");
+    }
+
+    #[test]
+    fn any_filter_skips_file_and_module_nodes() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::CodeFile,
+            &[
+                ("name", s("mod_target.rs")),
+                ("path", s("/src/mod_target.rs")),
+            ],
+        );
+        add_node(
+            &mut g,
+            NodeType::Module,
+            &[("name", s("mod_target")), ("path", s("/src/mod_target.rs"))],
+        );
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", s("mod_target_fn")), ("path", s("/src/a.rs"))],
+        );
+        // "any" filter drops the CodeFile/Module hits, keeping only the function.
+        let result = search_by_pattern(&g, "mod_target", Some("name"), Some("any"), 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.matches[0].kind, "function");
+    }
+
+    #[test]
+    fn explicit_module_filter_includes_module_nodes() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Module,
+            &[("name", s("mod_target")), ("path", s("/src/mod_target.rs"))],
+        );
+        let result = search_by_pattern(&g, "mod_target", Some("name"), Some("module"), 50);
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.matches[0].kind, "module");
+    }
+
+    #[test]
+    fn results_sorted_by_path_then_line_start() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("hit_b2")),
+                ("path", s("/src/b.rs")),
+                ("line_start", i(30)),
+            ],
+        );
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("hit_a")),
+                ("path", s("/src/a.rs")),
+                ("line_start", i(99)),
+            ],
+        );
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("hit_b1")),
+                ("path", s("/src/b.rs")),
+                ("line_start", i(5)),
+            ],
+        );
+        let result = search_by_pattern(&g, "hit_", Some("name"), None, 50);
+        let order: Vec<&str> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        // /src/a.rs (any line) before /src/b.rs; within b.rs, line 5 before line 30.
+        assert_eq!(order, vec!["hit_a", "hit_b1", "hit_b2"]);
+    }
+
+    #[test]
+    fn limit_truncates_matches_but_total_reflects_all() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        for n in 0..5 {
+            add_node(
+                &mut g,
+                NodeType::Function,
+                &[
+                    ("name", s(&format!("hit_{n}"))),
+                    ("path", s("/src/a.rs")),
+                    ("line_start", i(n)),
+                ],
+            );
+        }
+        let result = search_by_pattern(&g, "hit_", Some("name"), None, 2);
+        assert_eq!(result.total_matches, 5);
+        assert_eq!(result.matches.len(), 2);
+    }
+
+    #[test]
+    fn matched_text_is_truncated_to_200_chars() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let long_body = format!("start_{}", "x".repeat(300));
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("foo")),
+                ("path", s("/src/a.rs")),
+                ("body_prefix", s(&long_body)),
+            ],
+        );
+        let result = search_by_pattern(&g, "start_", Some("function_body"), None, 50);
+        assert_eq!(result.total_matches, 1);
+        let text = &result.matches[0].matched_text;
+        assert!(text.ends_with('…'));
+        assert_eq!(text.chars().count(), 201);
+    }
+
+    #[test]
+    fn no_match_returns_empty_with_scope_echoed() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", s("foo")), ("path", s("/src/a.rs"))],
+        );
+        let result = search_by_pattern(&g, "no_such_symbol", Some("name"), None, 50);
+        assert_eq!(result.total_matches, 0);
+        assert!(result.matches.is_empty());
+        assert_eq!(result.scope, "name");
+        assert_eq!(result.pattern, "no_such_symbol");
+    }
+
+    #[test]
+    fn empty_node_type_filter_treated_like_any_but_still_scans_functions() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", s("scan_me")), ("path", s("/src/a.rs"))],
+        );
+        // An empty filter string is not "any", so the file/module skip guard
+        // (which is gated on == "any") does not trip; functions still match.
+        let result = search_by_pattern(&g, "scan_me", Some("name"), Some(""), 50);
+        assert_eq!(result.total_matches, 1);
     }
 }
