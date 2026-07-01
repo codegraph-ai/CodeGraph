@@ -526,4 +526,126 @@ mod tests {
         assert!(result.used_fallback.is_none());
         assert!(result.fallback_message.is_none());
     }
+
+    #[tokio::test]
+    async fn multi_level_callers_report_increasing_depth() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let c1 = add_node(&mut g, NodeType::Function, &[("name", str_prop("c1"))]);
+        let c2 = add_node(&mut g, NodeType::Function, &[("name", str_prop("c2"))]);
+        // c2 -> c1 -> target
+        edge(&mut g, c1, target, EdgeType::Calls);
+        edge(&mut g, c2, c1, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 2, "callers", false, None).await;
+
+        assert_eq!(result.nodes.len(), 2);
+        let c1_node = result.nodes.iter().find(|n| n.name == "c1").expect("c1");
+        let c2_node = result.nodes.iter().find(|n| n.name == "c2").expect("c2");
+        assert_eq!(c1_node.depth, 1);
+        assert_eq!(c2_node.depth, 2);
+        // Every caller edge points at the queried root regardless of depth.
+        assert!(result.edges.iter().all(|e| e.to == target.to_string()));
+    }
+
+    #[tokio::test]
+    async fn both_direction_dedups_node_that_is_both_caller_and_callee() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::Function, &[("name", str_prop("a"))]);
+        let b = add_node(&mut g, NodeType::Function, &[("name", str_prop("b"))]);
+        // Mutual recursion: a <-> b, so b is both a caller and a callee of a.
+        edge(&mut g, a, b, EdgeType::Calls);
+        edge(&mut g, b, a, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, a, 1, "both", false, None).await;
+
+        // `seen` dedup keeps b only once, tagged as the first-seen direction (caller).
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0].name, "b");
+        assert_eq!(result.nodes[0].direction.as_deref(), Some("caller"));
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].from, b.to_string());
+        assert_eq!(result.edges[0].to, a.to_string());
+    }
+
+    #[tokio::test]
+    async fn both_direction_with_only_callees_tags_callee_and_no_diagnostic() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let source = add_node(&mut g, NodeType::Function, &[("name", str_prop("source"))]);
+        let callee = add_node(&mut g, NodeType::Function, &[("name", str_prop("callee"))]);
+        edge(&mut g, source, callee, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, source, 1, "both", false, None).await;
+
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0].name, "callee");
+        assert_eq!(result.nodes[0].direction.as_deref(), Some("callee"));
+        assert!(result.diagnostic.is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_reports_total_edge_count_from_graph() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Queried node has no call relationships, but the graph is not empty.
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let x = add_node(&mut g, NodeType::Function, &[("name", str_prop("x"))]);
+        let y = add_node(&mut g, NodeType::Function, &[("name", str_prop("y"))]);
+        edge(&mut g, x, y, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 1, "both", false, None).await;
+
+        assert!(result.nodes.is_empty());
+        let diag = result
+            .diagnostic
+            .expect("diagnostic present when no relationships");
+        assert!(diag.node_found);
+        assert!(diag.total_edges_in_graph >= 1);
+    }
+
+    #[tokio::test]
+    async fn used_fallback_without_requested_line_reports_line_zero() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 1, "both", true, None).await;
+
+        assert_eq!(result.used_fallback, Some(true));
+        let msg = result.fallback_message.expect("fallback message present");
+        assert!(msg.contains("line 0"));
+    }
+
+    #[tokio::test]
+    async fn depth_zero_yields_no_callers_and_a_diagnostic() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(&mut g, NodeType::Function, &[("name", str_prop("caller"))]);
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 0, "callers", false, None).await;
+
+        // The call chain drops direct callers pushed at depth 1 when max_depth is 0.
+        assert!(result.nodes.is_empty());
+        assert!(result.diagnostic.is_some());
+    }
+
+    #[tokio::test]
+    async fn node_language_is_empty_string_when_property_absent() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        // Caller carries no language property, exercising the is_empty branch.
+        let caller = add_node(&mut g, NodeType::Function, &[("name", str_prop("caller"))]);
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 1, "callers", false, None).await;
+
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0].language, "");
+    }
 }
