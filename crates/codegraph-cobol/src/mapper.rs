@@ -239,90 +239,275 @@ pub fn ir_to_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{ClassEntity, FunctionEntity, ImportRelation, ModuleEntity};
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
+    };
     use std::path::PathBuf;
 
-    #[test]
-    fn test_ir_to_graph_empty() {
-        let ir = CodeIR::new(PathBuf::from("test.cob"));
+    fn map(ir: &CodeIR) -> (CodeGraph, FileInfo) {
         let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.cob").as_path());
+        let info = ir_to_graph(ir, &mut graph, Path::new("test.cob")).unwrap();
+        (graph, info)
+    }
 
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.functions.len(), 0);
-        assert_eq!(file_info.classes.len(), 0);
+    /// Return the single edge between two nodes (fails if not exactly one).
+    fn edge_between(graph: &CodeGraph, src: NodeId, dst: NodeId) -> &codegraph::Edge {
+        let ids = graph.get_edges_between(src, dst).unwrap();
+        assert_eq!(ids.len(), 1, "expected exactly one edge {src}->{dst}");
+        graph.get_edge(ids[0]).unwrap()
     }
 
     #[test]
-    fn test_ir_to_graph_with_program() {
+    fn empty_ir_builds_file_node_from_path_stem() {
+        // No module set: name derives from the file stem, language is the
+        // hard-coded "cobol", the graph holds only the file node, line_count is 0.
+        let ir = CodeIR::new(PathBuf::from("test.cob"));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.line_count, 0);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert!(matches!(file.node_type, NodeType::CodeFile));
+        assert_eq!(file.properties.get_string("name"), Some("test"));
+        assert_eq!(file.properties.get_string("language"), Some("cobol"));
+    }
+
+    #[test]
+    fn module_drives_file_metadata() {
+        // When a module is set, the file node takes its name/path/language and
+        // line_count, and FileInfo.line_count mirrors the module value.
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.set_module(ModuleEntity::new("PAYROLL", "src/PAYROLL.cob", "cobol").with_line_count(80));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(info.line_count, 80);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("PAYROLL"));
+        assert_eq!(file.properties.get_string("path"), Some("src/PAYROLL.cob"));
+        assert!(matches!(
+            file.properties.get("line_count"),
+            Some(PropertyValue::Int(80))
+        ));
+    }
+
+    #[test]
+    fn program_becomes_class_node_with_file_contains_edge() {
+        // A COBOL program maps to a Class node carrying name/visibility/line
+        // bounds/is_abstract, wired file -> class via Contains.
         let mut ir = CodeIR::new(PathBuf::from("test.cob"));
         ir.add_class(ClassEntity::new("MYPROG", 1, 20));
+        let (graph, info) = map(&ir);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.cob").as_path());
+        assert_eq!(info.classes.len(), 1);
+        let class_id = info.classes[0];
+        let edge = edge_between(&graph, info.file_id, class_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
 
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.classes.len(), 1);
+        let class = graph.get_node(class_id).unwrap();
+        assert!(matches!(class.node_type, NodeType::Class));
+        assert_eq!(class.properties.get_string("name"), Some("MYPROG"));
+        assert_eq!(class.properties.get_string("visibility"), Some("public"));
+        assert!(matches!(
+            class.properties.get("line_start"),
+            Some(PropertyValue::Int(1))
+        ));
+        assert!(matches!(
+            class.properties.get("line_end"),
+            Some(PropertyValue::Int(20))
+        ));
+        assert!(matches!(
+            class.properties.get("is_abstract"),
+            Some(PropertyValue::Bool(false))
+        ));
     }
 
     #[test]
-    fn test_ir_to_graph_with_paragraph() {
+    fn free_paragraph_gets_file_contains_edge_with_flags() {
+        // A paragraph with no parent_class is wired file -> function via
+        // Contains, keeps its bare name, and carries the boolean flags.
         let mut ir = CodeIR::new(PathBuf::from("test.cob"));
-        ir.add_function(FunctionEntity::new("MAIN-PARA", 5, 15));
+        ir.add_function(FunctionEntity::new("MAIN-PARA", 5, 15).with_visibility("public"));
+        let (graph, info) = map(&ir);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.cob").as_path());
+        assert_eq!(info.functions.len(), 1);
+        let func_id = info.functions[0];
+        let edge = edge_between(&graph, info.file_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
 
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.functions.len(), 1);
+        let func = graph.get_node(func_id).unwrap();
+        assert!(matches!(func.node_type, NodeType::Function));
+        assert_eq!(func.properties.get_string("name"), Some("MAIN-PARA"));
+        assert!(matches!(
+            func.properties.get("is_async"),
+            Some(PropertyValue::Bool(false))
+        ));
+        assert!(matches!(
+            func.properties.get("is_static"),
+            Some(PropertyValue::Bool(false))
+        ));
+        // No parent_class was set, so the prop is absent.
+        assert!(func.properties.get("parent_class").is_none());
     }
 
     #[test]
-    fn test_ir_to_graph_with_copy() {
+    fn paragraph_with_known_parent_is_contained_by_program() {
+        // Classes are mapped before functions, so a paragraph whose parent_class
+        // matches a program is contained by the Class node (class -> func), not
+        // the file.
         let mut ir = CodeIR::new(PathBuf::from("test.cob"));
-        ir.add_import(ImportRelation::new("MYPROG", "MYBOOK"));
+        ir.add_class(ClassEntity::new("MYPROG", 1, 40));
+        ir.add_function(FunctionEntity::new("INIT-PARA", 5, 10).with_parent_class("MYPROG"));
+        let (graph, info) = map(&ir);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.cob").as_path());
+        let class_id = info.classes[0];
+        let func_id = info.functions[0];
 
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.imports.len(), 1);
+        // class -> func Contains edge exists.
+        let edge = edge_between(&graph, class_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
+
+        // No file -> func edge (only file -> class).
+        assert!(graph
+            .get_edges_between(info.file_id, func_id)
+            .unwrap()
+            .is_empty());
+
+        let func = graph.get_node(func_id).unwrap();
+        assert_eq!(func.properties.get_string("parent_class"), Some("MYPROG"));
     }
 
     #[test]
-    fn test_property_types() {
-        use codegraph::PropertyValue;
-
+    fn paragraph_with_unknown_parent_falls_back_to_file() {
+        // A parent_class not present in the graph records the prop but the
+        // containment edge falls back to the file.
         let mut ir = CodeIR::new(PathBuf::from("test.cob"));
-        ir.set_module(ModuleEntity::new("test", "test.cob", "cobol").with_line_count(100));
-        let func = FunctionEntity::new("MAIN-PARA", 10, 20).async_fn();
-        ir.add_function(func);
+        ir.add_function(FunctionEntity::new("ORPHAN-PARA", 5, 10).with_parent_class("GHOST"));
+        let (graph, info) = map(&ir);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let file_info = ir_to_graph(&ir, &mut graph, std::path::Path::new("test.cob")).unwrap();
+        let func_id = info.functions[0];
+        let edge = edge_between(&graph, info.file_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
 
-        let file_node = graph.get_node(file_info.file_id).unwrap();
-        assert!(
-            matches!(
-                file_node.properties.get("line_count"),
-                Some(PropertyValue::Int(100))
-            ),
-            "line_count should be Int, got {:?}",
-            file_node.properties.get("line_count")
+        let func = graph.get_node(func_id).unwrap();
+        assert_eq!(func.properties.get_string("parent_class"), Some("GHOST"));
+    }
+
+    #[test]
+    fn paragraph_records_complexity_props() {
+        // A function carrying ComplexityMetrics stamps the complexity family of
+        // props (value, grade, branches, loops) onto the Function node.
+        let metrics = ComplexityMetrics::new()
+            .with_branches(3)
+            .with_loops(2)
+            .finalize();
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.add_function(FunctionEntity::new("BUSY-PARA", 1, 30).with_complexity(metrics.clone()));
+        let (graph, info) = map(&ir);
+
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert!(matches!(
+            func.properties.get("complexity_branches"),
+            Some(PropertyValue::Int(3))
+        ));
+        assert!(matches!(
+            func.properties.get("complexity_loops"),
+            Some(PropertyValue::Int(2))
+        ));
+        assert_eq!(
+            func.properties.get_string("complexity_grade"),
+            Some(metrics.grade().to_string()).as_deref()
         );
+    }
 
-        let func_node = graph.get_node(file_info.functions[0]).unwrap();
-        assert!(
-            matches!(
-                func_node.properties.get("line_start"),
-                Some(PropertyValue::Int(10))
-            ),
-            "line_start should be Int(10), got {:?}",
-            func_node.properties.get("line_start")
-        );
+    #[test]
+    fn copy_creates_external_module_with_bare_import_edge() {
+        // A COPY statement creates an external Module node (is_external=true) and
+        // a bare Imports edge with no symbol/alias props.
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.add_import(ImportRelation::new("MYPROG", "MYBOOK").with_alias("BK"));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(info.imports.len(), 1);
+        let module_id = info.imports[0];
+        let module = graph.get_node(module_id).unwrap();
+        assert!(matches!(module.node_type, NodeType::Module));
+        assert_eq!(module.properties.get_string("name"), Some("MYBOOK"));
+        assert_eq!(module.properties.get_string("is_external"), Some("true"));
+
+        let edge = edge_between(&graph, info.file_id, module_id);
+        assert!(matches!(edge.edge_type, EdgeType::Imports));
+        // Import edge carries no symbol/alias metadata.
+        assert!(edge.properties.get("symbols").is_none());
+        assert!(edge.properties.get("alias").is_none());
+    }
+
+    #[test]
+    fn duplicate_copy_targets_dedup_to_one_module() {
+        // Two COPY statements naming the same book reuse one Module node while
+        // each still contributes an Imports edge.
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.add_import(ImportRelation::new("MYPROG", "SHARED"));
+        ir.add_import(ImportRelation::new("MYPROG", "SHARED"));
+        let (graph, info) = map(&ir);
+
+        // file node + one deduped Module node.
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(info.imports.len(), 2);
+        assert_eq!(info.imports[0], info.imports[1]);
+
+        let ids = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn resolved_call_creates_calls_edge() {
+        // A CALL between two known paragraphs creates a Calls edge carrying the
+        // call_site_line and is_direct props.
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.add_function(FunctionEntity::new("CALLER", 1, 10));
+        ir.add_function(FunctionEntity::new("CALLEE", 11, 20));
+        ir.add_call(CallRelation::new("CALLER", "CALLEE", 5));
+        let (graph, info) = map(&ir);
+
+        let caller_id = info.functions[0];
+        let callee_id = info.functions[1];
+        let edge = edge_between(&graph, caller_id, callee_id);
+        assert!(matches!(edge.edge_type, EdgeType::Calls));
+        assert!(matches!(
+            edge.properties.get("call_site_line"),
+            Some(PropertyValue::Int(5))
+        ));
+        assert!(matches!(
+            edge.properties.get("is_direct"),
+            Some(PropertyValue::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn unresolved_call_stored_on_caller_without_edge() {
+        // A CALL whose callee is not in the graph produces no Calls edge; the
+        // callee name is stored on the caller's unresolved_calls list.
+        let mut ir = CodeIR::new(PathBuf::from("test.cob"));
+        ir.add_function(FunctionEntity::new("CALLER", 1, 10));
+        ir.add_call(CallRelation::new("CALLER", "EXTERNAL-PROG", 5));
+        let (graph, info) = map(&ir);
+
+        // Only file + caller nodes, and the single file -> caller Contains edge.
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 1);
+
+        let caller = graph.get_node(info.functions[0]).unwrap();
+        let unresolved = caller
+            .properties
+            .get_string_list_compat("unresolved_calls")
+            .unwrap();
+        assert_eq!(unresolved, vec!["EXTERNAL-PROG".to_string()]);
     }
 }
