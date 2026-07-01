@@ -4,10 +4,9 @@
 //! AST visitor for extracting Ruby entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, TraitEntity,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    TraitEntity,
 };
 use tree_sitter::Node;
 
@@ -112,9 +111,7 @@ impl<'a> RubyVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -181,9 +178,7 @@ impl<'a> RubyVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -255,9 +250,7 @@ impl<'a> RubyVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -687,7 +680,9 @@ mod tests {
         use tree_sitter::Parser;
 
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_ruby::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = RubyVisitor::new(source);
