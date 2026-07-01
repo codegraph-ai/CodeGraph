@@ -4,10 +4,9 @@
 //! AST visitor for extracting TypeScript/JavaScript entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, Field, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, TraitEntity,
-    TypeReference, BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, Field,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    TraitEntity, TypeReference,
 };
 use tree_sitter::Node;
 
@@ -1719,5 +1718,265 @@ mod tests {
         assert_eq!(visitor.functions.len(), 1);
         let complexity = visitor.functions[0].complexity.as_ref().unwrap();
         assert_eq!(complexity.grade(), 'A');
+    }
+
+    // ==========================================
+    // Helper — parse + visit, returning the visitor
+    // ==========================================
+
+    fn visit(source: &[u8]) -> TypeScriptVisitor<'_> {
+        use tree_sitter::Parser;
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut visitor = TypeScriptVisitor::new(source);
+        visitor.visit_node(tree.root_node());
+        visitor
+    }
+
+    // ==========================================
+    // Pure helpers
+    // ==========================================
+
+    #[test]
+    fn test_extract_reference_path_present() {
+        let comment = "/// <reference path=\"./types.d.ts\" />";
+        assert_eq!(
+            TypeScriptVisitor::extract_reference_path(comment),
+            Some("./types.d.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_reference_path_absent() {
+        // No path= marker at all
+        assert_eq!(
+            TypeScriptVisitor::extract_reference_path("/// <reference types=\"node\" />"),
+            None
+        );
+        // Empty path is treated as no reference
+        assert_eq!(
+            TypeScriptVisitor::extract_reference_path("/// <reference path=\"\" />"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_is_builtin_type() {
+        // Primitives and common utility generics are builtins
+        assert!(TypeScriptVisitor::is_builtin_type("string"));
+        assert!(TypeScriptVisitor::is_builtin_type("number"));
+        assert!(TypeScriptVisitor::is_builtin_type("Promise"));
+        assert!(TypeScriptVisitor::is_builtin_type("Record"));
+        assert!(TypeScriptVisitor::is_builtin_type("Awaited"));
+        // User types are not
+        assert!(!TypeScriptVisitor::is_builtin_type("MyType"));
+        assert!(!TypeScriptVisitor::is_builtin_type("User"));
+    }
+
+    // ==========================================
+    // Enums
+    // ==========================================
+
+    #[test]
+    fn test_visitor_enum_extraction() {
+        let visitor = visit(b"enum Color { Red = 'red', Green = 'green' }");
+
+        // Enums map to a Class node carrying an "enum" attribute
+        assert_eq!(visitor.classes.len(), 1);
+        let enum_class = &visitor.classes[0];
+        assert_eq!(enum_class.name, "Color");
+        assert_eq!(enum_class.attributes, vec!["enum".to_string()]);
+        // Members become constant, static fields with their assigned value
+        assert_eq!(enum_class.fields.len(), 2);
+        assert_eq!(enum_class.fields[0].name, "Red");
+        assert_eq!(enum_class.fields[0].default_value, Some("'red'".to_string()));
+        assert!(enum_class.fields[0].is_constant);
+        assert!(enum_class.fields[0].is_static);
+    }
+
+    // ==========================================
+    // Triple-slash reference directives
+    // ==========================================
+
+    #[test]
+    fn test_visitor_triple_slash_reference() {
+        let visitor = visit(b"/// <reference path=\"./types.d.ts\" />\n");
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "./types.d.ts");
+        assert_eq!(visitor.imports[0].alias, Some("reference".to_string()));
+        assert!(!visitor.imports[0].is_wildcard);
+    }
+
+    #[test]
+    fn test_visitor_plain_comment_ignored() {
+        // A regular comment is not a reference directive
+        let visitor = visit(b"// just a note\nfunction f() {}");
+        assert_eq!(visitor.imports.len(), 0);
+    }
+
+    // ==========================================
+    // Decorators
+    // ==========================================
+
+    #[test]
+    fn test_visitor_method_decorators() {
+        let source = b"class Svc { @Get('/users') @Cacheable getUsers() {} }";
+        let visitor = visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let attrs = &visitor.functions[0].attributes;
+        // Decorators are captured with the leading @ stripped
+        assert!(attrs.iter().any(|a| a.starts_with("Get")));
+        assert!(attrs.iter().any(|a| a == "Cacheable"));
+    }
+
+    // ==========================================
+    // Method visibility
+    // ==========================================
+
+    #[test]
+    fn test_visitor_method_visibility_private_keyword() {
+        let visitor = visit(b"class C { private secret() {} }");
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_visitor_method_visibility_protected_keyword() {
+        let visitor = visit(b"class C { protected helper() {} }");
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "protected");
+    }
+
+    #[test]
+    fn test_visitor_method_visibility_hash_private() {
+        let visitor = visit(b"class C { #internal() {} }");
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    // ==========================================
+    // Parameters
+    // ==========================================
+
+    #[test]
+    fn test_visitor_optional_parameter() {
+        let visitor = visit(b"function f(name?: string) {}");
+        assert_eq!(visitor.functions.len(), 1);
+        // Optional parameters are still extracted
+        assert_eq!(visitor.functions[0].parameters.len(), 1);
+        assert_eq!(visitor.functions[0].parameters[0].name, "name");
+    }
+
+    // ==========================================
+    // Type references
+    // ==========================================
+
+    #[test]
+    fn test_visitor_type_reference_from_param() {
+        let visitor = visit(b"function process(user: User): void {}");
+        // User (non-builtin) recorded; void return is a builtin and skipped
+        assert!(visitor
+            .type_references
+            .iter()
+            .any(|t| t.referrer == "process" && t.type_name == "User"));
+        assert!(!visitor.type_references.iter().any(|t| t.type_name == "void"));
+    }
+
+    #[test]
+    fn test_visitor_type_reference_from_return_type() {
+        let visitor = visit(b"function make(): Widget { return null as any; }");
+        assert!(visitor
+            .type_references
+            .iter()
+            .any(|t| t.referrer == "make" && t.type_name == "Widget"));
+    }
+
+    #[test]
+    fn test_visitor_interface_extends_type_reference() {
+        let visitor = visit(b"interface Admin extends BaseUser { role: string; }");
+        assert_eq!(visitor.interfaces.len(), 1);
+        // The extends clause records a type reference to the parent interface
+        assert!(visitor
+            .type_references
+            .iter()
+            .any(|t| t.referrer == "Admin" && t.type_name == "BaseUser"));
+    }
+
+    // ==========================================
+    // new expressions
+    // ==========================================
+
+    #[test]
+    fn test_visitor_new_expression_records_call() {
+        let visitor = visit(b"function build() { const w = new Widget(); }");
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "build" && c.callee == "Widget"));
+    }
+
+    #[test]
+    fn test_visitor_new_expression_lowercase_skipped() {
+        // Only PascalCase constructors are treated as class instantiations
+        let visitor = visit(b"function build() { const x = new thing(); }");
+        assert!(!visitor.calls.iter().any(|c| c.callee == "thing"));
+    }
+
+    #[test]
+    fn test_visitor_new_expression_member() {
+        // new ns.TreeItem() → callee is the property name
+        let visitor = visit(b"function build() { const t = new vscode.TreeItem(); }");
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "build" && c.callee == "TreeItem"));
+    }
+
+    // ==========================================
+    // Variable type annotations and casts
+    // ==========================================
+
+    #[test]
+    fn test_visitor_variable_type_annotation() {
+        let visitor = visit(b"function f() { const cfg: AppConfig = load(); }");
+        assert!(visitor
+            .type_references
+            .iter()
+            .any(|t| t.referrer == "f" && t.type_name == "AppConfig"));
+    }
+
+    #[test]
+    fn test_visitor_as_expression_type_assertion() {
+        let visitor = visit(b"function f() { const x = value as CustomType; }");
+        assert!(visitor
+            .type_references
+            .iter()
+            .any(|t| t.referrer == "f" && t.type_name == "CustomType"));
+    }
+
+    // ==========================================
+    // Callee resolution
+    // ==========================================
+
+    #[test]
+    fn test_visitor_member_call_uses_property_name() {
+        let visitor = visit(b"function f() { logger.warn('x'); }");
+        // Member-expression callees resolve to the property (method) name
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "f" && c.callee == "warn"));
+    }
+
+    #[test]
+    fn test_visitor_bare_this_call_skipped() {
+        // A call whose callee resolves to just "this" is skipped
+        let visitor = visit(b"function f() { this(); }");
+        assert!(!visitor.calls.iter().any(|c| c.callee == "this"));
     }
 }
