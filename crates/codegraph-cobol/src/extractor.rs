@@ -711,4 +711,89 @@ mod tests {
             vec!["TEMP_DATA"]
         );
     }
+
+    #[test]
+    fn extract_sql_table_names_lowercases_input_and_dedups() {
+        // Input is upper-cased internally, so lowercase SQL still resolves.
+        assert_eq!(
+            extract_sql_table_names("select a from accounts where id = 1"),
+            vec!["ACCOUNTS"]
+        );
+        // A table referenced twice (SELECT/FROM then a second FROM) is deduplicated
+        // while preserving first-seen order.
+        assert_eq!(
+            extract_sql_table_names("SELECT * FROM LEDGER UNION SELECT * FROM LEDGER"),
+            vec!["LEDGER"]
+        );
+    }
+
+    #[test]
+    fn extract_sql_table_names_skips_into_without_insert() {
+        // INTO only names a table when the preceding token is INSERT; a bare
+        // `SELECT ... INTO :host-var` (COBOL singleton select) must not emit one.
+        assert_eq!(
+            extract_sql_table_names("SELECT NAME INTO :WS-NAME FROM CUSTOMER"),
+            vec!["CUSTOMER"]
+        );
+        // INTO with a non-INSERT predecessor yields nothing on its own.
+        assert!(extract_sql_table_names("MERGE INTO STAGING").is_empty());
+    }
+
+    #[test]
+    fn extract_sql_table_names_rejects_keyword_after_from() {
+        // FROM immediately followed by a SQL keyword (not a real table) is rejected
+        // by is_valid_table_name, so no table is produced.
+        assert!(extract_sql_table_names("DELETE FROM WHERE X = 1").is_empty());
+        // No DML keyword at all -> empty.
+        assert!(extract_sql_table_names("COMMIT WORK").is_empty());
+    }
+
+    #[test]
+    fn is_valid_table_name_strips_punctuation_and_rejects_keywords() {
+        // Plain identifiers pass.
+        assert!(is_valid_table_name("ORDERS"));
+        // Surrounding punctuation is stripped before the check, so a parenthesized
+        // or comma-trailed name still validates.
+        assert!(is_valid_table_name("(ORDERS)"));
+        assert!(is_valid_table_name("ORDERS,"));
+        assert!(is_valid_table_name("SCHEMA.ORDERS.")); // interior dot survives strip
+                                                        // Punctuation-only or empty tokens are not table names.
+        assert!(!is_valid_table_name(""));
+        assert!(!is_valid_table_name(",."));
+        // SQL keywords that commonly follow FROM/INTO/UPDATE are rejected.
+        assert!(!is_valid_table_name("WHERE"));
+        assert!(!is_valid_table_name("SELECT"));
+        assert!(!is_valid_table_name("JOIN"));
+    }
+
+    #[test]
+    fn extract_cics_program_name_parses_quoted_and_bare_names() {
+        // Single- and double-quoted program names have quotes stripped.
+        assert_eq!(
+            extract_cics_program_name("EXEC CICS LINK PROGRAM('SUBPROG') END-EXEC").as_deref(),
+            Some("SUBPROG")
+        );
+        assert_eq!(
+            extract_cics_program_name(r#"XCTL PROGRAM("NEXTPGM")"#).as_deref(),
+            Some("NEXTPGM")
+        );
+        // Whitespace between PROGRAM and the paren, and inside it, is trimmed.
+        assert_eq!(
+            extract_cics_program_name("PROGRAM ( PAYROLL )").as_deref(),
+            Some("PAYROLL")
+        );
+    }
+
+    #[test]
+    fn extract_cics_program_name_returns_none_on_malformed_input() {
+        // No PROGRAM keyword at all.
+        assert_eq!(extract_cics_program_name("EXEC CICS RETURN END-EXEC"), None);
+        // PROGRAM present but no opening paren.
+        assert_eq!(extract_cics_program_name("PROGRAM NAME"), None);
+        // Opening paren but no closing paren.
+        assert_eq!(extract_cics_program_name("PROGRAM('UNCLOSED"), None);
+        // Empty parenthesized name (after trimming quotes) yields None.
+        assert_eq!(extract_cics_program_name("PROGRAM('')"), None);
+        assert_eq!(extract_cics_program_name("PROGRAM(   )"), None);
+    }
 }
