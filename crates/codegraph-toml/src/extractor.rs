@@ -79,11 +79,8 @@ edition = "2021"
         let ir = extract(source, Path::new("Cargo.toml"), &cfg()).unwrap();
         assert!(!ir.functions.is_empty(), "Expected key-value properties");
         let names: Vec<&str> = ir.functions.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.iter().any(|n| *n == "name"), "Expected 'name' key");
-        assert!(
-            names.iter().any(|n| *n == "version"),
-            "Expected 'version' key"
-        );
+        assert!(names.contains(&"name"), "Expected 'name' key");
+        assert!(names.contains(&"version"), "Expected 'version' key");
     }
 
     #[test]

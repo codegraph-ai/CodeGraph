@@ -4,9 +4,9 @@
 //! AST visitor for extracting TOML entities
 //!
 //! tree-sitter-toml-ng node types (from grammar):
-//!   document          — root; children are pairs, tables, comments at top level
-//!   table             — `[section]` header line only (pairs follow as siblings)
-//!   table_array_element — `[[section]]` header line only
+//!   document          — root; children are top-level pairs, tables, comments
+//!   table             — `[section]` header PLUS its `pair` children nested inside
+//!   table_array_element — `[[section]]` header PLUS its `pair` children nested inside
 //!   pair              — key = value  (child of document, table, or table_array_element)
 //!   dotted_key        — a.b.c style key
 //!   bare_key          — unquoted identifier
@@ -53,8 +53,8 @@ impl<'a> TomlVisitor<'a> {
     ///
     /// In tree-sitter-toml-ng the document's direct children are:
     ///   - `pair` nodes (top-level key-value pairs)
-    ///   - `table` nodes (just the `[name]` header; pairs follow as siblings)
-    ///   - `table_array_element` nodes (`[[name]]`)
+    ///   - `table` nodes (the `[name]` header with its pairs nested inside)
+    ///   - `table_array_element` nodes (`[[name]]`, pairs nested inside)
     ///   - `comment` nodes
     pub fn visit_document(&mut self, node: Node) {
         let children: Vec<Node> = {
@@ -94,6 +94,9 @@ impl<'a> TomlVisitor<'a> {
         self.current_section = Some(name);
         self.current_section_start = start_line;
         self.current_section_end = start_line;
+        // tree-sitter-toml-ng nests each section's `pair` nodes *under* the
+        // `table` node rather than as document siblings, so descend here.
+        self.visit_nested_pairs(node);
     }
 
     /// Begin a `[[section]]` array-of-tables.
@@ -105,6 +108,26 @@ impl<'a> TomlVisitor<'a> {
         self.current_section = Some(name);
         self.current_section_start = start_line;
         self.current_section_end = start_line;
+        self.visit_nested_pairs(node);
+    }
+
+    /// Visit `pair` children nested directly under a table /
+    /// table_array_element node (the tree-sitter-toml-ng layout).
+    fn visit_nested_pairs(&mut self, node: Node) {
+        let children: Vec<Node> = {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).collect()
+        };
+        for child in &children {
+            if child.kind() == "pair" {
+                let end = child.end_position().row + 1;
+                if end > self.current_section_end {
+                    self.current_section_end = end;
+                }
+                let section = self.current_section.clone();
+                self.visit_pair(*child, section);
+            }
+        }
     }
 
     /// Emit the current section as a ClassEntity and reset state.
@@ -200,5 +223,127 @@ impl<'a> TomlVisitor<'a> {
         self.node_text(node)
             .trim_matches(|c| c == '[' || c == ']' || c == ' ' || c == '\n')
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tree_sitter::Parser;
+
+    /// Parse TOML source and run the visitor over the document root,
+    /// returning the populated visitor for assertions.
+    fn visit(source: &str) -> TomlVisitor<'_> {
+        let mut parser = Parser::new();
+        let language = crate::ts_toml::language();
+        parser.set_language(&language).expect("set toml language");
+        let tree = parser.parse(source, None).expect("parse toml");
+        let mut visitor = TomlVisitor::new(source.as_bytes());
+        visitor.visit_document(tree.root_node());
+        // Detach the borrow lifetime issue by returning the visitor; the
+        // caller holds `source` alive for the returned visitor's lifetime.
+        visitor
+    }
+
+    #[test]
+    fn top_level_pair_has_no_parent_and_bare_signature() {
+        let src = "name = \"my-project\"\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 0, "no [table] header means no class");
+        assert_eq!(v.functions.len(), 1);
+        let f = &v.functions[0];
+        assert_eq!(f.name, "name");
+        assert_eq!(f.parent_class, None);
+        assert_eq!(f.visibility, "public");
+        assert_eq!(f.signature, "name = \"my-project\"");
+        assert_eq!(f.line_start, 1);
+    }
+
+    #[test]
+    fn pair_inside_table_is_prefixed_and_parented() {
+        let src = "[package]\nname = \"codegraph\"\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 1);
+        assert_eq!(v.classes[0].name, "package");
+        assert_eq!(v.classes[0].visibility, "public");
+        let f = v
+            .functions
+            .iter()
+            .find(|f| f.name == "package.name")
+            .expect("prefixed key");
+        assert_eq!(f.parent_class.as_deref(), Some("package"));
+        assert_eq!(f.signature, "name = \"codegraph\"");
+    }
+
+    #[test]
+    fn section_line_range_spans_its_pairs() {
+        // `[package]` on line 1, last pair on line 3 -> class end >= 3.
+        let src = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 1);
+        let c = &v.classes[0];
+        assert_eq!(c.line_start, 1);
+        assert!(
+            c.line_end >= 3,
+            "section end should extend to last pair, got {}",
+            c.line_end
+        );
+    }
+
+    #[test]
+    fn array_of_tables_flushes_each_header() {
+        let src = "[[bin]]\nname = \"server\"\n\n[[bin]]\nname = \"client\"\n";
+        let v = visit(src);
+        assert_eq!(v.classes.len(), 2);
+        assert!(v.classes.iter().all(|c| c.name == "bin"));
+    }
+
+    #[test]
+    fn dotted_key_is_captured_as_name() {
+        let src = "a.b.c = 1\n";
+        let v = visit(src);
+        assert_eq!(v.functions.len(), 1);
+        assert_eq!(v.functions[0].name, "a.b.c");
+    }
+
+    #[test]
+    fn quoted_key_text_is_preserved() {
+        let src = "\"quoted key\" = true\n";
+        let v = visit(src);
+        assert_eq!(v.functions.len(), 1);
+        assert!(
+            v.functions[0].name.contains("quoted key"),
+            "quoted key should be preserved verbatim, got {}",
+            v.functions[0].name
+        );
+    }
+
+    #[test]
+    fn long_value_is_truncated_with_ellipsis() {
+        let long = "x".repeat(200);
+        let src = format!("key = \"{long}\"\n");
+        let v = visit(&src);
+        assert_eq!(v.functions.len(), 1);
+        let sig = &v.functions[0].signature;
+        assert!(
+            sig.ends_with("..."),
+            "over-long value should be truncated: {sig}"
+        );
+        // 120-char cap + `...` + `key = ` prefix; well under the raw 200-char value.
+        assert!(
+            sig.len() < 200,
+            "truncated signature should be shorter than raw value"
+        );
+    }
+
+    #[test]
+    fn multiple_top_level_pairs_each_emit_a_function() {
+        let src = "name = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+        let v = visit(src);
+        assert_eq!(v.functions.len(), 3);
+        let names: Vec<&str> = v.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"name"));
+        assert!(names.contains(&"version"));
+        assert!(names.contains(&"edition"));
     }
 }

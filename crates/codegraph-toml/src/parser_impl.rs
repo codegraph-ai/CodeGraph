@@ -81,7 +81,6 @@ impl CodeParser for TomlParser {
     }
 
     fn parse_file(&self, path: &Path, graph: &mut CodeGraph) -> Result<FileInfo, ParserError> {
-        let start = Instant::now();
         let metadata =
             fs::metadata(path).map_err(|e| ParserError::IoError(path.to_path_buf(), e))?;
 
@@ -94,16 +93,9 @@ impl CodeParser for TomlParser {
 
         let source =
             fs::read_to_string(path).map_err(|e| ParserError::IoError(path.to_path_buf(), e))?;
-        let result = self.parse_source(&source, path, graph);
-
-        let duration = start.elapsed();
-        if let Ok(ref info) = result {
-            self.update_metrics(true, duration, info.entity_count(), 0);
-        } else {
-            self.update_metrics(false, duration, 0, 0);
-        }
-
-        result
+        // Metrics are tracked inside `parse_source` (the shared core path),
+        // so don't double-count here.
+        self.parse_source(&source, path, graph)
     }
 
     fn parse_source(
@@ -113,14 +105,24 @@ impl CodeParser for TomlParser {
         graph: &mut CodeGraph,
     ) -> Result<FileInfo, ParserError> {
         let start = Instant::now();
-        let ir = extractor::extract(source, file_path, &self.config)?;
-        let mut file_info = self.ir_to_graph(&ir, graph, file_path)?;
+        let result = (|| {
+            let ir = extractor::extract(source, file_path, &self.config)?;
+            let mut file_info = self.ir_to_graph(&ir, graph, file_path)?;
 
-        file_info.parse_time = start.elapsed();
-        file_info.line_count = source.lines().count();
-        file_info.byte_count = source.len();
+            file_info.parse_time = start.elapsed();
+            file_info.line_count = source.lines().count();
+            file_info.byte_count = source.len();
 
-        Ok(file_info)
+            Ok(file_info)
+        })();
+
+        let duration = start.elapsed();
+        match &result {
+            Ok(info) => self.update_metrics(true, duration, info.entity_count(), 0),
+            Err(_) => self.update_metrics(false, duration, 0, 0),
+        }
+
+        result
     }
 
     fn config(&self) -> &ParserConfig {
