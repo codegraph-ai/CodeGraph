@@ -177,7 +177,8 @@ pub fn ir_to_graph(
 
             // Convention-based HTTP handler detection for Laravel/Symfony:
             // Public methods in Controller classes are HTTP handlers.
-            if method.visibility == "public" && is_php_controller_class(&class.name)
+            if method.visibility == "public"
+                && is_php_controller_class(&class.name)
                 && !is_php_lifecycle_method(&method.name)
             {
                 method_props = method_props

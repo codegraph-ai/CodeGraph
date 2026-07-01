@@ -4,10 +4,9 @@
 //! AST visitor for extracting PHP entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, TraitEntity,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    TraitEntity, BODY_PREFIX_MAX_CHARS,
 };
 use tree_sitter::Node;
 
@@ -133,9 +132,7 @@ impl<'a> PhpVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -190,9 +187,7 @@ impl<'a> PhpVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -271,9 +266,7 @@ impl<'a> PhpVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -342,12 +335,16 @@ impl<'a> PhpVisitor<'a> {
         let qualified_name = self.qualify_name(&name);
         let doc_comment = self.extract_doc_comment(node);
 
-        // Extract parent interfaces (extends)
+        // Extract parent interfaces (extends). The base_clause is a named child,
+        // not a field, in tree-sitter-php.
         let mut parent_traits = Vec::new();
-        if let Some(base_clause) = node.child_by_field_name("base_clause") {
-            for child in base_clause.children(&mut base_clause.walk()) {
-                if child.kind() == "name" || child.kind() == "qualified_name" {
-                    parent_traits.push(self.node_text(child));
+        let mut base_cursor = node.walk();
+        for child in node.named_children(&mut base_cursor) {
+            if child.kind() == "base_clause" {
+                for bc in child.children(&mut child.walk()) {
+                    if bc.kind() == "name" || bc.kind() == "qualified_name" {
+                        parent_traits.push(self.node_text(bc));
+                    }
                 }
             }
         }
@@ -437,9 +434,7 @@ impl<'a> PhpVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(|t| truncate_body_prefix(t))
             .map(|t| t.to_string());
 
         // PHP 8.1 enums are treated as classes
@@ -686,14 +681,22 @@ impl<'a> PhpVisitor<'a> {
         let mut cursor = node.walk();
         let mut imported = String::new();
         let mut alias = None;
+        let mut seen_as = false;
 
         for child in node.children(&mut cursor) {
             match child.kind() {
+                // In current tree-sitter-php the alias is a bare `as` keyword
+                // followed by a `name`, not a wrapped namespace_aliasing_clause.
+                "as" => seen_as = true,
                 "qualified_name" | "name" => {
-                    imported = self.node_text(child);
+                    if seen_as {
+                        alias = Some(self.node_text(child));
+                    } else {
+                        imported = self.node_text(child);
+                    }
                 }
                 "namespace_aliasing_clause" => {
-                    // Extract alias from "as Alias" clause
+                    // Older grammar: alias wrapped in an "as Alias" clause.
                     let mut alias_cursor = child.walk();
                     for alias_child in child.children(&mut alias_cursor) {
                         if alias_child.kind() == "name" {
@@ -1629,5 +1632,260 @@ function loadFile(string $path): string {
             complexity.exception_handlers
         );
         assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    // --- Parameter / signature / metadata tests ---
+
+    #[test]
+    fn test_visitor_parameter_type_and_default() {
+        let source = b"<?php\nfunction inc(int $x = 5): int { return $x + 1; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "$x");
+        assert_eq!(params[0].type_annotation.as_deref(), Some("int"));
+        assert_eq!(params[0].default_value.as_deref(), Some("5"));
+        assert!(!params[0].is_variadic);
+    }
+
+    #[test]
+    fn test_visitor_variadic_parameter() {
+        let source = b"<?php\nfunction sum(int ...$nums): int { return 0; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "$nums");
+        assert!(params[0].is_variadic);
+    }
+
+    #[test]
+    fn test_visitor_return_type_extraction() {
+        let source = b"<?php\nfunction name(): string { return 'x'; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].return_type.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn test_visitor_function_body_prefix() {
+        let source = b"<?php\nfunction f() { return 42; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(bp.starts_with('{'));
+        assert!(bp.contains("42"));
+    }
+
+    #[test]
+    fn test_visitor_body_prefix_truncated() {
+        // A body longer than BODY_PREFIX_MAX_CHARS is truncated to that byte length.
+        let filler = "x".repeat(BODY_PREFIX_MAX_CHARS * 2);
+        let source = format!("<?php\nfunction f() {{ ${} = 1; }}", filler);
+        let visitor = parse_and_visit(source.as_bytes());
+
+        assert_eq!(visitor.functions.len(), 1);
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(bp.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_visitor_doc_comment_block_attached() {
+        let source = b"<?php\n/** Adds two numbers. */\nfunction add(int $a, int $b): int { return $a + $b; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let doc = visitor.functions[0].doc_comment.as_ref().unwrap();
+        assert!(doc.starts_with("/**"));
+        assert!(doc.contains("Adds two numbers"));
+    }
+
+    #[test]
+    fn test_visitor_line_comment_not_doc() {
+        // A `//` line comment must not be treated as a doc comment.
+        let source = b"<?php\n// not a doc comment\nfunction f(): void {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].doc_comment, None);
+    }
+
+    #[test]
+    fn test_visitor_function_line_numbers() {
+        let source = b"<?php\n\nfunction f(): void {\n    return;\n}\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        // `function f` is on line 3 (1-based), closing brace on line 5.
+        assert_eq!(visitor.functions[0].line_start, 3);
+        assert_eq!(visitor.functions[0].line_end, 5);
+    }
+
+    #[test]
+    fn test_visitor_function_signature_first_line_only() {
+        let source = b"<?php\nfunction greet(string $name): string\n{\n    return $name;\n}\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let sig = &visitor.functions[0].signature;
+        assert_eq!(sig, "function greet(string $name): string");
+        assert!(!sig.contains('{'));
+    }
+
+    #[test]
+    fn test_visitor_namespaced_function_qualified() {
+        let source = b"<?php\nnamespace App\\Util;\nfunction helper(): void {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "App\\Util\\helper");
+    }
+
+    // --- Interface / trait detail tests ---
+
+    #[test]
+    fn test_visitor_interface_extends() {
+        let source = b"<?php\ninterface Base {}\ninterface Extended extends Base {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.traits.len(), 2);
+        let extended = visitor
+            .traits
+            .iter()
+            .find(|t| t.name == "Extended")
+            .unwrap();
+        assert!(extended.parent_traits.contains(&"Base".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_interface_required_methods_abstract() {
+        let source = b"<?php\ninterface Reader { public function read(): string; public function close(): void; }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.traits.len(), 1);
+        let reader = &visitor.traits[0];
+        assert_eq!(reader.required_methods.len(), 2);
+        assert!(reader.required_methods.iter().all(|m| m.is_abstract));
+    }
+
+    #[test]
+    fn test_visitor_multiple_interfaces_implemented() {
+        let source = b"<?php\ninterface A {}\ninterface B {}\nclass C implements A, B {}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.classes.iter().find(|c| c.name == "C").unwrap();
+        assert!(c.implemented_traits.contains(&"A".to_string()));
+        assert!(c.implemented_traits.contains(&"B".to_string()));
+        assert_eq!(
+            visitor
+                .implementations
+                .iter()
+                .filter(|i| i.implementor == "C")
+                .count(),
+            2
+        );
+    }
+
+    // --- Additional complexity tests ---
+
+    #[test]
+    fn test_visitor_complexity_while_loop() {
+        let source = b"<?php\nfunction f(int $n): void { while ($n > 0) { $n--; } }";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.loops >= 1,
+            "expected a loop, got {}",
+            complexity.loops
+        );
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_visitor_complexity_ternary() {
+        let source = b"<?php\nfunction f(bool $b): int { return $b ? 1 : 2; }";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.branches >= 1,
+            "expected a branch from ternary, got {}",
+            complexity.branches
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_logical_operators() {
+        let source = b"<?php\nfunction f(bool $a, bool $b): bool { return $a && $b || $a; }";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.logical_operators >= 1,
+            "expected logical operators, got {}",
+            complexity.logical_operators
+        );
+    }
+
+    // --- Call attribution tests ---
+
+    #[test]
+    fn test_visitor_member_call_on_object() {
+        let source = b"<?php\nfunction run() { $obj->doWork(); }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "doWork"));
+    }
+
+    #[test]
+    fn test_visitor_this_call_skipped_as_callee_name() {
+        // A bare `$this` chain resolves to the method name, never "$this".
+        let source = b"<?php\nclass C { public function run() { $this->step(); } public function step() {} }";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.calls.iter().all(|c| c.callee != "$this"));
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "step"));
+    }
+
+    #[test]
+    fn test_visitor_top_level_call_not_recorded() {
+        // Calls outside any function/method have no caller and are dropped.
+        let source = b"<?php\nhelper();\nfunction helper() {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.calls.len(), 0);
+    }
+
+    #[test]
+    fn test_visitor_enum_method_extracted() {
+        let source = b"<?php\nenum Suit: string {\n    case Hearts = 'H';\n    public function color(): string { return 'red'; }\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(visitor
+            .functions
+            .iter()
+            .any(|f| f.name == "color" && f.parent_class.as_deref() == Some("Suit")));
+    }
+
+    #[test]
+    fn test_visitor_anonymous_function_not_extracted() {
+        // An anonymous function assigned to a variable is skipped, not counted.
+        let source = b"<?php\n$f = function(int $x): int { return $x; };";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 0);
     }
 }
