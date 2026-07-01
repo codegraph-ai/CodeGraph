@@ -171,3 +171,248 @@ pub(crate) fn ir_to_graph(
         byte_count: 0,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{Direction, PropertyValue};
+    use codegraph_parser_api::{
+        ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity, TraitEntity,
+    };
+
+    fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(ir, &mut graph, Path::new("Main.elm")).unwrap();
+        (graph, info)
+    }
+
+    fn name_of(graph: &CodeGraph, id: NodeId) -> String {
+        match graph.get_node(id).unwrap().properties.get("name") {
+            Some(PropertyValue::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn empty_ir_creates_file_node_from_path_stem() {
+        let ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let (graph, info) = build(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("Main".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("language"),
+            Some(&PropertyValue::String("elm".to_string()))
+        );
+        assert!(info.functions.is_empty());
+        assert!(info.classes.is_empty());
+        assert!(info.traits.is_empty());
+        assert!(info.imports.is_empty());
+        assert_eq!(info.line_count, 0);
+        assert_eq!(graph.node_count(), 1);
+    }
+
+    #[test]
+    fn module_drives_file_node_metadata_and_line_count() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let mut module = ModuleEntity::new("Main", "src/Main.elm", "elm");
+        module.line_count = 120;
+        module.doc_comment = Some("app entry".to_string());
+        ir.set_module(module);
+
+        let (graph, info) = build(&ir);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("Main".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("path"),
+            Some(&PropertyValue::String("src/Main.elm".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("line_count"),
+            Some(&PropertyValue::Int(120))
+        );
+        assert_eq!(
+            file.properties.get("doc"),
+            Some(&PropertyValue::String("app entry".to_string()))
+        );
+        assert_eq!(info.line_count, 120);
+    }
+
+    #[test]
+    fn class_maps_to_type_node_dropping_methods() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let mut class = ClassEntity::new("Model", 1, 5).with_visibility("public");
+        class
+            .methods
+            .push(FunctionEntity::new("update", 2, 4).with_visibility("public"));
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        // The elm mapper emits a Type node per class but never iterates class.methods.
+        assert_eq!(info.classes.len(), 1);
+        assert!(info.functions.is_empty());
+
+        let class_id = info.classes[0];
+        let node = graph.get_node(class_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Type);
+        assert_eq!(name_of(&graph, class_id), "Model");
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("public".to_string()))
+        );
+
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        assert!(neighbors.contains(&class_id));
+        // file + type node only, no method Function node.
+        assert_eq!(graph.node_count(), 2);
+    }
+
+    #[test]
+    fn traits_are_ignored_by_the_mapper() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        ir.add_trait(TraitEntity::new("Comparable", 1, 3));
+
+        let (graph, info) = build(&ir);
+        // The elm mapper never iterates ir.traits, so no Interface node exists.
+        assert!(info.traits.is_empty());
+        assert_eq!(graph.node_count(), 1);
+        assert!(graph
+            .nodes_iter()
+            .all(|(_, node)| node.node_type != NodeType::Interface));
+    }
+
+    #[test]
+    fn free_function_is_contained_by_file_with_complexity_and_flags() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 12,
+            branches: 6,
+            loops: 2,
+            ..Default::default()
+        };
+        let func = FunctionEntity::new("update", 1, 30)
+            .with_signature("update : Msg -> Model -> Model")
+            .with_complexity(metrics);
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.functions.len(), 1);
+
+        let func_id = info.functions[0];
+        // Elm keeps function names bare (no qualification).
+        assert_eq!(name_of(&graph, func_id), "update");
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        assert!(neighbors.contains(&func_id));
+
+        let node = graph.get_node(func_id).unwrap();
+        assert_eq!(
+            node.properties.get("complexity"),
+            Some(&PropertyValue::Int(12))
+        );
+        // Grade 12 falls in the C band.
+        assert_eq!(
+            node.properties.get("complexity_grade"),
+            Some(&PropertyValue::String("C".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("is_async"),
+            Some(&PropertyValue::Bool(false))
+        );
+        assert_eq!(
+            node.properties.get("is_static"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn function_records_signature_visibility_and_line_bounds() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        let func = FunctionEntity::new("view", 3, 9)
+            .with_signature("view : Model -> Html Msg")
+            .with_visibility("public");
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("signature"),
+            Some(&PropertyValue::String(
+                "view : Model -> Html Msg".to_string()
+            ))
+        );
+        assert_eq!(
+            node.properties.get("visibility"),
+            Some(&PropertyValue::String("public".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("line_start"),
+            Some(&PropertyValue::Int(3))
+        );
+        assert_eq!(
+            node.properties.get("line_end"),
+            Some(&PropertyValue::Int(9))
+        );
+        assert_eq!(
+            node.properties.get("is_abstract"),
+            Some(&PropertyValue::Bool(false))
+        );
+        // No complexity supplied, so complexity props are absent.
+        assert_eq!(node.properties.get("complexity"), None);
+        assert_eq!(node.properties.get("complexity_grade"), None);
+    }
+
+    #[test]
+    fn import_creates_external_module_with_empty_edge_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        ir.add_import(ImportRelation::new("Main", "Html").with_symbols(vec!["div".to_string()]));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+
+        let import_id = info.imports[0];
+        let import_node = graph.get_node(import_id).unwrap();
+        assert_eq!(import_node.node_type, NodeType::Module);
+        assert_eq!(
+            import_node.properties.get("name"),
+            Some(&PropertyValue::String("Html".to_string()))
+        );
+        assert_eq!(
+            import_node.properties.get("is_external"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+
+        let edge_ids = graph.get_edges_between(info.file_id, import_id).unwrap();
+        assert_eq!(edge_ids.len(), 1);
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        // The elm mapper records NO props on the Imports edge (symbols dropped).
+        assert_eq!(edge.properties.get("symbols"), None);
+        assert_eq!(edge.properties.get("alias"), None);
+        assert_eq!(edge.properties.get("is_wildcard"), None);
+    }
+
+    #[test]
+    fn duplicate_import_target_reuses_existing_node() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Main.elm"));
+        ir.add_import(ImportRelation::new("Main", "Json.Decode"));
+        ir.add_import(ImportRelation::new("Main", "Json.Decode"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 2);
+        assert_eq!(info.imports[0], info.imports[1]);
+        let edges = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(edges.len(), 2);
+    }
+}
