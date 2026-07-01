@@ -179,6 +179,46 @@ mod tests {
     }
 
     #[test]
+    fn test_source_some_for_from_variants() {
+        use std::error::Error as _;
+
+        // Io is a #[from] variant, so thiserror wires its wrapped io::Error as source().
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let lsp_err: LspError = io_err.into();
+        let source = lsp_err.source().expect("Io should carry a source");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("source should downcast to io::Error");
+        assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // Parser is a #[from] variant wrapping ParserError.
+        let lsp_err: LspError = ParserError::GraphError("boom".to_string()).into();
+        let source = lsp_err.source().expect("Parser should carry a source");
+        let parser = source
+            .downcast_ref::<ParserError>()
+            .expect("source should downcast to ParserError");
+        assert!(matches!(parser, ParserError::GraphError(_)));
+    }
+
+    #[test]
+    fn test_source_none_for_terminal_variants() {
+        use std::error::Error as _;
+
+        // Variants without a #[from]/#[source] field terminate the error chain.
+        assert!(LspError::SymbolNotFound.source().is_none());
+        assert!(LspError::FileNotIndexed(PathBuf::from("/x.rs"))
+            .source()
+            .is_none());
+        assert!(LspError::Graph("g".to_string()).source().is_none());
+        assert!(LspError::InvalidUri("u".to_string()).source().is_none());
+        assert!(LspError::UnsupportedLanguage("l".to_string())
+            .source()
+            .is_none());
+        assert!(LspError::Cache("c".to_string()).source().is_none());
+        assert!(LspError::NodeNotFound("n".to_string()).source().is_none());
+    }
+
+    #[test]
     fn test_lsp_result_type_ok() {
         fn returns_ok() -> LspResult<i32> {
             Ok(42)
