@@ -474,6 +474,7 @@ impl<'a> PerlVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> PerlVisitor<'_> {
         let mut parser = tree_sitter::Parser::new();
@@ -505,7 +506,7 @@ mod tests {
     fn test_visitor_use_extraction() {
         let source = b"use Moose;\nuse Data::Dumper;\n";
         let visitor = parse_and_visit(source);
-        assert!(visitor.imports.len() >= 1);
+        assert!(!visitor.imports.is_empty());
     }
 
     #[test]
@@ -699,5 +700,97 @@ mod tests {
         assert!(!c.is_abstract);
         assert!(!c.is_interface);
         assert!(c.base_classes.is_empty());
+    }
+
+    #[test]
+    fn test_line_numbers_offset_by_leading_blank_lines() {
+        // Two blank lines push the sub to line 3 (1-indexed); the body's closing
+        // brace lands on line 5.
+        let source = b"\n\nsub greet {\n    return 1;\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].line_start, 3);
+        assert_eq!(visitor.functions[0].line_end, 5);
+    }
+
+    #[test]
+    fn test_complexity_unless_increases() {
+        let source =
+            b"sub guard {\n    unless ($x) {\n        return 1;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_logical_operator_increases() {
+        // A `&&` inside a binary_expression body raises cyclomatic complexity.
+        let source = b"sub combine {\n    my $c = $a && $b;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        // A body whose block text exceeds BODY_PREFIX_MAX_CHARS is truncated exactly.
+        let filler = "x".repeat(BODY_PREFIX_MAX_CHARS + 200);
+        let source = format!("sub big {{\n    my $s = \"{}\";\n}}\n", filler);
+        let visitor = parse_and_visit(source.as_bytes());
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(bp.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_two_packages_emit_two_classes() {
+        let source =
+            b"package Foo;\nsub a {\n    return 1;\n}\npackage Bar;\nsub b {\n    return 2;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 2);
+    }
+
+    #[test]
+    fn test_function_attributed_to_enclosing_package() {
+        // The sub after the second package declaration is qualified with that package.
+        let source =
+            b"package Foo;\nsub a {\n    return 1;\n}\npackage Bar;\nsub b {\n    return 2;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].name, "Foo::a");
+        assert_eq!(visitor.functions[1].name, "Bar::b");
+        assert_eq!(visitor.functions[1].parent_class.as_deref(), Some("Bar"));
+    }
+
+    #[test]
+    fn test_require_importer_is_current_package() {
+        // A bareword require inside a package is attributed to that package.
+        let source = b"package MyApp;\nrequire Foo::Bar;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Foo::Bar");
+        assert_eq!(visitor.imports[0].importer, "MyApp");
+    }
+
+    #[test]
+    fn test_call_site_line_recorded() {
+        let source = b"sub run {\n    helper();\n}\n";
+        let visitor = parse_and_visit(source);
+        let call = visitor.calls.iter().find(|c| c.callee == "helper").unwrap();
+        assert_eq!(call.call_site_line, 2);
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_is_test_capital_test_prefix() {
+        let source = b"sub TestLogin {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_nested_call_attributed_to_function() {
+        // A call inside an if block still belongs to the enclosing sub.
+        let source = b"sub run {\n    if ($x) {\n        helper();\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.iter().any(|c| c.callee == "helper"));
+        assert!(visitor.calls.iter().all(|c| c.caller == "run"));
     }
 }
