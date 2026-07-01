@@ -299,6 +299,63 @@ public class Dog : Animal
     }
 
     #[test]
+    fn test_module_metadata_full_fields() {
+        // test_extract_module_info only asserts name/language/line_count>0; pin the
+        // remaining ModuleEntity fields assembled in extract().
+        let source = "public class Test\n{\n}\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("Test.cs"), &config).unwrap();
+        let module = ir.module.unwrap();
+        assert_eq!(module.path, Path::new("Test.cs").display().to_string());
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        // A path with no file_stem exercises the unwrap_or("unknown") arm.
+        let config = ParserConfig::default();
+        let ir = extract("public class X {}", Path::new(".."), &config).unwrap();
+        assert_eq!(ir.module.unwrap().name, "unknown");
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        // An empty source parses without error: module present, everything else empty.
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new("Empty.cs"), &config).unwrap();
+        let module = ir.module.unwrap();
+        assert_eq!(module.line_count, 0);
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+        assert!(ir.inheritance.is_empty());
+        assert!(ir.implementations.is_empty());
+    }
+
+    #[test]
+    fn test_line_count_tracks_blank_lines() {
+        // line_count derives from source.lines().count(), independent of entity count.
+        let source = "\n\n\npublic class C\n{\n}\n\n\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("C.cs"), &config).unwrap();
+        assert_eq!(ir.module.unwrap().line_count, source.lines().count());
+        assert_eq!(ir.classes.len(), 1);
+    }
+
+    #[test]
+    fn test_syntax_error_returns_err() {
+        // has_error() -> ParserError::SyntaxError: an unclosed class body never
+        // reaches the Ok path that empty/valid sources take.
+        let config = ParserConfig::default();
+        let result = extract("public class Broken {", Path::new("Broken.cs"), &config);
+        assert!(matches!(result, Err(ParserError::SyntaxError(..))));
+    }
+
+    #[test]
     fn test_extract_calls() {
         let source = r#"
 public class MyClass
