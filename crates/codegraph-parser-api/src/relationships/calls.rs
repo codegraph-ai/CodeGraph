@@ -124,4 +124,32 @@ mod tests {
         let back: CallRelation = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);
     }
+
+    #[test]
+    fn default_serializes_snake_case_wire_names_with_null_options() {
+        // Pins the exact JSON wire format for a plain (no-vtable) call: every
+        // multi-word field must stay snake_case and the two Option fields must
+        // serialize as explicit null. The only prior serde test used with_vtable,
+        // so the None arm and the exact field names were never asserted.
+        let c = CallRelation::new("a", "b", 7);
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(
+            json,
+            r#"{"caller":"a","callee":"b","call_site_line":7,"is_direct":true,"struct_type":null,"field_name":null}"#
+        );
+        let back: CallRelation = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn vtable_serializes_populated_options_exactly() {
+        // Pins the Some arm of struct_type/field_name and is_direct:false.
+        let c = CallRelation::new("register", "ndo_open", 42)
+            .with_vtable("net_device_ops".to_string(), "ndo_open".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(
+            json,
+            r#"{"caller":"register","callee":"ndo_open","call_site_line":42,"is_direct":false,"struct_type":"net_device_ops","field_name":"ndo_open"}"#
+        );
+    }
 }
