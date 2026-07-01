@@ -5069,4 +5069,165 @@ mod quarantine_tests {
         );
         assert!(tmp.path().join("graph.db.notagen").exists());
     }
+
+    #[test]
+    fn classify_tool_error_maps_each_category() {
+        use super::classify_tool_error;
+        // server_unavailable: any of the three phrases, case-insensitive.
+        assert_eq!(
+            classify_tool_error("Server NOT INITIALIZED"),
+            "server_unavailable"
+        );
+        assert_eq!(
+            classify_tool_error("daemon not running"),
+            "server_unavailable"
+        );
+        assert_eq!(
+            classify_tool_error("engine unavailable"),
+            "server_unavailable"
+        );
+        // not_indexed
+        assert_eq!(classify_tool_error("graph not indexed yet"), "not_indexed");
+        assert_eq!(classify_tool_error("index is empty"), "not_indexed");
+        // not_found
+        assert_eq!(classify_tool_error("no symbols found"), "not_found");
+        assert_eq!(classify_tool_error("symbol does not exist"), "not_found");
+        assert_eq!(classify_tool_error("no such node"), "not_found");
+        // invalid_params
+        assert_eq!(classify_tool_error("Invalid URI scheme"), "invalid_params");
+        assert_eq!(
+            classify_tool_error("missing required field"),
+            "invalid_params"
+        );
+        // timeout
+        assert_eq!(classify_tool_error("operation timed out"), "timeout");
+        // parse_error
+        assert_eq!(classify_tool_error("failed to parse source"), "parse_error");
+        // internal_error
+        assert_eq!(
+            classify_tool_error("an internal error occurred"),
+            "internal_error"
+        );
+        // fallthrough
+        assert_eq!(classify_tool_error("something unexpected"), "other");
+    }
+
+    #[test]
+    fn safe_tool_name_passes_only_wellformed_codegraph_ids() {
+        use super::safe_tool_name;
+        assert_eq!(
+            safe_tool_name("codegraph_symbol_search"),
+            "codegraph_symbol_search"
+        );
+        // Wrong prefix, dash, space, and non-ascii are all rejected.
+        assert_eq!(safe_tool_name("not_codegraph_foo"), "other");
+        assert_eq!(safe_tool_name("codegraph_with-dash"), "other");
+        assert_eq!(safe_tool_name("codegraph_ evil"), "other");
+        // Over the 64-byte length cap.
+        let long = format!("codegraph_{}", "x".repeat(60));
+        assert_eq!(safe_tool_name(&long), "other");
+    }
+
+    #[test]
+    fn parse_node_id_accepts_u64_only() {
+        use super::parse_node_id;
+        assert_eq!(parse_node_id("12345"), Some(12345));
+        assert_eq!(parse_node_id("0"), Some(0));
+        assert_eq!(parse_node_id("notanumber"), None);
+        assert_eq!(parse_node_id("-1"), None);
+        assert_eq!(parse_node_id(""), None);
+    }
+
+    #[test]
+    fn parse_symbol_type_maps_aliases() {
+        use crate::ai_query::SymbolType;
+        let p = super::McpServer::parse_symbol_type;
+        assert_eq!(p("function"), Some(SymbolType::Function));
+        assert_eq!(p("method"), Some(SymbolType::Function));
+        assert_eq!(p("class"), Some(SymbolType::Class));
+        assert_eq!(p("struct"), Some(SymbolType::Class));
+        assert_eq!(p("variable"), Some(SymbolType::Variable));
+        assert_eq!(p("constant"), Some(SymbolType::Variable));
+        assert_eq!(p("MODULE"), Some(SymbolType::Module));
+        assert_eq!(p("namespace"), Some(SymbolType::Module));
+        assert_eq!(p("interface"), Some(SymbolType::Interface));
+        assert_eq!(p("trait"), Some(SymbolType::Interface));
+        assert_eq!(p("type"), Some(SymbolType::Type));
+        assert_eq!(p("enum"), Some(SymbolType::Type));
+        assert_eq!(p("bogus"), None);
+    }
+
+    #[test]
+    fn parse_kind_str_accepts_snake_and_pascal_case() {
+        use crate::memory::MemoryKindFilter;
+        let p = super::McpServer::parse_kind_str;
+        assert_eq!(p("debug_context"), Some(MemoryKindFilter::DebugContext));
+        assert_eq!(p("DebugContext"), Some(MemoryKindFilter::DebugContext));
+        assert_eq!(
+            p("architectural_decision"),
+            Some(MemoryKindFilter::ArchitecturalDecision)
+        );
+        assert_eq!(p("known_issue"), Some(MemoryKindFilter::KnownIssue));
+        assert_eq!(p("Convention"), Some(MemoryKindFilter::Convention));
+        assert_eq!(p("project_context"), Some(MemoryKindFilter::ProjectContext));
+        assert_eq!(p("nonexistent"), None);
+    }
+
+    #[test]
+    fn parse_kinds_filter_drops_unknowns_and_defaults_empty() {
+        use crate::memory::MemoryKindFilter;
+        let args = serde_json::json!({
+            "kinds": ["debug_context", "bogus", "convention", 42]
+        });
+        assert_eq!(
+            super::McpServer::parse_kinds_filter(&args),
+            vec![MemoryKindFilter::DebugContext, MemoryKindFilter::Convention]
+        );
+        // Missing key and non-array both yield an empty vec.
+        assert!(super::McpServer::parse_kinds_filter(&serde_json::json!({})).is_empty());
+        assert!(super::McpServer::parse_kinds_filter(
+            &serde_json::json!({"kinds": "debug_context"})
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn parse_tags_filter_keeps_strings_only() {
+        let args = serde_json::json!({"tags": ["a", "b", 3, true]});
+        assert_eq!(
+            super::McpServer::parse_tags_filter(&args),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(super::McpServer::parse_tags_filter(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn kind_matches_filter_pairs_variants() {
+        use crate::memory::{IssueSeverity, MemoryKind, MemoryKindFilter};
+        let debug = MemoryKind::DebugContext {
+            problem_description: "p".into(),
+            root_cause: None,
+            solution: "s".into(),
+            symptoms: vec![],
+            related_errors: vec![],
+        };
+        let issue = MemoryKind::KnownIssue {
+            description: "d".into(),
+            severity: IssueSeverity::High,
+            workaround: None,
+            tracking_id: None,
+        };
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::DebugContext,
+            &debug
+        ));
+        assert!(!super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::DebugContext,
+            &issue
+        ));
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::KnownIssue,
+            &issue
+        ));
+    }
 }
