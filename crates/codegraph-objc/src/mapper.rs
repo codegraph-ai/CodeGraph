@@ -239,3 +239,296 @@ pub(crate) fn ir_to_graph(
         byte_count: 0,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{Direction, PropertyValue};
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
+        TraitEntity,
+    };
+
+    fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(ir, &mut graph, Path::new("Widget.m")).unwrap();
+        (graph, info)
+    }
+
+    fn name_of(graph: &CodeGraph, id: NodeId) -> String {
+        match graph.get_node(id).unwrap().properties.get("name") {
+            Some(PropertyValue::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn empty_ir_creates_file_node_from_path_stem() {
+        let ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        let (graph, info) = build(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("Widget".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("language"),
+            Some(&PropertyValue::String("objc".to_string()))
+        );
+        assert!(info.functions.is_empty());
+        assert!(info.classes.is_empty());
+        assert!(info.traits.is_empty());
+        assert!(info.imports.is_empty());
+        assert_eq!(info.line_count, 0);
+        assert_eq!(graph.node_count(), 1);
+    }
+
+    #[test]
+    fn module_drives_file_node_metadata_and_line_count() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        let mut module = ModuleEntity::new("Widget", "src/Widget.m", "objc");
+        module.line_count = 140;
+        module.doc_comment = Some("widget impl".to_string());
+        ir.set_module(module);
+
+        let (graph, info) = build(&ir);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("Widget".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("path"),
+            Some(&PropertyValue::String("src/Widget.m".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("line_count"),
+            Some(&PropertyValue::Int(140))
+        );
+        assert_eq!(
+            file.properties.get("doc"),
+            Some(&PropertyValue::String("widget impl".to_string()))
+        );
+        assert_eq!(info.line_count, 140);
+    }
+
+    #[test]
+    fn interface_class_is_contained_by_file_with_superclass_but_no_methods() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        let mut class = ClassEntity::new("Widget", 1, 20)
+            .with_visibility("public")
+            .with_bases(vec!["NSObject".to_string()]);
+        // Objective-C @interface methods that the mapper must NOT emit as nodes.
+        class
+            .methods
+            .push(FunctionEntity::new("render", 2, 4).with_visibility("public"));
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.classes.len(), 1);
+        // The objc mapper never iterates class.methods, so no Function node exists.
+        assert!(info.functions.is_empty());
+        assert_eq!(graph.node_count(), 2);
+
+        let class_id = info.classes[0];
+        let node = graph.get_node(class_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Class);
+        // base_classes[0] is recorded as the "superclass" property.
+        assert_eq!(
+            node.properties.get("superclass"),
+            Some(&PropertyValue::String("NSObject".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("is_interface"),
+            Some(&PropertyValue::Bool(false))
+        );
+
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        assert!(neighbors.contains(&class_id));
+    }
+
+    #[test]
+    fn protocol_creates_interface_node_contained_by_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        ir.add_trait(TraitEntity::new("Drawable", 1, 5).with_visibility("public"));
+
+        let (graph, info) = build(&ir);
+        // Unlike the minimal mappers, objc maps @protocol -> Interface node.
+        assert_eq!(info.traits.len(), 1);
+        assert_eq!(graph.node_count(), 2);
+
+        let trait_id = info.traits[0];
+        let node = graph.get_node(trait_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Interface);
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&PropertyValue::String("Drawable".to_string()))
+        );
+
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        assert!(neighbors.contains(&trait_id));
+    }
+
+    #[test]
+    fn free_function_is_contained_by_file_with_complexity_and_flag_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 12,
+            branches: 6,
+            loops: 2,
+            ..Default::default()
+        };
+        let func = FunctionEntity::new("compute_area", 1, 30)
+            .with_signature("int compute_area(void)")
+            .with_complexity(metrics);
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.functions.len(), 1);
+
+        let func_id = info.functions[0];
+        // A function with no parent_class keeps its bare name as node_map key.
+        assert_eq!(name_of(&graph, func_id), "compute_area");
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        assert!(neighbors.contains(&func_id));
+
+        let node = graph.get_node(func_id).unwrap();
+        assert_eq!(
+            node.properties.get("complexity"),
+            Some(&PropertyValue::Int(12))
+        );
+        // Grade 12 falls in the C band.
+        assert_eq!(
+            node.properties.get("complexity_grade"),
+            Some(&PropertyValue::String("C".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("is_async"),
+            Some(&PropertyValue::Bool(false))
+        );
+        assert_eq!(
+            node.properties.get("is_static"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn method_is_contained_by_its_parent_class_not_the_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        ir.add_class(ClassEntity::new("Widget", 1, 40).with_visibility("public"));
+        let method = FunctionEntity::new("render", 5, 10)
+            .with_signature("- (void)render")
+            .with_parent_class("Widget");
+        ir.add_function(method);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.classes.len(), 1);
+        assert_eq!(info.functions.len(), 1);
+
+        let class_id = info.classes[0];
+        let func_id = info.functions[0];
+        // The method is a child of the class node, not of the file node.
+        let class_children = graph.get_neighbors(class_id, Direction::Outgoing).unwrap();
+        assert!(class_children.contains(&func_id));
+
+        let node = graph.get_node(func_id).unwrap();
+        assert_eq!(
+            node.properties.get("parent_class"),
+            Some(&PropertyValue::String("Widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn import_creates_external_module_with_empty_edge_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        ir.add_import(
+            ImportRelation::new("Widget", "Foundation").with_symbols(vec!["NSString".to_string()]),
+        );
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+
+        let import_id = info.imports[0];
+        let import_node = graph.get_node(import_id).unwrap();
+        assert_eq!(import_node.node_type, NodeType::Module);
+        assert_eq!(
+            import_node.properties.get("name"),
+            Some(&PropertyValue::String("Foundation".to_string()))
+        );
+        assert_eq!(
+            import_node.properties.get("is_external"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+
+        let edge_ids = graph.get_edges_between(info.file_id, import_id).unwrap();
+        assert_eq!(edge_ids.len(), 1);
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        // The objc mapper records NO props on the Imports edge (symbols dropped).
+        assert_eq!(edge.properties.get("symbols"), None);
+        assert_eq!(edge.properties.get("alias"), None);
+        assert_eq!(edge.properties.get("is_wildcard"), None);
+    }
+
+    #[test]
+    fn call_relation_wires_calls_edge_only_between_known_nodes() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        ir.add_call(CallRelation::new("caller", "callee", 3));
+        // Unknown callee -> silently skipped.
+        ir.add_call(CallRelation::new("caller", "ghost", 4));
+
+        let (graph, info) = build(&ir);
+        let caller_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "caller")
+            .unwrap();
+        let callee_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "callee")
+            .unwrap();
+
+        let call_edges: Vec<_> = graph
+            .get_edges_between(caller_id, callee_id)
+            .unwrap()
+            .into_iter()
+            .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Calls)
+            .collect();
+        assert_eq!(call_edges.len(), 1);
+        let edge = graph.get_edge(call_edges[0]).unwrap();
+        assert_eq!(
+            edge.properties.get("call_site_line"),
+            Some(&PropertyValue::Int(3))
+        );
+
+        let outgoing = graph.get_neighbors(caller_id, Direction::Outgoing).unwrap();
+        assert_eq!(outgoing, vec![callee_id]);
+    }
+
+    #[test]
+    fn duplicate_import_target_reuses_existing_node() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Widget.m"));
+        ir.add_import(ImportRelation::new("Widget", "UIKit"));
+        ir.add_import(ImportRelation::new("Widget", "UIKit"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 2);
+        assert_eq!(info.imports[0], info.imports[1]);
+        let edges = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(edges.len(), 2);
+    }
+}
