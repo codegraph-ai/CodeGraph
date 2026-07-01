@@ -54,3 +54,52 @@ impl ProToolProvider for NoopProProvider {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noop_provider_lists_no_tools() {
+        // The community server injects zero premium tools; the whole point
+        // of the noop provider is that `tools()` is empty so the MCP tool
+        // surface carries only the community tools.
+        assert!(NoopProProvider.tools().is_empty());
+    }
+
+    #[test]
+    fn noop_provider_reports_community_edition() {
+        // `edition()` is left unoverridden, so it falls through to the
+        // trait's default which reports "community" for capability
+        // reporting. Pin the exact string the server advertises.
+        assert_eq!(NoopProProvider.edition(), "community");
+    }
+
+    #[test]
+    fn pro_tool_info_carries_its_three_fields_through_clone() {
+        // ProToolInfo is populated by the pro server and read by the
+        // community server's tool-listing code, so its derived Clone must
+        // preserve all three fields verbatim (name/description/schema).
+        let info = ProToolInfo {
+            name: "codegraph/premium".to_string(),
+            description: "premium tool".to_string(),
+            schema: serde_json::json!({ "type": "object" }),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.name, "codegraph/premium");
+        assert_eq!(cloned.description, "premium tool");
+        assert_eq!(cloned.schema, serde_json::json!({ "type": "object" }));
+    }
+
+    #[test]
+    fn pro_tool_info_debug_includes_the_name() {
+        // The derived Debug is used in tracing/diagnostics; confirm it
+        // renders the tool name rather than an opaque struct address.
+        let info = ProToolInfo {
+            name: "codegraph/premium".to_string(),
+            description: String::new(),
+            schema: Value::Null,
+        };
+        assert!(format!("{info:?}").contains("codegraph/premium"));
+    }
+}
