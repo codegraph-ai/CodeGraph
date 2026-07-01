@@ -620,4 +620,245 @@ mod tests {
         assert_eq!(memory.id, deserialized.id);
         assert_eq!(memory.title, deserialized.title);
     }
+
+    #[test]
+    fn test_memory_id_from_uuid_and_default() {
+        let uuid = uuid::Uuid::nil();
+        let id = MemoryId::from_uuid(uuid);
+        assert_eq!(id.0, uuid);
+        // Default generates a fresh random id, so two defaults differ.
+        assert_ne!(MemoryId::default(), MemoryId::default());
+    }
+
+    #[test]
+    fn test_memory_id_parse_invalid() {
+        let result: Result<MemoryId, _> = "not-a-uuid".parse::<MemoryId>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_memory_kind_discriminant_name() {
+        let arch = MemoryNode::builder()
+            .architectural_decision("d", "r")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(arch.kind.discriminant_name(), "architectural_decision");
+
+        let dbg = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(dbg.kind.discriminant_name(), "debug_context");
+
+        let issue = MemoryNode::builder()
+            .known_issue("d", IssueSeverity::Low)
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(issue.kind.discriminant_name(), "known_issue");
+
+        let conv = MemoryNode::builder()
+            .convention("n", "d")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(conv.kind.discriminant_name(), "convention");
+
+        let proj = MemoryNode::builder()
+            .project_context("topic", "desc")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(proj.kind.discriminant_name(), "project_context");
+    }
+
+    #[test]
+    fn test_builder_convention_and_project_context() {
+        let conv = MemoryNode::builder()
+            .convention("naming", "use snake_case")
+            .title("Naming convention")
+            .content("Rust files use snake_case")
+            .build()
+            .unwrap();
+        if let MemoryKind::Convention {
+            name,
+            description,
+            pattern,
+            anti_pattern,
+        } = conv.kind
+        {
+            assert_eq!(name, "naming");
+            assert_eq!(description, "use snake_case");
+            assert!(pattern.is_none());
+            assert!(anti_pattern.is_none());
+        } else {
+            panic!("Expected Convention");
+        }
+
+        let proj = MemoryNode::builder()
+            .project_context("build", "cargo workspace")
+            .title("Build layout")
+            .content("The workspace has many crates")
+            .build()
+            .unwrap();
+        if let MemoryKind::ProjectContext {
+            topic,
+            description,
+            tags,
+        } = proj.kind
+        {
+            assert_eq!(topic, "build");
+            assert_eq!(description, "cargo workspace");
+            assert!(tags.is_empty());
+        } else {
+            panic!("Expected ProjectContext");
+        }
+    }
+
+    #[test]
+    fn test_builder_missing_title_and_content() {
+        let missing_title = MemoryNode::builder()
+            .debug_context("p", "s")
+            .content("content only")
+            .build();
+        assert!(matches!(
+            missing_title,
+            Err(MemoryNodeBuilderError::MissingTitle)
+        ));
+
+        let missing_content = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("title only")
+            .build();
+        assert!(matches!(
+            missing_content,
+            Err(MemoryNodeBuilderError::MissingContent)
+        ));
+    }
+
+    #[test]
+    fn test_builder_source_helpers_and_defaults() {
+        // Default source is UserProvided { author: None } and confidence 1.0.
+        let default_src = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert!(matches!(
+            default_src.source,
+            MemorySource::UserProvided { author: None }
+        ));
+        assert_eq!(default_src.confidence, 1.0);
+
+        let user = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .user_provided(Some("alice".to_string()))
+            .build()
+            .unwrap();
+        assert!(matches!(
+            user.source,
+            MemorySource::UserProvided { author: Some(a) } if a == "alice"
+        ));
+
+        let git = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .from_git("abc123")
+            .build()
+            .unwrap();
+        assert!(matches!(
+            git.source,
+            MemorySource::GitHistory { commit_hash } if commit_hash == "abc123"
+        ));
+    }
+
+    #[test]
+    fn test_builder_at_commit_and_agent_source() {
+        let memory = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .at_commit("deadbeef")
+            .agent_source("claude")
+            .build()
+            .unwrap();
+        assert_eq!(memory.temporal.commit_hash.as_deref(), Some("deadbeef"));
+        assert_eq!(memory.agent_source.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn test_builder_confidence_clamped() {
+        let over = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .confidence(5.0)
+            .build()
+            .unwrap();
+        assert_eq!(over.confidence, 1.0);
+
+        let under = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .confidence(-1.0)
+            .build()
+            .unwrap();
+        assert_eq!(under.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_code_link_relevance_clamped() {
+        let high = CodeLink::new("n", LinkedNodeType::Class).with_relevance(2.5);
+        assert_eq!(high.relevance, 1.0);
+        let low = CodeLink::new("n", LinkedNodeType::Class).with_relevance(-0.5);
+        assert_eq!(low.relevance, 0.0);
+        // Fresh links default to full relevance and no line range.
+        let plain = CodeLink::new("n", LinkedNodeType::Trait);
+        assert_eq!(plain.relevance, 1.0);
+        assert!(plain.line_range.is_none());
+    }
+
+    #[test]
+    fn test_is_current_tracks_temporal() {
+        let mut memory = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert!(memory.is_current());
+        memory.temporal.invalidate();
+        assert!(!memory.is_current());
+    }
+
+    #[test]
+    fn test_defaults_issue_severity_and_source() {
+        assert_eq!(IssueSeverity::default(), IssueSeverity::Medium);
+        assert!(matches!(
+            MemorySource::default(),
+            MemorySource::UserProvided { author: None }
+        ));
+    }
+
+    #[test]
+    fn test_memory_source_serde_tag() {
+        let json = serde_json::to_value(MemorySource::GitHistory {
+            commit_hash: "abc".to_string(),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "git_history");
+        assert_eq!(json["commit_hash"], "abc");
+    }
 }
