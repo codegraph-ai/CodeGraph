@@ -384,4 +384,160 @@ mod tests {
         assert_eq!(result.functions[0].name, "alpha");
         assert_eq!(result.functions[1].name, "zeta");
     }
+
+    #[test]
+    fn signature_and_path_are_propagated_to_result() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let mut props = PropertyMap::new();
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String("target".to_string()),
+        );
+        props.insert(
+            "path".to_string(),
+            PropertyValue::String("/pkg/mod.rs".to_string()),
+        );
+        props.insert(
+            "signature".to_string(),
+            PropertyValue::String("fn target(x: u32) -> u32".to_string()),
+        );
+        let target = g.add_node(NodeType::Function, props).expect("add_node");
+        let caller = add_fn(&mut g, "caller", 1);
+        edge(&mut g, caller, target, EdgeType::Calls);
+
+        let result = find_hot_paths(&g, 10);
+        let t = result
+            .functions
+            .iter()
+            .find(|f| f.name == "target")
+            .expect("target present");
+        assert_eq!(t.path, "/pkg/mod.rs");
+        assert_eq!(t.signature, "fn target(x: u32) -> u32");
+        // node_id renders the underlying NodeId.
+        assert_eq!(t.node_id, target.to_string());
+    }
+
+    #[test]
+    fn missing_props_yield_empty_name_and_zero_lines() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Bare Function node with no name/path/line/signature properties.
+        let bare = g
+            .add_node(NodeType::Function, PropertyMap::new())
+            .expect("add_node");
+        let caller = add_fn(&mut g, "caller", 1);
+        edge(&mut g, caller, bare, EdgeType::Calls);
+
+        let result = find_hot_paths(&g, 10);
+        let b = result
+            .functions
+            .iter()
+            .find(|f| f.node_id == bare.to_string())
+            .expect("bare present");
+        assert_eq!(b.name, "");
+        assert_eq!(b.path, "");
+        assert_eq!(b.signature, "");
+        assert_eq!(b.line_start, 0);
+        assert_eq!(b.line_end, 0);
+        // Still scored as a direct-called function.
+        assert_eq!(b.direct_callers, 1);
+    }
+
+    #[test]
+    fn diamond_depth2_caller_counted_once() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // a reaches target through two distinct depth-2 paths: a->b->target, a->c->target.
+        let a = add_fn(&mut g, "a", 1);
+        let b = add_fn(&mut g, "b", 10);
+        let c = add_fn(&mut g, "c", 20);
+        let target = add_fn(&mut g, "target", 30);
+        edge(&mut g, a, b, EdgeType::Calls);
+        edge(&mut g, a, c, EdgeType::Calls);
+        edge(&mut g, b, target, EdgeType::Calls);
+        edge(&mut g, c, target, EdgeType::Calls);
+
+        let result = find_hot_paths(&g, 10);
+        let t = result
+            .functions
+            .iter()
+            .find(|f| f.name == "target")
+            .expect("target present");
+        // direct: b, c (2.0); depth-2: a counted once (0.5) despite two paths = 2.5
+        assert_eq!(t.direct_callers, 2);
+        assert_eq!(t.transitive_callers, 1);
+        assert_eq!(t.score, 2.5);
+    }
+
+    #[test]
+    fn direct_caller_also_on_transitive_path_counts_once() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // a calls target directly AND via a->b->target; a stays a single direct caller.
+        let a = add_fn(&mut g, "a", 1);
+        let b = add_fn(&mut g, "b", 10);
+        let target = add_fn(&mut g, "target", 20);
+        edge(&mut g, a, target, EdgeType::Calls);
+        edge(&mut g, a, b, EdgeType::Calls);
+        edge(&mut g, b, target, EdgeType::Calls);
+
+        let result = find_hot_paths(&g, 10);
+        let t = result
+            .functions
+            .iter()
+            .find(|f| f.name == "target")
+            .expect("target present");
+        // direct: a, b (2.0); a is not re-counted at depth 2, so no transitive callers.
+        assert_eq!(t.direct_callers, 2);
+        assert_eq!(t.transitive_callers, 0);
+        assert_eq!(t.score, 2.0);
+    }
+
+    #[test]
+    fn equal_scores_break_ties_by_direct_callers() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // xray: 2 direct callers => score 2.0, direct=2.
+        let xray = add_fn(&mut g, "xray", 100);
+        let f1 = add_fn(&mut g, "f1", 1);
+        let f2 = add_fn(&mut g, "f2", 2);
+        edge(&mut g, f1, xray, EdgeType::Calls);
+        edge(&mut g, f2, xray, EdgeType::Calls);
+
+        // yankee: 1 direct + 2 depth-2 callers => score 1 + 1.0 = 2.0, direct=1.
+        let yankee = add_fn(&mut g, "yankee", 200);
+        let d1 = add_fn(&mut g, "d1", 3);
+        let e1 = add_fn(&mut g, "e1", 4);
+        let e2 = add_fn(&mut g, "e2", 5);
+        edge(&mut g, d1, yankee, EdgeType::Calls);
+        edge(&mut g, e1, d1, EdgeType::Calls);
+        edge(&mut g, e2, d1, EdgeType::Calls);
+
+        let result = find_hot_paths(&g, 20);
+        let x_idx = result
+            .functions
+            .iter()
+            .position(|f| f.name == "xray")
+            .expect("xray present");
+        let y_idx = result
+            .functions
+            .iter()
+            .position(|f| f.name == "yankee")
+            .expect("yankee present");
+        // Equal score 2.0, but xray has more direct callers so it ranks first.
+        assert_eq!(result.functions[x_idx].score, 2.0);
+        assert_eq!(result.functions[y_idx].score, 2.0);
+        assert_eq!(result.functions[x_idx].direct_callers, 2);
+        assert_eq!(result.functions[y_idx].direct_callers, 1);
+        assert!(x_idx < y_idx);
+    }
+
+    #[test]
+    fn limit_exceeding_function_count_returns_all() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let caller = add_fn(&mut g, "caller", 1);
+        let target = add_fn(&mut g, "target", 100);
+        edge(&mut g, caller, target, EdgeType::Calls);
+
+        // limit far exceeds the 2 functions present; truncate is a no-op.
+        let result = find_hot_paths(&g, 1000);
+        assert_eq!(result.total_analyzed, 2);
+        assert_eq!(result.functions.len(), 2);
+    }
 }
