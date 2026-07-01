@@ -596,4 +596,167 @@ mod tests {
         assert_eq!(update.parameters[0].name, "msg");
         assert_eq!(update.parameters[1].name, "model");
     }
+
+    #[test]
+    fn test_empty_source_is_empty() {
+        let visitor = parse_and_visit(b"module Main exposing (..)\n");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_import_alias() {
+        let source = b"module Main exposing (..)\n\nimport Html.Attributes as Attr\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "Html.Attributes")
+            .expect("import not found");
+        assert_eq!(imp.alias.as_deref(), Some("Attr"));
+        assert!(!imp.is_wildcard);
+    }
+
+    #[test]
+    fn test_import_exposed_symbols() {
+        let source =
+            b"module Main exposing (..)\n\nimport Html exposing (Html, div, text)\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "Html")
+            .expect("import not found");
+        assert!(imp.symbols.iter().any(|s| s == "div"));
+        assert!(imp.symbols.iter().any(|s| s == "text"));
+        assert!(!imp.is_wildcard);
+        assert_eq!(imp.alias, None);
+    }
+
+    #[test]
+    fn test_import_wildcard() {
+        let source = b"module Main exposing (..)\n\nimport Html exposing (..)\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "Html")
+            .expect("import not found");
+        assert!(imp.is_wildcard);
+        assert!(imp.symbols.is_empty());
+    }
+
+    #[test]
+    fn test_function_signature_and_return_type_from_annotation() {
+        let source =
+            b"module Main exposing (..)\n\ngreet : String -> String\ngreet name =\n    name\n";
+        let visitor = parse_and_visit(source);
+
+        let greet = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greet")
+            .expect("greet not found");
+        // Signature comes from the collected type_annotation, not the decl line.
+        assert!(greet.signature.contains("greet : String -> String"));
+        // Return type is the last `->` segment, trimmed.
+        assert_eq!(greet.return_type.as_deref(), Some("String"));
+        assert_eq!(greet.visibility, "public");
+    }
+
+    #[test]
+    fn test_function_signature_fallback_without_annotation() {
+        // No type_annotation, so signature falls back to the first decl line
+        // and return_type stays None.
+        let source = b"module Main exposing (..)\n\nanswer =\n    42\n";
+        let visitor = parse_and_visit(source);
+
+        let answer = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "answer")
+            .expect("answer not found");
+        assert_eq!(answer.signature, "answer =");
+        assert_eq!(answer.return_type, None);
+    }
+
+    #[test]
+    fn test_function_body_prefix() {
+        let source = b"module Main exposing (..)\n\ngreeting =\n    \"hello world\"\n";
+        let visitor = parse_and_visit(source);
+
+        let greeting = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greeting")
+            .expect("greeting not found");
+        let body = greeting.body_prefix.as_deref().unwrap_or("");
+        assert!(body.contains("hello world"), "body_prefix was: {body:?}");
+    }
+
+    #[test]
+    fn test_case_expression_raises_complexity() {
+        let source = b"module Main exposing (..)\n\nclassify n =\n    case n of\n        0 -> \"zero\"\n        _ -> \"other\"\n";
+        let visitor = parse_and_visit(source);
+
+        let classify = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "classify")
+            .expect("classify not found");
+        let cx = classify.complexity.as_ref().expect("complexity missing");
+        assert!(
+            cx.cyclomatic_complexity > 1,
+            "expected case-of to raise complexity, got {}",
+            cx.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_port_attributes_and_return_type() {
+        let source =
+            b"port module Main exposing (..)\n\nport sendMessage : String -> Cmd msg\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        let port = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "sendMessage")
+            .expect("sendMessage not found");
+        assert!(port.attributes.iter().any(|a| a == "port"));
+        assert_eq!(port.return_type.as_deref(), Some("Cmd msg"));
+        assert!(port.complexity.is_none());
+        assert!(port.parameters.is_empty());
+    }
+
+    #[test]
+    fn test_extract_module_name() {
+        use tree_sitter::Parser;
+        let source = b"module Main.App exposing (..)\n\nmain = 1\n";
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_elm::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+
+        let name = ElmVisitor::extract_module_name(tree.root_node(), source);
+        assert_eq!(name.as_deref(), Some("Main.App"));
+    }
+
+    #[test]
+    fn test_type_alias_and_type_declaration_both_classes() {
+        let source = b"module Main exposing (..)\n\ntype Msg\n    = Inc\n    | Dec\n\ntype alias Model =\n    { count : Int }\n\nmain = 1\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 2);
+        assert!(visitor.classes.iter().any(|c| c.name == "Msg"));
+        assert!(visitor.classes.iter().any(|c| c.name == "Model"));
+        // Elm type declarations are plain data types, never abstract/interface.
+        assert!(visitor.classes.iter().all(|c| !c.is_abstract));
+        assert!(visitor.classes.iter().all(|c| !c.is_interface));
+    }
 }
