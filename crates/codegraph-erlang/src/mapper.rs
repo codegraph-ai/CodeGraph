@@ -241,7 +241,7 @@ mod tests {
     use codegraph::{Direction, PropertyValue};
     use codegraph_parser_api::{
         CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
-        TraitEntity,
+        Parameter, TraitEntity,
     };
 
     fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
@@ -255,6 +255,10 @@ mod tests {
             Some(PropertyValue::String(s)) => s.clone(),
             _ => String::new(),
         }
+    }
+
+    fn prop<'a>(graph: &'a CodeGraph, id: NodeId, key: &str) -> Option<PropertyValue> {
+        graph.get_node(id).unwrap().properties.get(key).cloned()
     }
 
     #[test]
@@ -482,6 +486,294 @@ mod tests {
         assert_eq!(info.imports[0], info.imports[1]);
         let edges = graph
             .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn function_optional_props_present() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        let func = FunctionEntity::new("start", 1, 4)
+            .with_doc("starts the server")
+            .with_body_prefix("start() ->")
+            .with_parameters(vec![Parameter::new("arg")]);
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(
+            prop(&graph, id, "doc"),
+            Some(PropertyValue::String("starts the server".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "body_prefix"),
+            Some(PropertyValue::String("start() ->".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "parameters"),
+            Some(PropertyValue::StringList(vec!["arg".to_string()]))
+        );
+    }
+
+    #[test]
+    fn function_optional_props_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        ir.add_function(FunctionEntity::new("stop", 1, 2));
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert!(prop(&graph, id, "doc").is_none());
+        assert!(prop(&graph, id, "body_prefix").is_none());
+        assert!(prop(&graph, id, "parameters").is_none());
+        // The erlang function loop never reads return_type or attributes.
+        assert!(prop(&graph, id, "return_type").is_none());
+        assert!(prop(&graph, id, "attributes").is_none());
+        // No complexity supplied -> no complexity props.
+        assert!(prop(&graph, id, "complexity").is_none());
+        assert!(prop(&graph, id, "complexity_grade").is_none());
+    }
+
+    #[test]
+    fn function_stamps_all_eight_complexity_sub_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 25,
+            branches: 8,
+            loops: 3,
+            logical_operators: 4,
+            max_nesting_depth: 5,
+            exception_handlers: 2,
+            early_returns: 6,
+        };
+        ir.add_function(FunctionEntity::new("loop", 1, 40).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(prop(&graph, id, "complexity"), Some(PropertyValue::Int(25)));
+        // Cyclomatic 25 falls in the D band.
+        assert_eq!(
+            prop(&graph, id, "complexity_grade"),
+            Some(PropertyValue::String("D".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_branches"),
+            Some(PropertyValue::Int(8))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_loops"),
+            Some(PropertyValue::Int(3))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_logical_ops"),
+            Some(PropertyValue::Int(4))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_nesting"),
+            Some(PropertyValue::Int(5))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_exceptions"),
+            Some(PropertyValue::Int(2))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_early_returns"),
+            Some(PropertyValue::Int(6))
+        );
+    }
+
+    #[test]
+    fn function_complexity_grade_band_a() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 3,
+            ..Default::default()
+        };
+        ir.add_function(FunctionEntity::new("simple", 1, 2).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(
+            prop(&graph, info.functions[0], "complexity_grade"),
+            Some(PropertyValue::String("A".to_string()))
+        );
+    }
+
+    #[test]
+    fn function_complexity_grade_band_f() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 80,
+            ..Default::default()
+        };
+        ir.add_function(FunctionEntity::new("monster", 1, 200).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(
+            prop(&graph, info.functions[0], "complexity_grade"),
+            Some(PropertyValue::String("F".to_string()))
+        );
+    }
+
+    #[test]
+    fn function_boolean_flags_are_stamped() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        let func = FunctionEntity::new("spawn_worker", 1, 3)
+            .async_fn()
+            .static_fn()
+            .abstract_fn();
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(
+            prop(&graph, id, "is_async"),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            prop(&graph, id, "is_static"),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            prop(&graph, id, "is_abstract"),
+            Some(PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn class_optional_props_present() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        let class = ClassEntity::new("state", 1, 5)
+            .with_doc("server state record")
+            .with_attributes(vec!["id".to_string(), "name".to_string()])
+            .with_body_prefix("-record(state, {");
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let id = info.classes[0];
+        assert_eq!(
+            prop(&graph, id, "doc"),
+            Some(PropertyValue::String("server state record".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "attributes"),
+            Some(PropertyValue::StringList(vec![
+                "id".to_string(),
+                "name".to_string()
+            ]))
+        );
+        assert_eq!(
+            prop(&graph, id, "body_prefix"),
+            Some(PropertyValue::String("-record(state, {".to_string()))
+        );
+    }
+
+    #[test]
+    fn class_optional_props_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        ir.add_class(ClassEntity::new("state", 1, 5));
+
+        let (graph, info) = build(&ir);
+        let id = info.classes[0];
+        assert!(prop(&graph, id, "doc").is_none());
+        assert!(prop(&graph, id, "attributes").is_none());
+        assert!(prop(&graph, id, "body_prefix").is_none());
+        // The class loop stamps no boolean flags on record nodes.
+        assert!(prop(&graph, id, "is_abstract").is_none());
+        assert!(prop(&graph, id, "is_interface").is_none());
+    }
+
+    #[test]
+    fn import_matching_in_file_name_reuses_node_without_is_external() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        ir.add_function(FunctionEntity::new("helper", 1, 3));
+        // Import target matches an already-mapped function name -> node reused.
+        ir.add_import(ImportRelation::new("service", "helper"));
+
+        let (graph, info) = build(&ir);
+        let func_id = info.functions[0];
+        assert_eq!(info.imports[0], func_id);
+        // The reused node keeps its Function type and carries no is_external prop.
+        assert_eq!(
+            graph.get_node(func_id).unwrap().node_type,
+            NodeType::Function
+        );
+        assert!(prop(&graph, func_id, "is_external").is_none());
+        // Both a Contains and an Imports edge connect the file to the reused node.
+        let edges = graph.get_edges_between(info.file_id, func_id).unwrap();
+        let types: Vec<_> = edges
+            .iter()
+            .map(|&e| graph.get_edge(e).unwrap().edge_type)
+            .collect();
+        assert!(types.contains(&EdgeType::Contains));
+        assert!(types.contains(&EdgeType::Imports));
+    }
+
+    #[test]
+    fn indirect_call_records_is_direct_false() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        let mut call = CallRelation::new("caller", "callee", 3);
+        call.is_direct = false;
+        ir.add_call(call);
+
+        let (graph, info) = build(&ir);
+        let caller_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "caller")
+            .unwrap();
+        let callee_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "callee")
+            .unwrap();
+        let edge_ids = graph.get_edges_between(caller_id, callee_id).unwrap();
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(
+            edge.properties.get("is_direct"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn multiple_functions_and_classes_are_all_contained_by_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        ir.add_function(FunctionEntity::new("f1", 1, 2));
+        ir.add_function(FunctionEntity::new("f2", 3, 4));
+        ir.add_class(ClassEntity::new("state", 5, 6));
+        ir.add_class(ClassEntity::new("config", 7, 8));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.functions.len(), 2);
+        assert_eq!(info.classes.len(), 2);
+
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        for id in info.functions.iter().chain(info.classes.iter()) {
+            assert!(neighbors.contains(id));
+        }
+        // file + 2 functions + 2 classes.
+        assert_eq!(graph.node_count(), 5);
+    }
+
+    #[test]
+    fn duplicate_behaviour_reuses_interface_node() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("service.erl"));
+        ir.add_trait(TraitEntity::new("gen_server", 1, 1));
+        ir.add_trait(TraitEntity::new("gen_server", 1, 1));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.traits.len(), 2);
+        // The second behaviour with the same name reuses the first interface node.
+        assert_eq!(info.traits[0], info.traits[1]);
+        // file + single interface node.
+        assert_eq!(graph.node_count(), 2);
+        // Two Implements edges from the file to the shared interface.
+        let edges = graph
+            .get_edges_between(info.file_id, info.traits[0])
             .unwrap();
         assert_eq!(edges.len(), 2);
     }
