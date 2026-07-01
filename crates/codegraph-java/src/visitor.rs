@@ -237,14 +237,14 @@ impl<'a> JavaVisitor<'a> {
         let visibility = self.extract_visibility(&modifiers);
         let doc_comment = self.extract_doc_comment(node);
 
-        // Extract parent interfaces (extends)
+        // Extract parent interfaces (extends). extends_interfaces is a child
+        // node kind (not a named field) that wraps its parents in a
+        // `type_list`, so scan children then recurse to reach them.
         let mut parent_traits = Vec::new();
-        if let Some(extends_interfaces) = node.child_by_field_name("extends_interfaces") {
-            let mut cursor = extends_interfaces.walk();
-            for child in extends_interfaces.children(&mut cursor) {
-                if child.kind() == "type_identifier" || child.kind() == "scoped_type_identifier" {
-                    parent_traits.push(self.node_text(child));
-                }
+        let mut ext_cursor = node.walk();
+        for child in node.children(&mut ext_cursor) {
+            if child.kind() == "extends_interfaces" {
+                self.collect_interface_parents(child, &mut parent_traits);
             }
         }
 
@@ -331,13 +331,24 @@ impl<'a> JavaVisitor<'a> {
         let previous_class = self.current_class.take();
         self.current_class = Some(qualified_name);
 
-        // Visit enum body to extract methods
+        // Visit enum body to extract methods. Enum members live inside an
+        // `enum_body_declarations` wrapper, not directly under enum_body.
         if let Some(body) = node.child_by_field_name("body") {
             let mut cursor = body.walk();
             for child in body.children(&mut cursor) {
-                if child.kind() == "method_declaration" || child.kind() == "constructor_declaration"
-                {
-                    self.visit_method(child);
+                match child.kind() {
+                    "method_declaration" | "constructor_declaration" => self.visit_method(child),
+                    "enum_body_declarations" => {
+                        let mut inner = child.walk();
+                        for decl in child.children(&mut inner) {
+                            if decl.kind() == "method_declaration"
+                                || decl.kind() == "constructor_declaration"
+                            {
+                                self.visit_method(decl);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -583,6 +594,24 @@ impl<'a> JavaVisitor<'a> {
             // Also handle type_list which contains multiple interfaces
             if child.kind() == "type_list" {
                 self.extract_implemented_interfaces(child, class_name, implemented_traits);
+            }
+        }
+    }
+
+    /// Recursively collect parent interface names from an extends_interfaces
+    /// node, descending through the intermediate `type_list` wrapper.
+    fn collect_interface_parents(&self, node: Node, parents: &mut Vec<String>) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "type_identifier" | "scoped_type_identifier" | "generic_type" => {
+                    let name = self.extract_type_name(child);
+                    if !name.is_empty() {
+                        parents.push(name);
+                    }
+                }
+                "type_list" => self.collect_interface_parents(child, parents),
+                _ => {}
             }
         }
     }
@@ -1536,16 +1565,213 @@ public class Loops {
     }
 
     #[test]
-    fn test_visitor_interface_extends_parent_gap() {
-        // Regression: `interface B extends A` does NOT populate parent_traits.
-        // The extends_interfaces node wraps its parents in a `type_list`, but
-        // visit_interface only scans its direct children for type_identifier /
-        // scoped_type_identifier, so the nested parents are missed. Pinning the
-        // current behavior so a future fix is a deliberate change.
+    fn test_visitor_interface_extends_parent() {
+        // `interface B extends A` records A as a parent trait. The
+        // extends_interfaces node wraps its parents in a `type_list`, so
+        // collect_interface_parents recurses to reach them.
         let source = b"interface A {}\ninterface B extends A { void go(); }";
         let visitor = parse_and_visit(source);
 
         let b = visitor.traits.iter().find(|t| t.name == "B").unwrap();
-        assert!(b.parent_traits.is_empty());
+        assert_eq!(b.parent_traits, vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn test_visitor_interface_extends_multiple() {
+        // `interface C extends A, B` records both parents in order
+        let source = b"interface A {}\ninterface B {}\ninterface C extends A, B { void go(); }";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.traits.iter().find(|t| t.name == "C").unwrap();
+        assert_eq!(c.parent_traits, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn test_visitor_constructor_extraction() {
+        // A constructor's name falls back to the enclosing class name
+        let source = b"public class Widget { public Widget(int x) {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "Widget");
+        assert_eq!(
+            visitor.functions[0].parent_class,
+            Some("Widget".to_string())
+        );
+    }
+
+    #[test]
+    fn test_visitor_enum_method_extraction() {
+        // A method declared in an enum body is extracted and parented to the enum
+        let source = b"
+public enum Op {
+    ADD, SUB;
+    public int apply(int a, int b) { return a + b; }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        let apply = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "apply")
+            .unwrap();
+        assert_eq!(apply.parent_class, Some("Op".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_record_method_extraction() {
+        // A method declared in a record body is extracted and parented to the record
+        let source = b"public record Point(int x, int y) { public int sum() { return x + y; } }";
+        let visitor = parse_and_visit(source);
+
+        let sum = visitor.functions.iter().find(|f| f.name == "sum").unwrap();
+        assert_eq!(sum.parent_class, Some("Point".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_record_implements_interface() {
+        // A record implementing an interface records the implementation relation
+        let source = b"interface Named { String name(); }\npublic record User(String name) implements Named {}";
+        let visitor = parse_and_visit(source);
+
+        let user = visitor.classes.iter().find(|c| c.name == "User").unwrap();
+        assert!(user.implemented_traits.contains(&"Named".to_string()));
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|i| i.implementor == "User" && i.trait_name == "Named"));
+    }
+
+    #[test]
+    fn test_visitor_enhanced_for_loop_complexity() {
+        // A for-each (enhanced_for_statement) is counted as a loop
+        let source = b"
+public class Iter {
+    public int total(int[] xs) {
+        int s = 0;
+        for (int x : xs) { s += x; }
+        return s;
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.loops >= 1,
+            "expected >= 1 loop, got {}",
+            complexity.loops
+        );
+    }
+
+    #[test]
+    fn test_visitor_nested_call_in_arguments() {
+        // A call passed as an argument is recorded alongside the outer call
+        let source = b"
+public class Chain {
+    void run() { outer(inner()); }
+    void outer(int v) {}
+    int inner() { return 1; }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "outer"));
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "run" && c.callee == "inner"));
+    }
+
+    #[test]
+    fn test_visitor_super_call_strips_prefix() {
+        // super.method() records just the method name (prefix stripped)
+        let source = b"
+class Base { void greet() {} }
+class Sub extends Base { void greet2() { super.greet(); } }
+";
+        let visitor = parse_and_visit(source);
+
+        let call = visitor.calls.iter().find(|c| c.caller == "greet2").unwrap();
+        assert_eq!(call.callee, "greet");
+    }
+
+    #[test]
+    fn test_visitor_body_prefix_truncation() {
+        // A method body longer than BODY_PREFIX_MAX_CHARS is truncated to that many bytes
+        let filler = "x".repeat(BODY_PREFIX_MAX_CHARS + 200);
+        let source = format!(
+            "class Big {{ void run() {{ String s = \"{}\"; }} }}",
+            filler
+        );
+        let visitor = parse_and_visit(source.as_bytes());
+
+        let prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_visitor_class_body_prefix_and_bounds() {
+        // A class captures a body_prefix and 1-indexed line bounds offset by blanks
+        let source = b"
+
+public class Holder {
+    private int value;
+}
+";
+        let visitor = parse_and_visit(source);
+
+        let holder = visitor.classes.iter().find(|c| c.name == "Holder").unwrap();
+        assert_eq!(holder.line_start, 3);
+        assert_eq!(holder.line_end, 5);
+        assert!(holder.body_prefix.as_ref().unwrap().contains("value"));
+    }
+
+    #[test]
+    fn test_visitor_interface_required_methods_abstract() {
+        // Interface required methods are captured and flagged abstract
+        let source = b"public interface Repo { void save(); String load(int id); }";
+        let visitor = parse_and_visit(source);
+
+        let repo = visitor.traits.iter().find(|t| t.name == "Repo").unwrap();
+        assert_eq!(repo.required_methods.len(), 2);
+        assert!(repo.required_methods.iter().all(|m| m.is_abstract));
+    }
+
+    #[test]
+    fn test_visitor_generic_superclass_base_type() {
+        // Extending a generic type records just the base type name
+        let source = b"import java.util.ArrayList;\nclass Stack extends ArrayList<String> { }";
+        let visitor = parse_and_visit(source);
+
+        let stack = visitor.classes.iter().find(|c| c.name == "Stack").unwrap();
+        assert_eq!(stack.base_classes, vec!["ArrayList".to_string()]);
+        assert!(visitor
+            .inheritance
+            .iter()
+            .any(|i| i.child == "Stack" && i.parent == "ArrayList"));
+    }
+
+    #[test]
+    fn test_visitor_default_package_visibility_class() {
+        // A class with no access modifier defaults to package visibility
+        let source = b"class Plain {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes[0].visibility, "package");
+    }
+
+    #[test]
+    fn test_visitor_import_default_importer() {
+        // With no package declaration, an import's importer is "default"
+        let source = b"import java.util.List;";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].importer, "default");
     }
 }
