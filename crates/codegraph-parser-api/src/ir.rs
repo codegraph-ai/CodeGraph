@@ -208,4 +208,46 @@ mod tests {
         assert_eq!(ir.functions[0].name, "first");
         assert_eq!(ir.functions[1].name, "second");
     }
+
+    #[test]
+    fn clone_is_an_independent_deep_copy() {
+        let mut original = CodeIR::new(PathBuf::from("c.rs"));
+        original.set_module(ModuleEntity::new("c", "c.rs", "rust"));
+        original.add_function(FunctionEntity::new("f", 1, 2));
+        original.add_call(CallRelation::new("a", "b", 1));
+
+        let mut cloned = original.clone();
+        // The clone starts out equal to the original.
+        assert_eq!(cloned.file_path, PathBuf::from("c.rs"));
+        assert_eq!(cloned.entity_count(), 2);
+        assert_eq!(cloned.relationship_count(), 1);
+
+        // Mutating the clone must not affect the original (deep, not shared).
+        cloned.add_function(FunctionEntity::new("g", 3, 4));
+        cloned.add_call(CallRelation::new("c", "d", 2));
+        assert_eq!(cloned.entity_count(), 3);
+        assert_eq!(cloned.relationship_count(), 2);
+        assert_eq!(original.entity_count(), 2);
+        assert_eq!(original.relationship_count(), 1);
+        assert_eq!(original.functions.len(), 1);
+        assert_eq!(original.calls.len(), 1);
+    }
+
+    #[test]
+    fn clone_preserves_module_presence() {
+        // A module-less IR clones to a module-less IR (the None arm of the Option).
+        let without = CodeIR::new(PathBuf::from("n.rs"));
+        assert!(without.clone().module.is_none());
+
+        // A populated module survives the clone with its fields intact.
+        let mut with = CodeIR::new(PathBuf::from("y.rs"));
+        with.set_module(ModuleEntity::new("mod_y", "y.rs", "rust"));
+        let cloned = with.clone();
+        assert_eq!(cloned.entity_count(), 1);
+        let module = cloned
+            .module
+            .as_ref()
+            .expect("cloned module should be present");
+        assert_eq!(module.name, "mod_y");
+    }
 }
