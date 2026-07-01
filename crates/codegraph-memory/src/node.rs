@@ -861,4 +861,124 @@ mod tests {
         assert_eq!(json["type"], "git_history");
         assert_eq!(json["commit_hash"], "abc");
     }
+
+    #[test]
+    fn test_builder_direct_setters() {
+        // Exercise the setters that other tests reach only indirectly:
+        // id(), kind(), temporal(), source(), embedding(), tags(), and the
+        // two code-link setters (singular code_link + plural code_links).
+        let explicit_id = MemoryId::from_uuid(uuid::Uuid::nil());
+        let temporal = TemporalMetadata::new_current();
+        let memory = MemoryNode::builder()
+            .id(explicit_id)
+            .kind(MemoryKind::Convention {
+                name: "layout".to_string(),
+                description: "crates live under crates/".to_string(),
+                pattern: Some("crates/*".to_string()),
+                anti_pattern: None,
+            })
+            .title("t")
+            .content("c")
+            .temporal(temporal)
+            .source(MemorySource::ExternalDoc {
+                url: "https://example.com".to_string(),
+            })
+            .embedding(vec![0.1, 0.2, 0.3])
+            .tags(vec!["a".to_string(), "b".to_string()])
+            .code_link(CodeLink::new("n1", LinkedNodeType::Function))
+            .build()
+            .unwrap();
+
+        assert_eq!(memory.id, explicit_id);
+        assert!(matches!(memory.kind, MemoryKind::Convention { .. }));
+        assert!(matches!(
+            memory.source,
+            MemorySource::ExternalDoc { url } if url == "https://example.com"
+        ));
+        assert_eq!(memory.embedding.as_deref(), Some(&[0.1, 0.2, 0.3][..]));
+        assert_eq!(memory.tags, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(memory.code_links.len(), 1);
+        assert_eq!(memory.code_links[0].node_id, "n1");
+
+        // The plural code_links() setter replaces the whole vec rather than appending.
+        let replaced = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .code_link(CodeLink::new("dropped", LinkedNodeType::File))
+            .code_links(vec![
+                CodeLink::new("kept1", LinkedNodeType::Class),
+                CodeLink::new("kept2", LinkedNodeType::Trait),
+            ])
+            .build()
+            .unwrap();
+        assert_eq!(replaced.code_links.len(), 2);
+        assert_eq!(replaced.code_links[0].node_id, "kept1");
+        assert_eq!(replaced.code_links[1].node_id, "kept2");
+    }
+
+    #[test]
+    fn test_builder_missing_kind() {
+        // build() checks kind before title/content, so a builder with only
+        // title+content (no kind) surfaces MissingKind.
+        let result = MemoryNode::builder().title("t").content("c").build();
+        assert!(matches!(result, Err(MemoryNodeBuilderError::MissingKind)));
+    }
+
+    #[test]
+    fn test_linked_node_type_serde_lowercase() {
+        // #[serde(rename_all = "lowercase")] renders variants in lowercase.
+        assert_eq!(
+            serde_json::to_value(LinkedNodeType::Interface).unwrap(),
+            serde_json::json!("interface")
+        );
+        let parsed: LinkedNodeType = serde_json::from_value(serde_json::json!("trait")).unwrap();
+        assert_eq!(parsed, LinkedNodeType::Trait);
+    }
+
+    #[test]
+    fn test_issue_severity_serde_lowercase() {
+        assert_eq!(
+            serde_json::to_value(IssueSeverity::Critical).unwrap(),
+            serde_json::json!("critical")
+        );
+        let parsed: IssueSeverity = serde_json::from_value(serde_json::json!("info")).unwrap();
+        assert_eq!(parsed, IssueSeverity::Info);
+    }
+
+    #[test]
+    fn test_memory_kind_serde_skips_none_and_keeps_populated() {
+        // skip_serializing_if drops None optionals but retains populated ones,
+        // and #[serde(default)] vecs round-trip.
+        let full = MemoryKind::KnownIssue {
+            description: "leaks fds".to_string(),
+            severity: IssueSeverity::High,
+            workaround: Some("restart".to_string()),
+            tracking_id: None,
+        };
+        let json = serde_json::to_value(&full).unwrap();
+        let issue = &json["KnownIssue"];
+        assert_eq!(issue["severity"], "high");
+        assert_eq!(issue["workaround"], "restart");
+        assert!(issue.get("tracking_id").is_none());
+
+        // Round-trip preserves the populated optional and default-empty absent one.
+        let back: MemoryKind = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            MemoryKind::KnownIssue { workaround: Some(w), tracking_id: None, .. } if w == "restart"
+        ));
+    }
+
+    #[test]
+    fn test_code_link_line_range_serde_skips_none() {
+        // line_range is skip_serializing_if None, present otherwise.
+        let none = serde_json::to_value(CodeLink::new("n", LinkedNodeType::Module)).unwrap();
+        assert!(none.get("line_range").is_none());
+
+        let some =
+            serde_json::to_value(CodeLink::new("n", LinkedNodeType::Module).with_line_range(3, 9))
+                .unwrap();
+        assert_eq!(some["line_range"], serde_json::json!([3, 9]));
+    }
 }
