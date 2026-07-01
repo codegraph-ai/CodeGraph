@@ -338,3 +338,70 @@ async fn process_changes(ctx: &WatcherCtx, changed: &[PathBuf], removed: &[PathB
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exts() -> Vec<String> {
+        vec!["rs".to_string(), "py".to_string()]
+    }
+
+    #[test]
+    fn supported_extension_is_watchable() {
+        // Non-existent path with a supported extension: is_dir() is false, so it
+        // passes the directory/skip/hidden gates and matches on extension.
+        assert!(is_watchable(Path::new("/proj/src/main.rs"), &exts()));
+        assert!(is_watchable(Path::new("/proj/app/module.py"), &exts()));
+    }
+
+    #[test]
+    fn unsupported_extension_is_not_watchable() {
+        assert!(!is_watchable(Path::new("/proj/README.md"), &exts()));
+        assert!(!is_watchable(Path::new("/proj/data.json"), &exts()));
+    }
+
+    #[test]
+    fn missing_extension_is_not_watchable() {
+        assert!(!is_watchable(Path::new("/proj/Makefile"), &exts()));
+    }
+
+    #[test]
+    fn hidden_file_is_not_watchable() {
+        // Leading-dot filename is skipped even with a supported extension.
+        assert!(!is_watchable(Path::new("/proj/.hidden.rs"), &exts()));
+    }
+
+    #[test]
+    fn path_in_skip_dir_is_not_watchable() {
+        // A supported file nested under any SKIP_DIRS component is rejected.
+        assert!(!is_watchable(
+            Path::new("/proj/node_modules/pkg/index.rs"),
+            &exts()
+        ));
+        assert!(!is_watchable(
+            Path::new("/proj/target/debug/build.rs"),
+            &exts()
+        ));
+        assert!(!is_watchable(Path::new("/proj/.git/hooks/pre.rs"), &exts()));
+    }
+
+    #[test]
+    fn skip_dir_as_substring_is_still_watchable() {
+        // "build" only matches as a whole path component, not as a substring of a
+        // filename or directory name.
+        assert!(is_watchable(Path::new("/proj/src/builder.rs"), &exts()));
+        assert!(is_watchable(Path::new("/proj/rebuild/main.rs"), &exts()));
+    }
+
+    #[test]
+    fn directory_is_not_watchable() {
+        let dir = std::env::temp_dir();
+        assert!(!is_watchable(&dir, &exts()));
+    }
+
+    #[test]
+    fn empty_supported_extensions_matches_nothing() {
+        assert!(!is_watchable(Path::new("/proj/src/main.rs"), &[]));
+    }
+}
