@@ -1280,4 +1280,151 @@ mod tests {
         let paths = g.find_all_paths(a, c, Some(10)).unwrap();
         assert_eq!(paths, vec![vec![a, b, c]]);
     }
+
+    #[test]
+    fn bfs_reaches_transitive_nodes() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(b, c, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        // Unbounded BFS reaches both b and c (start excluded).
+        let mut reached = g.bfs(a, Direction::Outgoing, None).unwrap();
+        reached.sort_unstable();
+        assert_eq!(reached, vec![b, c]);
+
+        // Depth 1 stops before c.
+        assert_eq!(g.bfs(a, Direction::Outgoing, Some(1)).unwrap(), vec![b]);
+    }
+
+    #[test]
+    fn dfs_reaches_transitive_nodes() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(b, c, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let mut reached = g.dfs(a, Direction::Outgoing, None).unwrap();
+        reached.sort_unstable();
+        assert_eq!(reached, vec![b, c]);
+    }
+
+    #[test]
+    fn find_strongly_connected_components_detects_cycle() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        // a <-> b form a cycle; c is standalone.
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(b, a, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let sccs = g.find_strongly_connected_components().unwrap();
+        // The {a, b} cycle must appear as a single multi-node component.
+        let cycle = sccs
+            .iter()
+            .find(|scc| scc.len() > 1)
+            .expect("expected a multi-node SCC");
+        assert_eq!(cycle.len(), 2);
+        assert!(cycle.contains(&a) && cycle.contains(&b));
+        assert!(!cycle.contains(&c));
+    }
+
+    #[test]
+    fn export_dot_styled_respects_rankdir() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, named("solo")).unwrap();
+
+        let options = crate::export::DotOptions {
+            rankdir: "TB".to_string(),
+            ..Default::default()
+        };
+        let dot = g.export_dot_styled(options).unwrap();
+
+        assert!(dot.contains("digraph"));
+        assert!(dot.contains("rankdir=TB"));
+    }
+
+    #[test]
+    fn export_json_filtered_excludes_nonmatching_nodes() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, named("keep")).unwrap();
+        g.add_node(NodeType::Module, named("drop")).unwrap();
+
+        // Only Function nodes pass the filter.
+        let json = g
+            .export_json_filtered(|n| n.node_type == NodeType::Function, false)
+            .unwrap();
+        assert!(json.contains("keep"));
+        assert!(!json.contains("drop"));
+    }
+
+    #[test]
+    fn export_csv_via_codegraph_writes_both_files() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, named("caller")).unwrap();
+        let b = g.add_node(NodeType::Function, named("callee")).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = dir.path().join("nodes.csv");
+        let edges = dir.path().join("edges.csv");
+
+        // The standalone node/edge exporters and the combined convenience wrapper
+        // all go through check_export_size before delegating.
+        g.export_csv_nodes(&nodes).unwrap();
+        assert!(std::fs::read_to_string(&nodes).unwrap().contains("caller"));
+
+        g.export_csv_edges(&edges).unwrap();
+        assert!(std::fs::read_to_string(&edges).unwrap().contains("Calls"));
+
+        let nodes2 = dir.path().join("nodes2.csv");
+        let edges2 = dir.path().join("edges2.csv");
+        g.export_csv(&nodes2, &edges2).unwrap();
+        assert!(nodes2.exists() && edges2.exists());
+    }
+
+    #[test]
+    fn export_triples_renders_nodes() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, named("caller")).unwrap();
+        let b = g.add_node(NodeType::Function, named("callee")).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let triples = g.export_triples().unwrap();
+        // N-Triples lines terminate with " ." and reference the node names.
+        assert!(triples.contains("caller"));
+        assert!(triples.trim_end().ends_with('.'));
+    }
+
+    #[test]
+    fn query_builder_filters_by_node_type() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, named("f")).unwrap();
+        g.add_node(NodeType::Module, named("m")).unwrap();
+
+        let functions = g.query().node_type(NodeType::Function).execute().unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(g.query().node_type(NodeType::Module).count().unwrap(), 1);
+    }
+
+    #[test]
+    fn close_flushes_and_consumes_graph() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        // close() takes ownership and must succeed after flushing counters.
+        assert!(g.close().is_ok());
+    }
 }
