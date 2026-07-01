@@ -462,4 +462,315 @@ end
         assert_eq!(visitor.functions.len(), 1);
         assert_eq!(visitor.functions[0].name, "init");
     }
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = br#"
+defmodule MyApp do
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.visibility, "public");
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.return_type.is_none());
+        assert!(f.parent_class.is_none());
+        assert!(f.attributes.is_empty());
+        assert!(f.line_start >= 1);
+        assert!(f.line_end >= f.line_start);
+    }
+
+    #[test]
+    fn test_signature_is_first_line() {
+        let source = br#"
+defmodule MyApp do
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "def greet(name) do");
+    }
+
+    #[test]
+    fn test_single_parameter_extraction() {
+        let source = br#"
+defmodule MyApp do
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "name");
+    }
+
+    #[test]
+    fn test_multiple_parameters_extraction() {
+        let source = br#"
+defmodule MyApp do
+  def add(a, b) do
+    a + b
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "a");
+        assert_eq!(params[1].name, "b");
+    }
+
+    #[test]
+    fn test_default_argument_parameter() {
+        let source = br#"
+defmodule MyApp do
+  def greet(name \\ "world") do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "name");
+    }
+
+    #[test]
+    fn test_guard_function_head() {
+        let source = br#"
+defmodule MyApp do
+  def check(x) when is_binary(x) do
+    x
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "check");
+        assert_eq!(visitor.functions[0].parameters.len(), 1);
+        assert_eq!(visitor.functions[0].parameters[0].name, "x");
+    }
+
+    #[test]
+    fn test_use_and_require_imports() {
+        let source = br#"
+defmodule MyApp do
+  use GenServer
+  require Logger
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let names: Vec<&str> = visitor
+            .imports
+            .iter()
+            .map(|i| i.imported.as_str())
+            .collect();
+        assert!(names.contains(&"GenServer"));
+        assert!(names.contains(&"Logger"));
+    }
+
+    #[test]
+    fn test_import_defaults() {
+        let source = br#"
+defmodule MyApp do
+  import Ecto.Query
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "Ecto.Query");
+        assert_eq!(imp.importer, "main");
+        assert!(imp.symbols.is_empty());
+        assert!(!imp.is_wildcard);
+        assert!(imp.alias.is_none());
+    }
+
+    #[test]
+    fn test_doc_comment_extraction() {
+        let source = br#"
+defmodule MyApp do
+  @doc "Greets a person"
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let doc = visitor.functions[0].doc_comment.as_deref().unwrap_or("");
+        assert!(doc.starts_with("@doc"));
+    }
+
+    #[test]
+    fn test_doc_comment_absent() {
+        let source = br#"
+defmodule MyApp do
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_body_prefix_present() {
+        let source = br#"
+defmodule MyApp do
+  def greet(name) do
+    "Hello, #{name}"
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_baseline_complexity() {
+        let source = br#"
+defmodule MyApp do
+  def greet(name) do
+    name
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_if_raises_complexity() {
+        let source = br#"
+defmodule MyApp do
+  def check(x) do
+    if x > 0 do
+      :pos
+    else
+      :neg
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_case_raises_complexity() {
+        let source = br#"
+defmodule MyApp do
+  def classify(x) do
+    case x do
+      0 -> :zero
+      _ -> :other
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_for_loop_raises_complexity() {
+        let source = br#"
+defmodule MyApp do
+  def loop(list) do
+    for x <- list do
+      x
+    end
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_in_function_call_tracking() {
+        let source = br#"
+defmodule MyApp do
+  def caller do
+    do_work()
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "caller" && c.callee == "do_work"));
+    }
+
+    #[test]
+    fn test_definition_keywords_not_tracked_as_calls() {
+        let source = br#"
+defmodule MyApp do
+  def caller do
+    do_work()
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        // Only the do_work() call is tracked, not def/defmodule.
+        assert!(visitor
+            .calls
+            .iter()
+            .all(|c| c.callee != "def" && c.callee != "defmodule"));
+    }
+
+    #[test]
+    fn test_top_level_call_not_tracked() {
+        let source = br#"
+defmodule MyApp do
+  IO.puts("hi")
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_functions() {
+        let source = br#"
+defmodule MyApp do
+  def a do
+    1
+  end
+
+  def b do
+    2
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "a");
+        assert_eq!(visitor.functions[1].name, "b");
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let source = br#""#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
 }
