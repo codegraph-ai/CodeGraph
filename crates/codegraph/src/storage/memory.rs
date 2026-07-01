@@ -233,6 +233,36 @@ mod tests {
     }
 
     #[test]
+    fn test_put_overwrites_existing_key() {
+        // BTreeMap::insert replaces the value for an existing key. Every other
+        // test puts fresh keys, so the overwrite path (len unchanged, value
+        // replaced) was never exercised.
+        let mut backend = MemoryBackend::new();
+        backend.put(b"key1", b"first").unwrap();
+        backend.put(b"key1", b"second").unwrap();
+
+        assert_eq!(backend.len(), 1, "overwriting a key must not grow the map");
+        assert_eq!(backend.get(b"key1").unwrap(), Some(b"second".to_vec()));
+    }
+
+    #[test]
+    fn test_scan_prefix_stops_at_non_matching_key() {
+        // scan_prefix ranges from `prefix..` then take_while's on starts_with.
+        // With a key that sorts AFTER the prefix range but does not match, the
+        // take_while predicate returns false and short-circuits — a branch the
+        // other scan test never hits because it has no trailing non-matching key.
+        let mut backend = MemoryBackend::new();
+        backend.put(b"node:1", b"a").unwrap();
+        backend.put(b"node:2", b"b").unwrap();
+        backend.put(b"zzz:1", b"c").unwrap();
+
+        let results = backend.scan_prefix(b"node:").unwrap();
+        assert_eq!(results.len(), 2, "the trailing zzz:1 key must be excluded");
+        assert_eq!(results[0].0, b"node:1");
+        assert_eq!(results[1].0, b"node:2");
+    }
+
+    #[test]
     fn test_flush_is_noop() {
         let mut backend = MemoryBackend::new();
         backend.put(b"key1", b"value1").unwrap();
