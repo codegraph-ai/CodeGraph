@@ -143,4 +143,90 @@ library SafeMath {
         assert_eq!(ir.classes.len(), 1);
         assert_eq!(ir.classes[0].name, "SafeMath");
     }
+
+    #[test]
+    fn test_module_metadata_fields() {
+        // The 4 prior tests asserted classes/traits/imports but never the
+        // ModuleEntity that extract() assembles directly.
+        let source = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("Vault.sol"), &config).unwrap();
+
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "Vault");
+        assert_eq!(module.path, "Vault.sol");
+        assert_eq!(module.language, "solidity");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_module_name_fallback() {
+        // An empty path has no file_stem, so the innermost unwrap_or("unknown")
+        // arm is the only way module.name resolves - a branch every named-file
+        // fixture skips.
+        let source = "pragma solidity ^0.8.0;\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new(""), &config).unwrap();
+
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_empty_source_zero_lines() {
+        // Empty source parses to a valid empty tree (not a ParseError): the
+        // module still assembles with line_count 0 and no entities.
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new("Empty.sol"), &config).unwrap();
+
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.line_count, 0);
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.functions.is_empty());
+        assert!(ir.imports.is_empty());
+    }
+
+    #[test]
+    fn test_extract_top_level_free_function() {
+        // Solidity 0.7.1+ free functions live outside any contract; they flow
+        // into ir.functions, a target none of the class/trait/import tests hit.
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+function computeSum(uint256 a, uint256 b) pure returns (uint256) {
+    return a + b;
+}
+"#;
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("Free.sol"), &config).unwrap();
+
+        assert_eq!(ir.functions.len(), 1);
+        assert_eq!(ir.functions[0].name, "computeSum");
+        assert!(ir.classes.is_empty());
+    }
+
+    #[test]
+    fn test_calls_always_empty_through_extract() {
+        // SolidityVisitor has no call-extraction path, so ir.calls (assigned
+        // from visitor.calls) stays empty even for a body full of calls.
+        let source = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract Caller {
+    function run() public {
+        require(msg.sender != address(0), "bad");
+        set(1);
+    }
+
+    function set(uint256 x) public {}
+}
+"#;
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("Caller.sol"), &config).unwrap();
+
+        assert!(ir.calls.is_empty());
+    }
 }
