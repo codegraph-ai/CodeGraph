@@ -57,6 +57,11 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        let config = ParserConfig::default();
+        extract(source, Path::new(path), &config).expect("extract should succeed")
+    }
+
     #[test]
     fn test_extract_simple_function() {
         let source = r#"
@@ -85,5 +90,115 @@ require(dplyr)
         assert!(result.is_ok());
         let ir = result.unwrap();
         assert_eq!(ir.imports.len(), 2);
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("x <- 1\n", "analysis.R");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "analysis");
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        // A path of ".." has no file_stem, exercising the "unknown" fallback.
+        let ir = extract_ok("x <- 1\n", "..");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_module_path_and_language() {
+        let ir = extract_ok("x <- 1\n", "pkg/util.R");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, Path::new("pkg/util.R").display().to_string());
+        assert_eq!(module.language, "r");
+    }
+
+    #[test]
+    fn test_module_line_count() {
+        let source = "a <- 1\nb <- 2\nc <- 3\n";
+        let ir = extract_ok(source, "test.R");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.line_count, source.lines().count());
+    }
+
+    #[test]
+    fn test_module_doc_comment_and_attributes_empty() {
+        let ir = extract_ok("x <- 1\n", "test.R");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.doc_comment, None);
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "empty.R");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source_yields_no_entities() {
+        let ir = extract_ok("# just a comment\n", "test.R");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_calls_populated_via_caller_callee() {
+        let source = r#"
+helper <- function() {
+    42
+}
+
+run <- function() {
+    helper()
+}
+"#;
+        let ir = extract_ok(source, "test.R");
+        assert_eq!(ir.functions.len(), 2);
+        assert!(
+            ir.calls
+                .iter()
+                .any(|c| c.caller == "run" && c.callee == "helper"),
+            "expected a run -> helper call relation, got {:?}",
+            ir.calls
+        );
+    }
+
+    #[test]
+    fn test_mixed_import_and_function() {
+        let source = r#"
+library(dplyr)
+
+transform_data <- function(df) {
+    df
+}
+"#;
+        let ir = extract_ok(source, "test.R");
+        assert_eq!(ir.imports.len(), 1);
+        assert_eq!(ir.imports[0].imported, "dplyr");
+        assert_eq!(ir.functions.len(), 1);
+        assert_eq!(ir.functions[0].name, "transform_data");
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = r#"
+f <- function() 1
+g <- function() 2
+h <- function() 3
+"#;
+        let ir = extract_ok(source, "test.R");
+        assert_eq!(ir.functions.len(), 3);
+        let names: Vec<&str> = ir.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"f"));
+        assert!(names.contains(&"g"));
+        assert!(names.contains(&"h"));
     }
 }
