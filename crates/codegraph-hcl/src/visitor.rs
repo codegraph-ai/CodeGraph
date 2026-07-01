@@ -690,4 +690,131 @@ module "vpc" {
             codegraph_parser_api::BODY_PREFIX_MAX_CHARS
         );
     }
+
+    #[test]
+    fn test_nested_block_extracted_via_recursion() {
+        // An unrecognized block type falls through to the default arm, which
+        // recurses into its body and extracts a nested recognized block.
+        let source = br#"group {
+  resource "aws_instance" "web" {
+    ami = "a"
+  }
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "aws_instance.web");
+    }
+
+    #[test]
+    fn test_module_without_source_attribute_falls_back_to_label() {
+        // A module block with no `source` attribute at all uses the label as
+        // the imported path.
+        let source = br#"module "vpc" {
+  cidr = "10.0.0.0/16"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "vpc");
+    }
+
+    #[test]
+    fn test_empty_body_resource_has_no_body_prefix() {
+        // An empty block body yields no body_prefix (filtered out as empty).
+        let source = br#"resource "aws_instance" "web" {}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0].body_prefix.is_none());
+    }
+
+    #[test]
+    fn test_module_import_flags_default() {
+        // A module import records no symbols and is not a wildcard.
+        let source = br#"module "vpc" {
+  source = "./modules/vpc"
+}"#;
+        let visitor = parse_and_visit(source);
+        let imp = &visitor.imports[0];
+        assert!(imp.symbols.is_empty());
+        assert!(!imp.is_wildcard);
+        assert_eq!(imp.importer, "main");
+    }
+
+    #[test]
+    fn test_resource_visibility_is_public() {
+        let source = br#"resource "aws_instance" "web" {
+  ami = "a"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_data_signature_format() {
+        let source = br#"data "aws_ami" "ubuntu" {
+  most_recent = true
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].signature,
+            "data \"aws_ami\" \"ubuntu\""
+        );
+    }
+
+    #[test]
+    fn test_resource_signature_format() {
+        let source = br#"resource "aws_instance" "web" {
+  ami = "a"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].signature,
+            "resource \"aws_instance\" \"web\""
+        );
+    }
+
+    #[test]
+    fn test_variable_signature_and_param_name() {
+        let source = br#"variable "region" {
+  type = string
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.signature, "variable \"region\"");
+        assert_eq!(f.parameters[0].name, "region");
+    }
+
+    #[test]
+    fn test_locals_block_yields_nothing() {
+        // A locals block is unrecognized; its attribute-only body produces no
+        // functions or imports.
+        let source = br#"locals {
+  common_tags = "x"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_provider_line_numbers() {
+        let source = br#"provider "aws" {
+  region = "us-east-1"
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "provider.aws");
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 3);
+    }
+
+    #[test]
+    fn test_output_multiple_labels_uses_first() {
+        // output signature/name derive from the first label only.
+        let source = br#"output "ip" "extra" {
+  value = "1.2.3.4"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].name, "output.ip");
+        assert_eq!(visitor.functions[0].signature, "output \"ip\"");
+    }
 }
