@@ -367,6 +367,39 @@ mod tests {
     }
 
     #[test]
+    fn test_class_doc_comment_prop() {
+        let mut ir = CodeIR::new(PathBuf::from("test.v"));
+        ir.add_class(ClassEntity::new("counter", 1, 10).with_doc("counter module doc"));
+
+        let (graph, info) = map(&ir);
+        let class = graph.get_node(info.classes[0]).unwrap();
+        // doc_comment arm emits the `doc` prop only when set.
+        assert_eq!(
+            class.properties.get_string("doc"),
+            Some("counter module doc")
+        );
+    }
+
+    #[test]
+    fn test_function_doc_and_body_prefix_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.v"));
+        ir.add_function(
+            FunctionEntity::new("compute", 2, 6)
+                .with_doc("computes a value")
+                .with_body_prefix("function compute"),
+        );
+
+        let (graph, info) = map(&ir);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        // doc_comment and body_prefix arms emit their props only when set.
+        assert_eq!(func.properties.get_string("doc"), Some("computes a value"));
+        assert_eq!(
+            func.properties.get_string("body_prefix"),
+            Some("function compute")
+        );
+    }
+
+    #[test]
     fn test_function_complexity_props() {
         let mut ir = CodeIR::new(PathBuf::from("test.v"));
         let complexity = ComplexityMetrics::new()
