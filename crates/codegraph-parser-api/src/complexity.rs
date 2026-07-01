@@ -324,4 +324,133 @@ mod tests {
         };
         assert!(high_nesting.has_high_nesting());
     }
+
+    #[test]
+    fn test_has_high_nesting_boundary_at_four() {
+        // > 4 is the threshold, so exactly 4 is NOT high nesting
+        let at_boundary = ComplexityMetrics {
+            max_nesting_depth: 4,
+            ..Default::default()
+        };
+        assert!(!at_boundary.has_high_nesting());
+    }
+
+    #[test]
+    fn test_grade_boundaries() {
+        // Assert every inclusive edge of the grade ranges.
+        let grade_at = |cc: u32| {
+            ComplexityMetrics {
+                cyclomatic_complexity: cc,
+                ..Default::default()
+            }
+            .grade()
+        };
+        assert_eq!(grade_at(1), 'A');
+        assert_eq!(grade_at(5), 'A');
+        assert_eq!(grade_at(6), 'B');
+        assert_eq!(grade_at(10), 'B');
+        assert_eq!(grade_at(11), 'C');
+        assert_eq!(grade_at(20), 'C');
+        assert_eq!(grade_at(21), 'D');
+        assert_eq!(grade_at(50), 'D');
+        assert_eq!(grade_at(51), 'F');
+        // A zero cyclomatic complexity falls through to the catch-all 'F' arm.
+        assert_eq!(grade_at(0), 'F');
+    }
+
+    #[test]
+    fn test_calculate_cyclomatic_includes_exception_handlers() {
+        // exception_handlers is a decision-point contributor that the existing
+        // calculate test omits.
+        let mut metrics = ComplexityMetrics::new()
+            .with_branches(2)
+            .with_loops(1)
+            .with_logical_operators(1)
+            .with_exception_handlers(3);
+        metrics.calculate_cyclomatic();
+        // CC = 1 + 2 + 1 + 1 + 3 = 8; early_returns must NOT contribute.
+        assert_eq!(metrics.cyclomatic_complexity, 8);
+
+        let with_returns = ComplexityMetrics::new().with_early_returns(5).finalize();
+        assert_eq!(with_returns.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_finalize_calculates_and_returns_self() {
+        let metrics = ComplexityMetrics::new()
+            .with_branches(4)
+            .with_nesting_depth(2)
+            .finalize();
+        // CC = 1 + 4 branches = 5, and the builder-set nesting is preserved.
+        assert_eq!(metrics.cyclomatic_complexity, 5);
+        assert_eq!(metrics.max_nesting_depth, 2);
+    }
+
+    #[test]
+    fn test_merge_nested_sums_counts_but_not_cyclomatic_or_nesting() {
+        let mut base = ComplexityMetrics::new()
+            .with_branches(1)
+            .with_loops(1)
+            .with_logical_operators(1)
+            .with_exception_handlers(1)
+            .with_early_returns(1)
+            .with_nesting_depth(2);
+        base.calculate_cyclomatic();
+        let base_cc = base.cyclomatic_complexity;
+
+        let nested = ComplexityMetrics::new()
+            .with_branches(2)
+            .with_loops(3)
+            .with_logical_operators(4)
+            .with_exception_handlers(5)
+            .with_early_returns(6)
+            .with_nesting_depth(9);
+
+        base.merge_nested(&nested);
+
+        assert_eq!(base.branches, 3);
+        assert_eq!(base.loops, 4);
+        assert_eq!(base.logical_operators, 5);
+        assert_eq!(base.exception_handlers, 6);
+        assert_eq!(base.early_returns, 7);
+        // merge_nested does not touch nesting depth or recompute cyclomatic.
+        assert_eq!(base.max_nesting_depth, 2);
+        assert_eq!(base.cyclomatic_complexity, base_cc);
+    }
+
+    #[test]
+    fn test_builder_increment_all_counters() {
+        let mut builder = ComplexityBuilder::new();
+        builder.add_logical_operator();
+        builder.add_exception_handler();
+        builder.add_early_return();
+
+        // current() exposes metrics without finalizing, so cyclomatic is still base 1.
+        let snapshot = builder.current();
+        assert_eq!(snapshot.logical_operators, 1);
+        assert_eq!(snapshot.exception_handlers, 1);
+        assert_eq!(snapshot.early_returns, 1);
+        assert_eq!(snapshot.cyclomatic_complexity, 1);
+
+        let metrics = builder.build();
+        // CC = 1 + 1 logical_operator + 1 exception_handler = 3; early_return excluded.
+        assert_eq!(metrics.cyclomatic_complexity, 3);
+    }
+
+    #[test]
+    fn test_builder_current_depth_and_exit_saturates() {
+        let mut builder = ComplexityBuilder::new();
+        assert_eq!(builder.current_depth(), 0);
+        builder.enter_scope();
+        builder.enter_scope();
+        assert_eq!(builder.current_depth(), 2);
+        builder.exit_scope();
+        assert_eq!(builder.current_depth(), 1);
+        // Extra exits saturate at zero rather than underflowing.
+        builder.exit_scope();
+        builder.exit_scope();
+        assert_eq!(builder.current_depth(), 0);
+        // The peak depth of 2 is retained in the built metrics.
+        assert_eq!(builder.build().max_nesting_depth, 2);
+    }
 }
