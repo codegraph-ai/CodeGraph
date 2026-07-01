@@ -308,4 +308,53 @@ mod tests {
         assert_eq!(set.len(), 3);
         assert!(set.contains(&Field::new("x").with_type("i32")));
     }
+
+    #[test]
+    fn class_default_serializes_exact_wire_format() {
+        // class_serde_round_trip only asserts round-trip equality; pin the exact
+        // snake_case wire names so an accidental rename of any multi-word field
+        // (line_start, line_end, is_abstract, is_interface, base_classes,
+        // implemented_traits, doc_comment, type_parameters, body_prefix) is caught.
+        let c = ClassEntity::new("Widget", 1, 20);
+        let v: serde_json::Value = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["name"], "Widget");
+        assert_eq!(v["visibility"], "public");
+        assert_eq!(v["line_start"], 1);
+        assert_eq!(v["line_end"], 20);
+        assert_eq!(v["is_abstract"], false);
+        assert_eq!(v["is_interface"], false);
+        assert_eq!(v["base_classes"], serde_json::json!([]));
+        assert_eq!(v["implemented_traits"], serde_json::json!([]));
+        assert_eq!(v["methods"], serde_json::json!([]));
+        assert_eq!(v["fields"], serde_json::json!([]));
+        // doc_comment / body_prefix carry no skip_serializing_if -> explicit null.
+        assert!(v["doc_comment"].is_null());
+        assert_eq!(v["attributes"], serde_json::json!([]));
+        assert_eq!(v["type_parameters"], serde_json::json!([]));
+        assert!(v["body_prefix"].is_null());
+    }
+
+    #[test]
+    fn class_populated_serializes_exact_wire_format() {
+        let c = ClassEntity::new("View", 1, 30)
+            .with_visibility("internal")
+            .abstract_class()
+            .interface()
+            .with_bases(vec!["Base".to_string()])
+            .with_traits(vec!["Drawable".to_string()])
+            .with_doc("a view")
+            .with_attributes(vec!["@component".to_string()])
+            .with_type_parameters(vec!["T".to_string()])
+            .with_body_prefix("class View {}");
+        let v: serde_json::Value = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["visibility"], "internal");
+        assert_eq!(v["is_abstract"], true);
+        assert_eq!(v["is_interface"], true);
+        assert_eq!(v["base_classes"], serde_json::json!(["Base"]));
+        assert_eq!(v["implemented_traits"], serde_json::json!(["Drawable"]));
+        assert_eq!(v["doc_comment"], "a view");
+        assert_eq!(v["attributes"], serde_json::json!(["@component"]));
+        assert_eq!(v["type_parameters"], serde_json::json!(["T"]));
+        assert_eq!(v["body_prefix"], "class View {}");
+    }
 }
