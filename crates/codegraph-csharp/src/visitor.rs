@@ -750,7 +750,9 @@ impl<'a> CSharpVisitor<'a> {
     }
 
     fn extract_return_type(&self, node: Node) -> Option<String> {
-        node.child_by_field_name("type")
+        // tree-sitter-c-sharp exposes a method's return type under the `returns`
+        // field (not `type`), so query that field to capture it.
+        node.child_by_field_name("returns")
             .map(|n| self.node_text(n))
             .filter(|t| t != "void")
     }
@@ -1548,6 +1550,218 @@ public abstract class MyClass
         assert!(
             visitor.functions[0].complexity.is_none(),
             "abstract methods should have no complexity"
+        );
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // Build a method whose body text exceeds BODY_PREFIX_MAX_CHARS bytes
+        let filler = "x".repeat(BODY_PREFIX_MAX_CHARS + 200);
+        let source = format!(
+            "public class C {{ public void M() {{ var s = \"{}\"; }} }}",
+            filler
+        );
+        let visitor = parse_and_visit(source.as_bytes());
+
+        assert_eq!(visitor.functions.len(), 1);
+        let bp = visitor.functions[0]
+            .body_prefix
+            .as_ref()
+            .expect("method body should yield a body_prefix");
+        assert_eq!(bp.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_line_numbers_offset_by_leading_blank_lines() {
+        // Two leading blank lines push the class to line 3 (1-indexed)
+        let source = b"\n\npublic class Late { public void M() {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].line_start, 3);
+        assert_eq!(visitor.classes[0].line_end, 3);
+    }
+
+    #[test]
+    fn test_doc_comment_xml_extracted() {
+        let source = b"/// <summary>Adds numbers</summary>\npublic class Adder {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(
+            visitor.classes[0].doc_comment.as_deref(),
+            Some("/// <summary>Adds numbers</summary>")
+        );
+    }
+
+    #[test]
+    fn test_plain_comment_not_treated_as_doc() {
+        // A regular // comment (not ///) must not become a doc_comment
+        let source = b"// just a note\npublic class Plain {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(visitor.classes[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_default_visibility_is_internal() {
+        // A class with no visibility modifier defaults to internal
+        let source = b"class NoModifier { void M() {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].visibility, "internal");
+        assert_eq!(visitor.functions[0].visibility, "internal");
+    }
+
+    #[test]
+    fn test_void_return_type_is_none() {
+        let source = b"public class C { public void Nothing() {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0].return_type.is_none());
+    }
+
+    #[test]
+    fn test_non_void_return_type_extracted() {
+        let source = b"public class C { public string Name() { return \"a\"; } }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].return_type.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn test_parameters_extracted_with_types() {
+        let source = b"public class C { public int Add(int a, string b) { return a; } }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "a");
+        assert_eq!(params[0].type_annotation.as_deref(), Some("int"));
+        assert_eq!(params[1].name, "b");
+        assert_eq!(params[1].type_annotation.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn test_variadic_params_keyword_not_wrapped_in_parameter_node() {
+        // Regression pin: tree-sitter-c-sharp does NOT wrap a `params`-modified
+        // argument in a `parameter` node - the parameter_list children are the bare
+        // `params` keyword, the `array_type`, and the identifier. extract_parameters
+        // only collects `parameter`-kind children, so the variadic arg is dropped and
+        // is_variadic detection is unreachable for this grammar.
+        let source = b"public class C { public void M(params int[] nums) {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(
+            visitor.functions[0].parameters.is_empty(),
+            "params-variadic argument is not extracted as a Parameter"
+        );
+    }
+
+    #[test]
+    fn test_multiple_params_source_order() {
+        // Non-variadic parameters are wrapped in `parameter` nodes and kept in order
+        let source = b"public class C { public void M(int a, string b, bool c) {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let names: Vec<&str> = visitor.functions[0]
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_enum_tagged_and_record_tagged_attributes() {
+        let source = b"public enum Color { Red, Green } public record Point(int X, int Y);";
+        let visitor = parse_and_visit(source);
+
+        let color = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Color")
+            .expect("enum Color should be extracted");
+        assert!(color.attributes.contains(&"enum".to_string()));
+
+        let point = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Point")
+            .expect("record Point should be extracted");
+        assert!(point.attributes.contains(&"record".to_string()));
+    }
+
+    #[test]
+    fn test_method_attributes_extracted() {
+        let source = b"public class C { [Obsolete] public void Old() {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0]
+            .attributes
+            .iter()
+            .any(|a| a.contains("Obsolete")));
+    }
+
+    #[test]
+    fn test_ternary_raises_complexity() {
+        // A conditional_expression (?:) adds one decision point over the baseline
+        let source = b"
+public class C
+{
+    public int Pick(bool b)
+    {
+        return b ? 1 : 2;
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let cx = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("method with a body should have complexity");
+        assert!(
+            cx.cyclomatic_complexity >= 2,
+            "ternary should raise cyclomatic complexity above the baseline of 1, got {}",
+            cx.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_foreach_and_do_raise_complexity() {
+        let source = b"
+public class C
+{
+    public void Loop(int[] xs)
+    {
+        foreach (var x in xs) { }
+        do { } while (false);
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let cx = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("method with a body should have complexity");
+        // baseline 1 + foreach loop + do loop
+        assert!(
+            cx.cyclomatic_complexity >= 3,
+            "foreach and do-while should each raise complexity, got {}",
+            cx.cyclomatic_complexity
         );
     }
 }
