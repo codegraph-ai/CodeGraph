@@ -623,4 +623,384 @@ factorial(N) when N > 0 ->
             factorial_count
         );
     }
+
+    // ------------------------------------------------------------------
+    // Function metadata defaults
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = br#"-module(m).
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "foo");
+        assert!(!f.is_async, "Erlang functions are never async");
+        assert!(f.is_static, "Erlang functions are always static");
+        assert!(!f.is_abstract);
+        assert_eq!(f.return_type, None);
+        assert_eq!(f.parent_class, None);
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_function_line_bounds_one_based() {
+        let source = br#"-module(m).
+
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        // `foo` is on the third physical line (1-based).
+        assert_eq!(visitor.functions[0].line_start, 3);
+        assert_eq!(visitor.functions[0].line_end, 3);
+    }
+
+    #[test]
+    fn test_function_signature_first_line() {
+        let source = br#"-module(m).
+compute(X) ->
+    X + 1.
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "compute(X) ->");
+    }
+
+    #[test]
+    fn test_function_body_prefix_present() {
+        let source = br#"-module(m).
+compute(X) ->
+    X + 1.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0]
+            .body_prefix
+            .as_deref()
+            .unwrap()
+            .contains("compute"));
+    }
+
+    // ------------------------------------------------------------------
+    // Parameters
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_single_var_parameter() {
+        let source = br#"-module(m).
+greet(Name) -> Name.
+"#;
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "Name");
+    }
+
+    #[test]
+    fn test_multiple_var_parameters() {
+        let source = br#"-module(m).
+add(A, B) -> A + B.
+"#;
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "A");
+        assert_eq!(params[1].name, "B");
+    }
+
+    #[test]
+    fn test_atom_parameter_captured() {
+        // The first clause pattern-matches an atom literal in the arg position.
+        let source = br#"-module(m).
+handle(stop) -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "stop");
+    }
+
+    #[test]
+    fn test_integer_pattern_param_dropped() {
+        // A `factorial(0)` head has an integer arg, which is neither var nor atom
+        // and is therefore not recorded as a parameter.
+        let source = br#"-module(m).
+zero(0) -> yes.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn test_no_parameters() {
+        let source = br#"-module(m).
+noop() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].parameters.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // is_test detection
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_is_test_prefix() {
+        let source = br#"-module(m).
+test_foo() -> ok.
+prop_bar() -> ok.
+plain() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let by = |n: &str| visitor.functions.iter().find(|f| f.name == n).unwrap();
+        assert!(by("test_foo").is_test);
+        assert!(by("prop_bar").is_test);
+        assert!(!by("plain").is_test);
+    }
+
+    // ------------------------------------------------------------------
+    // Doc comments
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_doc_comment_extraction() {
+        let source = br#"-module(m).
+%% @doc Does the thing
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].doc_comment.as_deref(),
+            Some("%% @doc Does the thing")
+        );
+    }
+
+    #[test]
+    fn test_doc_comment_absent() {
+        let source = br#"-module(m).
+
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].doc_comment, None);
+    }
+
+    // ------------------------------------------------------------------
+    // Complexity
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_complexity_single_clause_counts_clause_branch() {
+        // Even a single-clause function has one `function_clause` node, which the
+        // complexity walker treats as a branch, so the baseline is 2 (1 + 1 clause).
+        let source = br#"-module(m).
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity,
+            2
+        );
+    }
+
+    #[test]
+    fn test_complexity_case_raises() {
+        let source = br#"-module(m).
+classify(N) ->
+    case N of
+        0 -> zero;
+        _ -> other
+    end.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity
+                > 1
+        );
+    }
+
+    #[test]
+    fn test_complexity_multi_clause_raises() {
+        let source = br#"-module(m).
+f(0) -> zero;
+f(_) -> other.
+"#;
+        let visitor = parse_and_visit(source);
+        // Two clauses of the same fun_decl each register as a branch.
+        let f = visitor.functions.iter().find(|f| f.name == "f").unwrap();
+        assert!(f.complexity.as_ref().unwrap().cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_logical_operator_raises() {
+        let source = br#"-module(m).
+flag(A, B) -> A andalso B.
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.functions[0]
+                .complexity
+                .as_ref()
+                .unwrap()
+                .cyclomatic_complexity
+                > 1
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Call extraction
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_local_call_tracked() {
+        let source = br#"-module(m).
+a() -> b().
+b() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.caller == "a")
+            .expect("expected a->b call");
+        assert_eq!(call.callee, "b");
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_remote_call_not_tracked() {
+        // A remote call `io:format(...)` wraps the callee in a `remote` node, so
+        // first_direct_atom finds no direct atom and no CallRelation is emitted.
+        let source = br#"-module(m).
+go() -> io:format("hi~n").
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_call_records_caller() {
+        let source = br#"-module(m).
+outer() -> helper(), helper().
+helper() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let outer_calls: Vec<_> = visitor
+            .calls
+            .iter()
+            .filter(|c| c.caller == "outer")
+            .collect();
+        assert_eq!(outer_calls.len(), 2);
+        assert!(outer_calls.iter().all(|c| c.callee == "helper"));
+    }
+
+    // ------------------------------------------------------------------
+    // Imports / records / behaviours
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_import_symbols_and_importer() {
+        let source = br#"-module(mymod).
+-import(lists, [map/2, filter/2]).
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "lists");
+        assert_eq!(imp.importer, "mymod");
+        assert!(!imp.is_wildcard);
+        assert_eq!(imp.alias, None);
+        assert!(imp.symbols.contains(&"map".to_string()));
+        assert!(imp.symbols.contains(&"filter".to_string()));
+    }
+
+    #[test]
+    fn test_import_importer_defaults_to_main_without_module() {
+        let source = br#"-import(lists, [map/2]).
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports[0].importer, "main");
+    }
+
+    #[test]
+    fn test_record_attributes() {
+        let source = br#"-module(m).
+-record(person, {name, age}).
+foo() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let c = &visitor.classes[0];
+        assert_eq!(c.name, "person");
+        assert_eq!(c.visibility, "public");
+        assert!(!c.is_abstract);
+        assert!(!c.is_interface);
+        assert_eq!(c.attributes, vec!["record".to_string()]);
+    }
+
+    #[test]
+    fn test_behaviour_attributes() {
+        let source = br#"-module(m).
+-behaviour(gen_server).
+init([]) -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let t = &visitor.traits[0];
+        assert_eq!(t.name, "gen_server");
+        assert_eq!(t.visibility, "public");
+        assert_eq!(t.attributes, vec!["behaviour".to_string()]);
+    }
+
+    #[test]
+    fn test_behavior_american_spelling() {
+        let source = br#"-module(m).
+-behavior(gen_server).
+init([]) -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.traits.len(), 1);
+        assert_eq!(visitor.traits[0].name, "gen_server");
+    }
+
+    // ------------------------------------------------------------------
+    // Edge cases
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.traits.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+        assert_eq!(visitor.module_name, None);
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let visitor = parse_and_visit(b"%% just a comment\n");
+        assert!(visitor.functions.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = br#"-module(m).
+a() -> ok.
+b() -> ok.
+c() -> ok.
+"#;
+        let visitor = parse_and_visit(source);
+        let names: Vec<_> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+        assert!(names.contains(&"c"));
+    }
 }
