@@ -89,9 +89,15 @@ impl<'a> SolidityVisitor<'a> {
         let mut symbols: Vec<String> = Vec::new();
         let mut is_wildcard = false;
 
+        // Track whether we are inside `{ ... }`: in this grammar the named-import
+        // identifiers are direct children of `import_directive` between the braces,
+        // while a bare identifier outside the braces is an `as` alias.
+        let mut in_braces = false;
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
+                "{" => in_braces = true,
+                "}" => in_braces = false,
                 "string" | "string_literal" => {
                     // Strip surrounding quotes
                     let raw = self.node_text(child);
@@ -109,9 +115,14 @@ impl<'a> SolidityVisitor<'a> {
                         }
                     }
                 }
-                "identifier" => {
-                    // Could be an alias after `as`
-                    alias = Some(self.node_text(child));
+                "identifier" | "import_specifier" => {
+                    if in_braces {
+                        // import { A, B } from "path" — a named symbol
+                        symbols.push(self.node_text(child));
+                    } else {
+                        // A bare identifier outside braces is an `as` alias
+                        alias = Some(self.node_text(child));
+                    }
                 }
                 _ => {}
             }
@@ -904,5 +915,178 @@ library SafeMath {
 
         assert_eq!(visitor.imports.len(), 1);
         assert_eq!(visitor.imports[0].imported, "./IERC20.sol");
+    }
+
+    #[test]
+    fn test_library_extraction() {
+        let source = b"pragma solidity ^0.8.0;\n\nlibrary SafeMath {\n    function add(uint256 a, uint256 b) internal pure returns (uint256) {\n        return a + b;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        // Library maps to a ClassEntity tagged with the "library" attribute.
+        assert_eq!(visitor.classes.len(), 1);
+        let lib = &visitor.classes[0];
+        assert_eq!(lib.name, "SafeMath");
+        assert_eq!(lib.visibility, "public");
+        assert!(lib.attributes.contains(&"library".to_string()));
+        assert!(!lib.is_abstract);
+        // Its function becomes a method, not a top-level free function.
+        assert!(visitor.functions.is_empty());
+        assert_eq!(lib.methods.len(), 1);
+        assert_eq!(lib.methods[0].name, "add");
+    }
+
+    #[test]
+    fn test_abstract_contract_flag() {
+        let source = b"pragma solidity ^0.8.0;\n\nabstract contract Base {\n    function foo() public virtual;\n}\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(visitor.classes[0].is_abstract);
+        // A body-less virtual function is flagged abstract.
+        let foo = &visitor.classes[0].methods[0];
+        assert_eq!(foo.name, "foo");
+        assert!(foo.is_abstract);
+        assert!(foo.complexity.is_none());
+    }
+
+    #[test]
+    fn test_constructor_extraction() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract Token {\n    constructor(uint256 supply) {\n        _supply = supply;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let ctor = visitor.classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name == "constructor")
+            .expect("constructor method present");
+        // Constructor's return type and parent_class are the enclosing contract name.
+        assert_eq!(ctor.return_type.as_deref(), Some("Token"));
+        assert_eq!(ctor.parent_class.as_deref(), Some("Token"));
+        assert_eq!(ctor.parameters.len(), 1);
+        assert_eq!(ctor.parameters[0].name, "supply");
+    }
+
+    #[test]
+    fn test_modifier_extraction() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract Owned {\n    modifier onlyOwner() {\n        require(msg.sender == owner);\n        _;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let modifier = visitor.classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name == "onlyOwner")
+            .expect("modifier method present");
+        assert!(modifier.attributes.contains(&"modifier".to_string()));
+        assert_eq!(modifier.visibility, "internal");
+        assert!(modifier.signature.starts_with("modifier onlyOwner("));
+    }
+
+    #[test]
+    fn test_special_receive_and_fallback() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract Wallet {\n    receive() external payable {}\n    fallback() external payable {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let names: Vec<&str> = visitor.classes[0]
+            .methods
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(names.contains(&"receive"));
+        assert!(names.contains(&"fallback"));
+    }
+
+    #[test]
+    fn test_top_level_free_function() {
+        let source = b"pragma solidity ^0.8.0;\n\nfunction helper(uint256 x) pure returns (uint256) {\n    return x + 1;\n}\n";
+        let visitor = parse_and_visit(source);
+
+        // Top-level (no enclosing contract) functions land in functions, not classes.
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "helper");
+        assert!(f.parent_class.is_none());
+        assert_eq!(f.parameters.len(), 1);
+        assert_eq!(f.parameters[0].name, "x");
+        assert_eq!(f.return_type.as_deref(), Some("uint256"));
+    }
+
+    #[test]
+    fn test_import_named_symbols() {
+        let source =
+            b"pragma solidity ^0.8.0;\n\nimport { IERC20, IERC721 } from \"./tokens.sol\";\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "./tokens.sol");
+        assert!(imp.symbols.contains(&"IERC20".to_string()));
+        assert!(imp.symbols.contains(&"IERC721".to_string()));
+        // Brace-delimited names are symbols, not an alias.
+        assert!(imp.alias.is_none());
+    }
+
+    #[test]
+    fn test_import_alias() {
+        let source = b"pragma solidity ^0.8.0;\n\nimport \"./token.sol\" as Tok;\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "./token.sol");
+        // An identifier outside braces is captured as the `as` alias, not a symbol.
+        assert_eq!(imp.alias.as_deref(), Some("Tok"));
+        assert!(imp.symbols.is_empty());
+    }
+
+    #[test]
+    fn test_function_visibility_public() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function pub() public {}\n    function priv() private {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let methods = &visitor.classes[0].methods;
+        let pub_fn = methods.iter().find(|m| m.name == "pub").unwrap();
+        let priv_fn = methods.iter().find(|m| m.name == "priv").unwrap();
+        assert_eq!(pub_fn.visibility, "public");
+        assert_eq!(priv_fn.visibility, "private");
+    }
+
+    #[test]
+    fn test_function_complexity_branches() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    function branchy(uint256 x) public returns (uint256) {\n        if (x > 0) {\n            return 1;\n        } else {\n            return 2;\n        }\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        let complexity = f.complexity.as_ref().expect("body yields complexity");
+        // An if/else branch raises cyclomatic complexity above the base of 1.
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_natspec_doc_comment() {
+        let source = b"pragma solidity ^0.8.0;\n\ncontract C {\n    /// @notice does a thing\n    function documented() public {}\n}\n";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.classes[0].methods[0];
+        assert_eq!(f.name, "documented");
+        assert!(f
+            .doc_comment
+            .as_deref()
+            .map(|d| d.contains("@notice"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn test_interface_required_methods() {
+        let source = b"pragma solidity ^0.8.0;\n\ninterface IToken {\n    function totalSupply() external view returns (uint256);\n    function balanceOf(address a) external view returns (uint256);\n}\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.traits.len(), 1);
+        let names: Vec<&str> = visitor.traits[0]
+            .required_methods
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(names.contains(&"totalSupply"));
+        assert!(names.contains(&"balanceOf"));
     }
 }
