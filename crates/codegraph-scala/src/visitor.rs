@@ -429,7 +429,9 @@ mod tests {
         use tree_sitter::Parser;
 
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_scala::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_scala::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = ScalaVisitor::new(source);
