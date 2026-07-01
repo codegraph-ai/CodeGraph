@@ -1873,4 +1873,195 @@ mod tests {
             kept.len()
         );
     }
+
+    // === Property-helper builders ===
+
+    #[test]
+    fn test_string_prop_shape() {
+        let p = string_prop("a file uri");
+        assert_eq!(p.property_type, "string");
+        assert_eq!(p.description.as_deref(), Some("a file uri"));
+        assert!(p.default.is_none());
+        assert!(p.enum_values.is_none());
+        assert!(p.items.is_none());
+    }
+
+    #[test]
+    fn test_number_prop_default_present_and_absent() {
+        let with = number_prop("depth", Some(3.0));
+        assert_eq!(with.property_type, "number");
+        assert_eq!(with.default, Some(serde_json::json!(3.0)));
+
+        let without = number_prop("line", None);
+        assert!(without.default.is_none());
+    }
+
+    #[test]
+    fn test_boolean_prop_encodes_default() {
+        let t = boolean_prop("include external", true);
+        assert_eq!(t.property_type, "boolean");
+        assert_eq!(t.default, Some(serde_json::json!(true)));
+
+        let f = boolean_prop("summary", false);
+        assert_eq!(f.default, Some(serde_json::json!(false)));
+    }
+
+    #[test]
+    fn test_enum_prop_values_and_default() {
+        let p = enum_prop(
+            "direction",
+            vec!["imports", "importedBy", "both"],
+            Some("both"),
+        );
+        assert_eq!(p.property_type, "string");
+        assert_eq!(
+            p.enum_values.as_deref(),
+            Some(
+                [
+                    "imports".to_string(),
+                    "importedBy".to_string(),
+                    "both".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(p.default, Some(serde_json::json!("both")));
+
+        let no_default = enum_prop("kind", vec!["a", "b"], None);
+        assert!(no_default.default.is_none());
+    }
+
+    #[test]
+    fn test_array_prop_wraps_item_type() {
+        let p = array_prop("list of ids", "string");
+        assert_eq!(p.property_type, "array");
+        let items = p.items.expect("array prop must carry items schema");
+        assert_eq!(items.property_type, "string");
+        assert!(
+            items.description.is_none(),
+            "item schema carries no description"
+        );
+    }
+
+    // === Cross-tool structural invariants ===
+
+    #[test]
+    fn test_every_tool_schema_is_object() {
+        for tool in get_all_tools() {
+            assert_eq!(
+                tool.input_schema.schema_type, "object",
+                "tool {} must use an object input schema",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_tool_name_is_codegraph_prefixed() {
+        for tool in get_all_tools() {
+            assert!(
+                tool.name.starts_with("codegraph_"),
+                "tool name {} is not codegraph_-prefixed",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_required_fields_reference_declared_properties() {
+        for tool in get_all_tools() {
+            let Some(required) = tool.input_schema.required.as_ref() else {
+                continue;
+            };
+            let props = tool.input_schema.properties.as_ref().unwrap_or_else(|| {
+                panic!("tool {} declares required but no properties", tool.name)
+            });
+            for key in required {
+                assert!(
+                    props.contains_key(key),
+                    "tool {} requires undeclared property {}",
+                    tool.name,
+                    key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_enum_defaults_are_members_of_their_enum() {
+        for tool in get_all_tools() {
+            let Some(props) = tool.input_schema.properties.as_ref() else {
+                continue;
+            };
+            for (name, prop) in props {
+                let (Some(values), Some(default)) =
+                    (prop.enum_values.as_ref(), prop.default.as_ref())
+                else {
+                    continue;
+                };
+                let default_str = default.as_str().unwrap_or_else(|| {
+                    panic!(
+                        "tool {} prop {} enum default is not a string",
+                        tool.name, name
+                    )
+                });
+                assert!(
+                    values.iter().any(|v| v == default_str),
+                    "tool {} prop {} default {:?} is not in enum {:?}",
+                    tool.name,
+                    name,
+                    default_str,
+                    values
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_array_properties_declare_item_schema() {
+        for tool in get_all_tools() {
+            let Some(props) = tool.input_schema.properties.as_ref() else {
+                continue;
+            };
+            for (name, prop) in props {
+                if prop.property_type == "array" {
+                    assert!(
+                        prop.items.is_some(),
+                        "tool {} array prop {} is missing its items schema",
+                        tool.name,
+                        name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_every_property_has_a_description() {
+        for tool in get_all_tools() {
+            let Some(props) = tool.input_schema.properties.as_ref() else {
+                continue;
+            };
+            for (name, prop) in props {
+                assert!(
+                    prop.description.as_deref().is_some_and(|d| !d.is_empty()),
+                    "tool {} prop {} has no description",
+                    tool.name,
+                    name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_serializes_with_camelcase_input_schema() {
+        let tool = get_dependency_graph_tool();
+        let json = serde_json::to_value(&tool).expect("tool should serialize");
+        // Serde renames input_schema -> inputSchema and the schema uses a `type` key.
+        assert_eq!(json["name"], "codegraph_get_dependency_graph");
+        assert_eq!(json["inputSchema"]["type"], "object");
+        assert_eq!(json["inputSchema"]["required"][0], "uri");
+        // A camelCase property key survives untouched into the serialized schema.
+        assert!(json["inputSchema"]["properties"]["includeExternal"].is_object());
+    }
 }
