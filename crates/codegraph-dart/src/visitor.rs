@@ -661,6 +661,7 @@ impl<'a> DartVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> DartVisitor<'_> {
         use tree_sitter::Parser;
@@ -968,5 +969,125 @@ mod tests {
         assert!(visitor.classes.is_empty());
         assert!(visitor.imports.is_empty());
         assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn ternary_conditional_raises_complexity() {
+        // The grammar emits `conditional_expression` for `a ? b : c`, which the
+        // complexity visitor counts as a branch.
+        let source = b"int f(int a) {\n  return a > 0 ? 1 : -1;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn for_loop_raises_complexity() {
+        let source =
+            b"int f() {\n  for (var i = 0; i < 3; i++) {\n    use(i);\n  }\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn multiple_parameters_preserve_source_order() {
+        let source = b"void f(int a, int b, int c) {\n  return;\n}";
+        let visitor = parse_and_visit(source);
+
+        let names: Vec<&str> = visitor.functions[0]
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn oversized_body_prefix_is_truncated_to_max() {
+        // A body longer than BODY_PREFIX_MAX_CHARS bytes must be clipped.
+        let filler = "  x();\n".repeat(400); // ~2800 bytes, well over 1024
+        let src = format!("void big() {{\n{filler}}}");
+        let visitor = parse_and_visit(src.as_bytes());
+
+        let f = &visitor.functions[0];
+        let prefix = f.body_prefix.as_ref().expect("body prefix present");
+        assert_eq!(prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn while_loop_raises_complexity() {
+        let source = b"int f() {\n  while (true) {\n    break;\n  }\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn catch_clause_raises_complexity() {
+        let source =
+            b"int f() {\n  try {\n    risky();\n  } catch (e) {\n    return -1;\n  }\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn import_with_alias_still_records_uri() {
+        // The alias field is not populated, but the import is still recorded.
+        let source = b"import 'dart:io' as io;";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.imports.iter().any(|i| i.imported == "dart:io"));
+    }
+
+    #[test]
+    fn class_with_body_captures_body_prefix() {
+        let source = b"class Box {\n  int size = 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let prefix = visitor.classes[0]
+            .body_prefix
+            .as_ref()
+            .expect("class body prefix present");
+        assert!(prefix.contains("size"));
+    }
+
+    #[test]
+    fn getter_return_type_is_extracted() {
+        let source = b"class Box {\n  int get size => 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let g = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "size")
+            .expect("getter extracted");
+        assert_eq!(g.return_type.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn leading_blank_lines_offset_function_line_start() {
+        let source = b"\n\nint answer() {\n  return 42;\n}";
+        let visitor = parse_and_visit(source);
+
+        // The signature starts on the third physical line.
+        assert_eq!(visitor.functions[0].line_start, 3);
     }
 }
