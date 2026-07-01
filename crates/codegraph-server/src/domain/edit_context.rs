@@ -843,4 +843,350 @@ mod tests {
         assert!(result.callers.is_empty());
         assert!(result.tests.is_empty());
     }
+
+    #[tokio::test]
+    async fn line_end_zero_falls_back_to_line_start() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // line_end == 0 exercises the `if e == 0 { line_start }` branch: the
+        // reported range end must collapse onto the start line.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("zero_end")),
+                ("path", s("/src/z.rs")),
+                ("source", s("fn zero_end() {}")),
+                ("line_start", PropertyValue::Int(5)),
+                ("line_end", PropertyValue::Int(0)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/z.rs",
+            "file:///src/z.rs",
+            5,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.location.range.start.line, 5);
+        assert_eq!(result.symbol.location.range.end.line, 5);
+    }
+
+    #[tokio::test]
+    async fn language_unknown_when_no_language_and_no_extension() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No `language` property and a path with no file extension: the language
+        // resolution falls all the way through to "unknown".
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("recipe")),
+                ("path", s("/src/Makefile")),
+                ("source", s("recipe:")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(2)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/Makefile",
+            "file:///src/Makefile",
+            1,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.language, "unknown");
+    }
+
+    #[tokio::test]
+    async fn missing_source_yields_placeholder_but_symbol_section_present() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No inline `source` and a nonexistent path: get_symbol_source returns
+        // None, so the placeholder is substituted. The placeholder is non-empty,
+        // so the symbol section still counts as present.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("ghost")),
+                ("path", s("/nonexistent/ghost.rs")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(3)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/nonexistent/ghost.rs",
+            "file:///nonexistent/ghost.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.code, "<source not available>");
+        assert!(result.metadata.sections.symbol);
+    }
+
+    #[tokio::test]
+    async fn caller_without_source_listed_with_none_code() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ],
+        );
+        // Caller has no inline source and a nonexistent path, so its source is
+        // unavailable; it is still listed with code = None.
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("bodyless_caller")),
+                ("path", s("/nonexistent/c.rs")),
+                ("line_start", PropertyValue::Int(7)),
+                ("line_end", PropertyValue::Int(9)),
+            ],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.callers.len(), 1);
+        assert_eq!(result.callers[0].name, "bodyless_caller");
+        assert!(result.callers[0].code.is_none());
+    }
+
+    #[tokio::test]
+    async fn multiple_callers_all_listed() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ],
+        );
+        for (name, path) in [("caller_a", "/src/a.rs"), ("caller_b", "/src/b.rs")] {
+            let c = add_node(
+                &mut g,
+                NodeType::Function,
+                &[
+                    ("name", s(name)),
+                    ("path", s(path)),
+                    ("source", s("fn c() { target(); }")),
+                    ("line_start", PropertyValue::Int(1)),
+                    ("line_end", PropertyValue::Int(3)),
+                ],
+            );
+            edge(&mut g, c, target, EdgeType::Calls);
+        }
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.callers.len(), 2);
+        let mut names: Vec<&str> = result.callers.iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["caller_a", "caller_b"]);
+    }
+
+    #[tokio::test]
+    async fn stage1_test_not_calling_target_excluded() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ],
+        );
+        let other = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("other")),
+                ("path", s("/src/o.rs")),
+                ("source", s("fn other() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(3)),
+            ],
+        );
+        // A test entry in a different file that calls `other`, never the target;
+        // stage 1 must not surface it and stage 2 (same-file) does not apply.
+        let test_fn = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("test_other_only")),
+                ("path", s("/src/o_test.rs")),
+                ("source", s("fn test_other_only() { other(); }")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(4)),
+            ],
+        );
+        edge(&mut g, test_fn, other, EdgeType::Calls);
+        let _ = target;
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert!(result.tests.is_empty());
+        assert!(!result.metadata.sections.tests);
+    }
+
+    #[tokio::test]
+    async fn class_target_type_lowercased() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // A Class node exercises the `{:?}` -> lowercase node-type rendering.
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[
+                ("name", s("Widget")),
+                ("path", s("/src/w.rs")),
+                ("source", s("struct Widget {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(4)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/w.rs",
+            "file:///src/w.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.symbol_type, "class");
+        assert_eq!(result.symbol.name, "Widget");
+    }
+
+    #[tokio::test]
+    async fn same_file_non_function_test_node_excluded() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(10)),
+            ],
+        );
+        // A same-file, test-flagged node that is NOT a Function: the stage-2 scan
+        // guards on node_type == Function, so this must be excluded.
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[
+                ("name", s("TestFixture")),
+                ("path", s("/src/t.rs")),
+                ("is_test", PropertyValue::Bool(true)),
+                ("line_start", PropertyValue::Int(20)),
+                ("line_end", PropertyValue::Int(25)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            5,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert!(result.tests.is_empty());
+    }
 }
