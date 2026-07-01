@@ -235,4 +235,98 @@ mod tests {
         assert_eq!(f.name, "name");
         assert!(f.body_prefix.as_deref().unwrap().contains("my value"));
     }
+
+    #[test]
+    fn key_without_value_uses_key_as_signature_and_no_body_prefix() {
+        // A pair with an empty value yields no value node, so body_prefix stays None
+        // and the signature falls back to the bare key.
+        let visitor = parse_and_visit(b"enabled:\n");
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "enabled");
+        assert_eq!(f.signature, "enabled");
+        assert!(f.body_prefix.is_none());
+    }
+
+    #[test]
+    fn leading_blank_lines_offset_line_numbers() {
+        let visitor = parse_and_visit(b"\n\nkind: Deployment\n");
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].line_start, 3);
+        assert_eq!(visitor.functions[0].line_end, 3);
+    }
+
+    #[test]
+    fn numeric_value_preview_in_signature() {
+        let visitor = parse_and_visit(b"replicas: 3\n");
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "replicas");
+        assert_eq!(f.signature, "replicas: 3");
+        assert_eq!(f.body_prefix.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn boolean_value_preview_in_signature() {
+        let visitor = parse_and_visit(b"paused: false\n");
+        let f = &visitor.functions[0];
+        assert_eq!(f.signature, "paused: false");
+    }
+
+    #[test]
+    fn flow_mapping_value_captured_in_body_prefix() {
+        let visitor = parse_and_visit(b"labels: {app: web, tier: fe}\n");
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "labels");
+        assert!(f.body_prefix.as_deref().unwrap().contains("app: web"));
+    }
+
+    #[test]
+    fn flow_sequence_value_captured_in_body_prefix() {
+        let visitor = parse_and_visit(b"ports: [80, 443]\n");
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "ports");
+        assert!(f.body_prefix.as_deref().unwrap().contains("80"));
+    }
+
+    #[test]
+    fn comment_between_keys_does_not_break_extraction() {
+        let source = b"a: 1\n# a comment\nb: 2\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "a");
+        assert_eq!(visitor.functions[1].name, "b");
+    }
+
+    #[test]
+    fn three_top_level_keys_preserve_source_order() {
+        let source = b"first: 1\nsecond: 2\nthird: 3\n";
+        let visitor = parse_and_visit(source);
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn oversized_value_body_prefix_is_truncated() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // A single scalar longer than the limit is truncated to exactly the max.
+        let big = "x".repeat(BODY_PREFIX_MAX_CHARS * 2);
+        let source = format!("key: {big}\n");
+        let visitor = parse_and_visit(source.as_bytes());
+        let f = &visitor.functions[0];
+        assert_eq!(
+            f.body_prefix.as_deref().unwrap().len(),
+            BODY_PREFIX_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn signature_previews_only_first_line_of_flow_value() {
+        // A flow mapping spanning multiple physical lines still previews only the first.
+        let source = b"data: {\n  a: 1,\n  b: 2\n}\n";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "data");
+        assert!(!f.signature.contains('\n'));
+    }
 }
