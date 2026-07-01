@@ -333,6 +333,43 @@ mod tests {
     }
 
     #[test]
+    fn test_class_doc_and_body_prefix_arms() {
+        let mut ir = CodeIR::new(PathBuf::from("test.f90"));
+        ir.add_class(
+            ClassEntity::new("hello", 1, 5)
+                .with_doc("program doc")
+                .with_body_prefix("program hello"),
+        );
+
+        let (graph, info) = map(&ir);
+        let class = graph.get_node(info.classes[0]).unwrap();
+        // Both optional arms only emit props when the entity carries them.
+        assert_eq!(class.properties.get_string("doc"), Some("program doc"));
+        assert_eq!(
+            class.properties.get_string("body_prefix"),
+            Some("program hello")
+        );
+    }
+
+    #[test]
+    fn test_function_doc_and_body_prefix_arms() {
+        let mut ir = CodeIR::new(PathBuf::from("test.f90"));
+        ir.add_function(
+            FunctionEntity::new("compute", 1, 10)
+                .with_doc("computes a value")
+                .with_body_prefix("real function compute"),
+        );
+
+        let (graph, info) = map(&ir);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.properties.get_string("doc"), Some("computes a value"));
+        assert_eq!(
+            func.properties.get_string("body_prefix"),
+            Some("real function compute")
+        );
+    }
+
+    #[test]
     fn test_free_function_file_contains_and_flags() {
         let mut ir = CodeIR::new(PathBuf::from("test.f90"));
         ir.add_function(FunctionEntity::new("add", 2, 6));
