@@ -972,4 +972,227 @@ mod tests {
             PropertyValue::Bool(false)
         );
     }
+
+    #[test]
+    fn free_function_records_path_signature_visibility_and_line_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        ir.add_function(
+            FunctionEntity::new("greet", 7, 12)
+                .with_signature("void greet(String name)")
+                .with_visibility("private"),
+        );
+
+        let (graph, info) = build(&ir);
+        let p = &graph.get_node(info.functions[0]).unwrap().properties;
+        assert_eq!(
+            p.get("path"),
+            Some(&PropertyValue::String("widget.dart".to_string()))
+        );
+        assert_eq!(
+            p.get("signature"),
+            Some(&PropertyValue::String(
+                "void greet(String name)".to_string()
+            ))
+        );
+        assert_eq!(
+            p.get("visibility"),
+            Some(&PropertyValue::String("private".to_string()))
+        );
+        assert_eq!(p.get("line_start"), Some(&PropertyValue::Int(7)));
+        assert_eq!(p.get("line_end"), Some(&PropertyValue::Int(12)));
+    }
+
+    #[test]
+    fn class_records_path_visibility_and_line_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        ir.add_class(ClassEntity::new("Widget", 3, 40).with_visibility("private"));
+
+        let (graph, info) = build(&ir);
+        let p = &graph.get_node(info.classes[0]).unwrap().properties;
+        assert_eq!(
+            p.get("path"),
+            Some(&PropertyValue::String("widget.dart".to_string()))
+        );
+        assert_eq!(
+            p.get("visibility"),
+            Some(&PropertyValue::String("private".to_string()))
+        );
+        assert_eq!(p.get("line_start"), Some(&PropertyValue::Int(3)));
+        assert_eq!(p.get("line_end"), Some(&PropertyValue::Int(40)));
+        // A class without .abstract_class() defaults is_abstract to false.
+        assert_eq!(p.get("is_abstract"), Some(&PropertyValue::Bool(false)));
+    }
+
+    #[test]
+    fn trait_records_path_visibility_and_line_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        let mut mixin = TraitEntity::new("Drawable", 9, 15);
+        mixin.visibility = "private".to_string();
+        ir.add_trait(mixin);
+
+        let (graph, info) = build(&ir);
+        let p = &graph.get_node(info.traits[0]).unwrap().properties;
+        assert_eq!(
+            p.get("path"),
+            Some(&PropertyValue::String("widget.dart".to_string()))
+        );
+        assert_eq!(
+            p.get("visibility"),
+            Some(&PropertyValue::String("private".to_string()))
+        );
+        assert_eq!(p.get("line_start"), Some(&PropertyValue::Int(9)));
+        assert_eq!(p.get("line_end"), Some(&PropertyValue::Int(15)));
+    }
+
+    #[test]
+    fn method_records_line_and_path_bounds() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        let mut class = ClassEntity::new("Counter", 1, 20);
+        class.methods.push(
+            FunctionEntity::new("increment", 5, 10)
+                .with_signature("void increment()")
+                .with_visibility("protected"),
+        );
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let p = &graph.get_node(info.functions[0]).unwrap().properties;
+        assert_eq!(
+            p.get("path"),
+            Some(&PropertyValue::String("widget.dart".to_string()))
+        );
+        assert_eq!(
+            p.get("signature"),
+            Some(&PropertyValue::String("void increment()".to_string()))
+        );
+        assert_eq!(
+            p.get("visibility"),
+            Some(&PropertyValue::String("protected".to_string()))
+        );
+        assert_eq!(p.get("line_start"), Some(&PropertyValue::Int(5)));
+        assert_eq!(p.get("line_end"), Some(&PropertyValue::Int(10)));
+    }
+
+    #[test]
+    fn method_omits_complexity_flags_and_param_props() {
+        // The class-method loop writes a strictly narrower prop set than the
+        // free-function loop: complexity, is_async/is_static/is_abstract,
+        // parameters, and return_type are silently dropped for methods even
+        // when present on the FunctionEntity.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 7,
+            ..Default::default()
+        };
+        let mut class = ClassEntity::new("Counter", 1, 20);
+        class.methods.push(
+            FunctionEntity::new("run", 5, 10)
+                .with_complexity(metrics)
+                .with_return_type("int")
+                .with_parameters(vec![Parameter::new("x").with_type("int")])
+                .async_fn()
+                .static_fn(),
+        );
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let p = &graph.get_node(info.functions[0]).unwrap().properties;
+        assert!(p.get("complexity").is_none());
+        assert!(p.get("return_type").is_none());
+        assert!(p.get("parameters").is_none());
+        assert!(p.get("is_async").is_none());
+        assert!(p.get("is_static").is_none());
+        assert!(p.get("is_abstract").is_none());
+    }
+
+    #[test]
+    fn inheritance_edge_skipped_when_child_or_parent_unmapped() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        ir.add_class(ClassEntity::new("Derived", 1, 5));
+        // Parent "Base" is never mapped, so no Extends edge is created.
+        ir.add_inheritance(InheritanceRelation::new("Derived", "Base").with_order(1));
+
+        let (graph, info) = build(&ir);
+        let derived = info.classes[0];
+        let extends: Vec<_> = graph
+            .get_neighbors(derived, Direction::Outgoing)
+            .unwrap()
+            .into_iter()
+            .flat_map(|n| graph.get_edges_between(derived, n).unwrap())
+            .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Extends)
+            .collect();
+        assert!(extends.is_empty());
+    }
+
+    #[test]
+    fn implementation_edge_skipped_when_trait_unmapped() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        ir.add_class(ClassEntity::new("Derived", 1, 5));
+        // Trait "Drawable" is never mapped, so no Implements edge is created.
+        ir.add_implementation(ImplementationRelation::new("Derived", "Drawable"));
+
+        let (graph, info) = build(&ir);
+        let derived = info.classes[0];
+        let implements: Vec<_> = graph
+            .get_neighbors(derived, Direction::Outgoing)
+            .unwrap()
+            .into_iter()
+            .flat_map(|n| graph.get_edges_between(derived, n).unwrap())
+            .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Implements)
+            .collect();
+        assert!(implements.is_empty());
+    }
+
+    #[test]
+    fn import_reusing_in_file_function_node_without_external_flag() {
+        // An import whose target matches an already-mapped free function reuses
+        // that Function node rather than creating an external Module.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        ir.add_function(FunctionEntity::new("helper", 1, 3));
+        ir.add_import(ImportRelation::new("widget", "helper"));
+
+        let (graph, info) = build(&ir);
+        let import_id = info.imports[0];
+        assert_eq!(import_id, info.functions[0]);
+        let node = graph.get_node(import_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Function);
+        assert!(node.properties.get("is_external").is_none());
+    }
+
+    #[test]
+    fn import_targeting_module_name_reuses_file_node_as_self_loop() {
+        // The file node is registered under the module name; importing that name
+        // reuses the CodeFile node, producing an Imports self-loop.
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        ir.set_module(ModuleEntity::new("my_widget", "lib/widget.dart", "dart"));
+        ir.add_import(ImportRelation::new("widget", "my_widget"));
+
+        let (graph, info) = build(&ir);
+        let import_id = info.imports[0];
+        assert_eq!(import_id, info.file_id);
+        let import_edges: Vec<_> = graph
+            .get_edges_between(info.file_id, info.file_id)
+            .unwrap()
+            .into_iter()
+            .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Imports)
+            .collect();
+        assert_eq!(import_edges.len(), 1);
+    }
+
+    #[test]
+    fn multiple_free_functions_all_contained_by_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("widget.dart"));
+        ir.add_function(FunctionEntity::new("a", 1, 2));
+        ir.add_function(FunctionEntity::new("b", 3, 4));
+        ir.add_function(FunctionEntity::new("c", 5, 6));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.functions.len(), 3);
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        for &f in &info.functions {
+            assert!(neighbors.contains(&f));
+        }
+    }
 }
