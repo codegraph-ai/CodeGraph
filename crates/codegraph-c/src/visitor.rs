@@ -10,9 +10,8 @@
 //! - Function calls (for call graph building)
 
 use codegraph_parser_api::{
-    ClassEntity, ComplexityBuilder, ComplexityMetrics, Field, FunctionEntity, ImportRelation,
-    Parameter, BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, ClassEntity, ComplexityBuilder, ComplexityMetrics, Field, FunctionEntity,
+    ImportRelation, Parameter,
 };
 use tree_sitter::Node;
 
@@ -296,9 +295,7 @@ impl<'a> CVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -510,9 +507,7 @@ impl<'a> CVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let struct_entity = ClassEntity {
@@ -552,9 +547,7 @@ impl<'a> CVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let union_entity = ClassEntity {
@@ -621,9 +614,7 @@ impl<'a> CVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let enum_entity = ClassEntity {
@@ -942,7 +933,9 @@ mod tests {
 
     fn parse_and_visit(source: &[u8]) -> CVisitor<'_> {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_c::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_c::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = CVisitor::new(source);

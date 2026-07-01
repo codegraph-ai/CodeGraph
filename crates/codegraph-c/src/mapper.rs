@@ -362,8 +362,29 @@ pub fn apply_kernel_macros(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{ClassEntity, FunctionEntity, ImportRelation, ModuleEntity};
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, Field, FunctionEntity, ImportRelation,
+        ModuleEntity,
+    };
     use std::path::PathBuf;
+
+    /// Run ir_to_graph on a fresh in-memory graph, returning both for inspection.
+    fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(ir, &mut graph, PathBuf::from("test.c").as_path()).unwrap();
+        (graph, info)
+    }
+
+    fn name_of(graph: &CodeGraph, id: NodeId) -> String {
+        graph
+            .get_node(id)
+            .unwrap()
+            .properties
+            .get_string("name")
+            .unwrap()
+            .to_string()
+    }
 
     #[test]
     fn test_ir_to_graph_empty() {
@@ -568,5 +589,446 @@ mod tests {
             "line_end should be Int(20), got {:?}",
             func_node.properties.get("line_end")
         );
+    }
+
+    #[test]
+    fn module_doc_comment_is_stamped() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        let mut module = ModuleEntity::new("main", "test.c", "c");
+        module.doc_comment = Some("File header".to_string());
+        ir.set_module(module);
+
+        let (graph, info) = build(&ir);
+        let file_node = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file_node.properties.get("doc"),
+            Some(&PropertyValue::String("File header".to_string()))
+        );
+    }
+
+    #[test]
+    fn file_node_falls_back_to_path_stem_and_c_language() {
+        // No module set: name comes from file_stem, language hardcoded "c".
+        let ir = CodeIR::new(PathBuf::from("test.c"));
+        let (graph, info) = build(&ir);
+        let file_node = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file_node.properties.get("name"),
+            Some(&PropertyValue::String("test".to_string()))
+        );
+        assert_eq!(
+            file_node.properties.get("language"),
+            Some(&PropertyValue::String("c".to_string()))
+        );
+    }
+
+    #[test]
+    fn function_optional_props_present_and_flags() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        let mut func = FunctionEntity::new("run", 1, 5)
+            .with_doc("does work")
+            .with_return_type("int")
+            .with_body_prefix("int x = 0;");
+        func.is_static = true;
+        func.is_async = false;
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("does work".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("return_type"),
+            Some(&PropertyValue::String("int".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&PropertyValue::String("int x = 0;".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("is_static"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get("is_async"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn function_optional_props_absent_are_omitted() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("bare", 1, 2));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.functions[0]).unwrap();
+        assert!(node.properties.get("doc").is_none());
+        assert!(node.properties.get("return_type").is_none());
+        assert!(node.properties.get("body_prefix").is_none());
+        assert!(node.properties.get("complexity").is_none());
+    }
+
+    #[test]
+    fn all_eight_complexity_sub_props_are_stamped() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        let func = FunctionEntity::new("complex", 1, 20).with_complexity(ComplexityMetrics {
+            cyclomatic_complexity: 7,
+            branches: 4,
+            loops: 2,
+            logical_operators: 3,
+            max_nesting_depth: 5,
+            exception_handlers: 1,
+            early_returns: 6,
+        });
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let p = &graph.get_node(info.functions[0]).unwrap().properties;
+        assert_eq!(p.get("complexity"), Some(&PropertyValue::Int(7)));
+        assert_eq!(p.get("complexity_branches"), Some(&PropertyValue::Int(4)));
+        assert_eq!(p.get("complexity_loops"), Some(&PropertyValue::Int(2)));
+        assert_eq!(
+            p.get("complexity_logical_ops"),
+            Some(&PropertyValue::Int(3))
+        );
+        assert_eq!(p.get("complexity_nesting"), Some(&PropertyValue::Int(5)));
+        assert_eq!(p.get("complexity_exceptions"), Some(&PropertyValue::Int(1)));
+        assert_eq!(
+            p.get("complexity_early_returns"),
+            Some(&PropertyValue::Int(6))
+        );
+    }
+
+    #[test]
+    fn class_type_kind_taken_from_first_attribute() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        let class = ClassEntity::new("Color", 1, 5)
+            .with_attributes(vec!["enum".to_string(), "ignored".to_string()])
+            .with_doc("a color")
+            .with_body_prefix("RED,");
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let p = &graph.get_node(info.classes[0]).unwrap().properties;
+        // Only the first attribute becomes type_kind.
+        assert_eq!(
+            p.get("type_kind"),
+            Some(&PropertyValue::String("enum".to_string()))
+        );
+        assert_eq!(
+            p.get("doc"),
+            Some(&PropertyValue::String("a color".to_string()))
+        );
+        assert_eq!(
+            p.get("body_prefix"),
+            Some(&PropertyValue::String("RED,".to_string()))
+        );
+    }
+
+    #[test]
+    fn class_without_attributes_has_no_type_kind() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_class(ClassEntity::new("Plain", 1, 3));
+
+        let (graph, info) = build(&ir);
+        let p = &graph.get_node(info.classes[0]).unwrap().properties;
+        assert!(p.get("type_kind").is_none());
+        assert!(p.get("doc").is_none());
+        assert!(p.get("body_prefix").is_none());
+    }
+
+    #[test]
+    fn struct_fields_become_variable_nodes_with_index() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        let mut class = ClassEntity::new("Point", 1, 5);
+        class.fields.push(Field {
+            name: "x".to_string(),
+            type_annotation: Some("int".to_string()),
+            visibility: "public".to_string(),
+            is_static: false,
+            is_constant: true,
+            default_value: None,
+        });
+        class.fields.push(Field {
+            name: "y".to_string(),
+            type_annotation: None,
+            visibility: "public".to_string(),
+            is_static: true,
+            is_constant: false,
+            default_value: None,
+        });
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        let class_id = info.classes[0];
+
+        // Two Variable child nodes wired to the class via Contains.
+        let field_nodes: Vec<_> = graph
+            .iter_nodes()
+            .filter(|(_, n)| n.node_type == NodeType::Variable)
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(field_nodes.len(), 2);
+
+        let x = field_nodes
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "x")
+            .unwrap();
+        let px = &graph.get_node(x).unwrap().properties;
+        assert_eq!(
+            px.get("type_annotation"),
+            Some(&PropertyValue::String("int".to_string()))
+        );
+        assert_eq!(px.get("is_constant"), Some(&PropertyValue::Bool(true)));
+        assert_eq!(px.get("is_static"), Some(&PropertyValue::Bool(false)));
+        assert_eq!(px.get("field_index"), Some(&PropertyValue::Int(0)));
+
+        let y = field_nodes
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "y")
+            .unwrap();
+        let py = &graph.get_node(y).unwrap().properties;
+        // Absent type_annotation becomes an empty string, not omitted.
+        assert_eq!(
+            py.get("type_annotation"),
+            Some(&PropertyValue::String(String::new()))
+        );
+        assert_eq!(py.get("field_index"), Some(&PropertyValue::Int(1)));
+
+        // Field is contained by the class, not the file.
+        assert!(!graph.get_edges_between(class_id, x).unwrap().is_empty());
+    }
+
+    #[test]
+    fn external_import_marks_is_external_and_edge_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_import(
+            ImportRelation::new("main", "stdio.h")
+                .wildcard()
+                .with_alias("io"),
+        );
+
+        let (graph, info) = build(&ir);
+        let import_id = info.imports[0];
+        let node = graph.get_node(import_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Module);
+        assert_eq!(
+            node.properties.get("is_external"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+
+        let edge_ids = graph.get_edges_between(info.file_id, import_id).unwrap();
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert_eq!(
+            edge.properties.get("alias"),
+            Some(&PropertyValue::String("io".to_string()))
+        );
+        assert_eq!(
+            edge.properties.get("is_wildcard"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+    }
+
+    #[test]
+    fn system_include_alias_marks_is_system() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_import(ImportRelation::new("main", "stdlib.h").with_alias("system"));
+
+        let (graph, info) = build(&ir);
+        let node = graph.get_node(info.imports[0]).unwrap();
+        assert_eq!(
+            node.properties.get("is_system"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+    }
+
+    #[test]
+    fn import_reuses_in_file_node_without_marking_external() {
+        // An import whose target matches an in-file function name reuses that
+        // node rather than creating an external Module.
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("helper", 1, 5));
+        ir.add_import(ImportRelation::new("main", "helper"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+        // The reused node is the function itself, still a Function (not Module).
+        let reused = graph.get_node(info.imports[0]).unwrap();
+        assert_eq!(reused.node_type, NodeType::Function);
+        assert!(reused.properties.get("is_external").is_none());
+        assert_eq!(info.imports[0], info.functions[0]);
+    }
+
+    #[test]
+    fn direct_call_edge_records_vtable_metadata() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        ir.add_call(
+            CallRelation::new("caller", "callee", 3)
+                .with_vtable("net_device_ops".to_string(), "ndo_open".to_string()),
+        );
+
+        let (graph, info) = build(&ir);
+        let caller = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "caller")
+            .unwrap();
+        let callee = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "callee")
+            .unwrap();
+
+        let edge_ids = graph.get_edges_between(caller, callee).unwrap();
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(
+            edge.properties.get("call_site_line"),
+            Some(&PropertyValue::Int(3))
+        );
+        // with_vtable also flips is_direct to false.
+        assert_eq!(
+            edge.properties.get("is_direct"),
+            Some(&PropertyValue::Bool(false))
+        );
+        assert_eq!(
+            edge.properties.get("struct_type"),
+            Some(&PropertyValue::String("net_device_ops".to_string()))
+        );
+        assert_eq!(
+            edge.properties.get("field_name"),
+            Some(&PropertyValue::String("ndo_open".to_string()))
+        );
+    }
+
+    #[test]
+    fn vtable_caller_uses_file_node_as_caller() {
+        // A synthetic "vtable_*" caller name resolves to the file node.
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("readlink_impl", 6, 10));
+        ir.add_call(CallRelation::new("vtable_readlink", "readlink_impl", 3));
+
+        let (graph, info) = build(&ir);
+        let callee = info.functions[0];
+        let edge_ids = graph.get_edges_between(info.file_id, callee).unwrap();
+        let call_edges: Vec<_> = edge_ids
+            .into_iter()
+            .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Calls)
+            .collect();
+        assert_eq!(call_edges.len(), 1);
+    }
+
+    #[test]
+    fn unknown_non_vtable_caller_is_skipped() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        // Caller "ghost" is neither a known node nor a vtable_ name -> skipped.
+        ir.add_call(CallRelation::new("ghost", "callee", 3));
+
+        let (graph, info) = build(&ir);
+        let callee = info.functions[0];
+        // No Calls edge into the callee.
+        let calls_in: usize = graph
+            .iter_nodes()
+            .map(|(id, _)| {
+                graph
+                    .get_edges_between(id, callee)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Calls)
+                    .count()
+            })
+            .sum();
+        assert_eq!(calls_in, 0);
+    }
+
+    #[test]
+    fn unresolved_callee_stored_on_caller_node() {
+        // Callee not in this file -> recorded in caller's unresolved_calls list.
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_call(CallRelation::new("caller", "external_fn", 3));
+        ir.add_call(CallRelation::new("caller", "external_fn", 4)); // duplicate deduped
+        ir.add_call(CallRelation::new("caller", "another_fn", 5));
+
+        let (graph, info) = build(&ir);
+        let caller = info.functions[0];
+        let unresolved = graph
+            .get_node(caller)
+            .unwrap()
+            .properties
+            .get_string_list_compat("unresolved_calls")
+            .unwrap();
+        assert_eq!(unresolved.len(), 2);
+        assert!(unresolved.contains(&"external_fn".to_string()));
+        assert!(unresolved.contains(&"another_fn".to_string()));
+    }
+
+    #[test]
+    fn apply_kernel_macros_sets_entry_point_and_exported() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("my_init", 1, 5));
+        ir.add_function(FunctionEntity::new("my_api", 6, 10));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.c").as_path()).unwrap();
+
+        apply_kernel_macros(
+            &mut graph,
+            &["my_init".to_string()],
+            &["my_api".to_string()],
+        );
+
+        let init = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "my_init")
+            .unwrap();
+        let ip = &graph.get_node(init).unwrap().properties;
+        assert_eq!(ip.get("is_entry_point"), Some(&PropertyValue::Bool(true)));
+        assert_eq!(
+            ip.get("entry_type"),
+            Some(&PropertyValue::String("module_init".to_string()))
+        );
+
+        let api = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "my_api")
+            .unwrap();
+        let ap = &graph.get_node(api).unwrap().properties;
+        assert_eq!(ap.get("is_exported"), Some(&PropertyValue::Bool(true)));
+        assert_eq!(
+            ap.get("visibility"),
+            Some(&PropertyValue::String("public".to_string()))
+        );
+    }
+
+    #[test]
+    fn apply_kernel_macros_empty_lists_is_noop() {
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("f", 1, 5));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.c").as_path()).unwrap();
+
+        apply_kernel_macros(&mut graph, &[], &[]);
+
+        let f = info.functions[0];
+        assert!(graph
+            .get_node(f)
+            .unwrap()
+            .properties
+            .get("is_entry_point")
+            .is_none());
     }
 }
