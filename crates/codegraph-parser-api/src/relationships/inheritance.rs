@@ -77,4 +77,11 @@ mod tests {
         let back: InheritanceRelation = serde_json::from_str(&json).unwrap();
         assert_eq!(r, back);
     }
+
+    #[test]
+    fn serializes_exact_wire_format() {
+        let r = InheritanceRelation::new("Dog", "Animal").with_order(1);
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, r#"{"child":"Dog","parent":"Animal","order":1}"#);
+    }
 }
