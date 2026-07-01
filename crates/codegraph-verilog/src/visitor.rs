@@ -270,7 +270,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let entity = ClassEntity {
             name,
@@ -330,7 +330,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
@@ -389,7 +389,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
