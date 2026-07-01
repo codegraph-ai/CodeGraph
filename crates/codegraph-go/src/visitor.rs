@@ -1301,4 +1301,173 @@ func handle(x int, ch chan int) {
             complexity.logical_operators
         );
     }
+
+    // --- Helper to parse and run the visitor over Go source ---
+    fn parse_and_visit(source: &[u8]) -> GoVisitor<'_> {
+        use tree_sitter::Parser;
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut visitor = GoVisitor::new(source);
+        visitor.visit_node(tree.root_node());
+        visitor
+    }
+
+    #[test]
+    fn test_function_line_offset_by_blank_lines() {
+        // Two leading blank lines push the func to line 3 (1-indexed).
+        let source = b"package main\n\n\nfunc greet() {\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].line_start, 4);
+        assert_eq!(visitor.functions[0].line_end, 5);
+    }
+
+    #[test]
+    fn test_function_body_prefix_truncated() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // Build an oversized body so body_prefix is truncated to the cap.
+        let filler = "a := 0\n".repeat(400);
+        let source = format!("package main\nfunc big() {{\n{filler}}}");
+        let visitor = parse_and_visit(source.as_bytes());
+        assert_eq!(visitor.functions.len(), 1);
+        let body_prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(body_prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_benchmark_prefix_is_test() {
+        // Both Test* and Benchmark* names flag is_test.
+        let source = b"package main\nfunc BenchmarkFoo() {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(
+            visitor.functions[0].is_test,
+            "Benchmark-prefixed function should be flagged is_test"
+        );
+    }
+
+    #[test]
+    fn test_private_function_visibility() {
+        // Lowercase first letter → unexported → private visibility.
+        let source = b"package main\nfunc helper() {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_function_default_flags() {
+        // Go plain function: not async/static/abstract, no doc, no parent.
+        let source = b"package main\nfunc plain() {}";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert!(!f.is_async);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.doc_comment.is_none());
+        assert!(f.parent_class.is_none());
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_call_relation_default_metadata() {
+        // A direct call records default metadata and the call-site line.
+        let source = b"package main\nfunc caller() {\n\tcallee()\n}\nfunc callee() {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.calls.len(), 1);
+        let call = &visitor.calls[0];
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+        // callee() is on line 3 (1-indexed).
+        assert_eq!(call.call_site_line, 3);
+    }
+
+    #[test]
+    fn test_nested_call_in_if_attributed_to_function() {
+        // A call inside an if-body is still attributed to the enclosing function.
+        let source = b"package main\nfunc outer(x int) {\n\tif x > 0 {\n\t\tinner()\n\t}\n}\nfunc inner() {}";
+        let visitor = parse_and_visit(source);
+        let inner: Vec<_> = visitor
+            .calls
+            .iter()
+            .filter(|c| c.callee == "inner")
+            .collect();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].caller, "outer");
+    }
+
+    #[test]
+    fn test_defer_statement_raises_complexity() {
+        // Go uses defer as an exception-handler equivalent, raising complexity.
+        let source = b"package main\nfunc f() {\n\tdefer cleanup()\n}\nfunc cleanup() {}";
+        let visitor = parse_and_visit(source);
+        let f = visitor.functions.iter().find(|f| f.name == "f").unwrap();
+        let complexity = f.complexity.as_ref().unwrap();
+        assert_eq!(
+            complexity.exception_handlers, 1,
+            "defer should count as one exception handler"
+        );
+    }
+
+    #[test]
+    fn test_struct_body_prefix_present() {
+        // Struct definitions capture their type body in body_prefix.
+        let source = b"package main\ntype Point struct {\n\tX int\n\tY int\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.structs.len(), 1);
+        let body_prefix = visitor.structs[0].body_prefix.as_ref().unwrap();
+        assert!(body_prefix.contains("X int"));
+        assert!(body_prefix.contains("Y int"));
+    }
+
+    #[test]
+    fn test_multiple_names_one_param_declaration() {
+        // `a, b int` collapses to two separate parameters sharing the type.
+        let source = b"package main\nfunc add(a, b int) int { return a + b }";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.parameters.len(), 2);
+        assert_eq!(f.parameters[0].name, "a");
+        assert_eq!(f.parameters[1].name, "b");
+        assert_eq!(f.parameters[0].type_annotation.as_deref(), Some("int"));
+        assert_eq!(f.parameters[1].type_annotation.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_function_no_return_type_is_none() {
+        // A function with no result clause has return_type None.
+        let source = b"package main\nfunc noop() {}";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].return_type.is_none());
+    }
+
+    #[test]
+    fn test_type_ref_qualified_type_takes_field() {
+        // A qualified type like io.Reader records the field portion (Reader).
+        let source = b"package main\nfunc wrap(r io.Reader) {}";
+        let visitor = parse_and_visit(source);
+        let refs: Vec<_> = visitor
+            .type_references
+            .iter()
+            .filter(|r| r.referrer == "wrap")
+            .collect();
+        assert!(
+            refs.iter().any(|r| r.type_name == "Reader"),
+            "wrap should reference Reader from io.Reader, got: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn test_interface_line_numbers() {
+        // An interface after a blank line reports 1-indexed line bounds.
+        let source = b"package main\n\ntype Closer interface {\n\tClose() error\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.interfaces.len(), 1);
+        assert_eq!(visitor.interfaces[0].line_start, 3);
+        assert_eq!(visitor.interfaces[0].line_end, 5);
+    }
 }
