@@ -387,6 +387,20 @@ mod tests {
     }
 
     #[test]
+    fn windows_backslash_skip_dir_is_not_watchable() {
+        // Backslash-delimited skip components are rejected too; forward-slash
+        // paths never reach the `\skip\` arm of the SKIP_DIRS check.
+        assert!(!is_watchable(
+            Path::new("C:\\proj\\node_modules\\pkg\\index.rs"),
+            &exts()
+        ));
+        assert!(!is_watchable(
+            Path::new("C:\\proj\\target\\debug\\build.rs"),
+            &exts()
+        ));
+    }
+
+    #[test]
     fn skip_dir_as_substring_is_still_watchable() {
         // "build" only matches as a whole path component, not as a substring of a
         // filename or directory name.
