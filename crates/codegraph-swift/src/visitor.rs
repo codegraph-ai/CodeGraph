@@ -4,10 +4,9 @@
 //! AST visitor for extracting Swift entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, TraitEntity,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    TraitEntity,
 };
 use tree_sitter::Node;
 
@@ -140,9 +139,7 @@ impl<'a> SwiftVisitor<'a> {
         let body_prefix = body_node
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -201,9 +198,7 @@ impl<'a> SwiftVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -306,7 +301,7 @@ impl<'a> SwiftVisitor<'a> {
         let return_type = self.extract_return_type(node);
         let visibility = self.extract_visibility(node);
         let is_static = self.has_modifier(node, "static");
-        let is_async = self.has_modifier(node, "async");
+        let is_async = self.is_async_declaration(node);
         let doc_comment = self.extract_doc_comment(node);
 
         // Calculate complexity from function body
@@ -336,9 +331,7 @@ impl<'a> SwiftVisitor<'a> {
         }
         .and_then(|b| b.utf8_text(self.source).ok())
         .filter(|t| !t.is_empty())
-        .map(|t| {
-            truncate_body_prefix(t)
-        })
+        .map(truncate_body_prefix)
         .map(|t| t.to_string());
 
         self.functions.push(func);
@@ -369,7 +362,7 @@ impl<'a> SwiftVisitor<'a> {
         let return_type = self.extract_return_type(node);
         let visibility = self.extract_visibility(node);
         let is_static = self.has_modifier(node, "static") || self.has_modifier(node, "class");
-        let is_async = self.has_modifier(node, "async");
+        let is_async = self.is_async_declaration(node);
         let doc_comment = self.extract_doc_comment(node);
 
         // Calculate complexity from method body
@@ -399,9 +392,7 @@ impl<'a> SwiftVisitor<'a> {
         }
         .and_then(|b| b.utf8_text(self.source).ok())
         .filter(|t| !t.is_empty())
-        .map(|t| {
-            truncate_body_prefix(t)
-        })
+        .map(truncate_body_prefix)
         .map(|t| t.to_string());
 
         if self.has_modifier(node, "override") {
@@ -459,9 +450,7 @@ impl<'a> SwiftVisitor<'a> {
         }
         .and_then(|b| b.utf8_text(self.source).ok())
         .filter(|t| !t.is_empty())
-        .map(|t| {
-            truncate_body_prefix(t)
-        })
+        .map(truncate_body_prefix)
         .map(|t| t.to_string());
         func.attributes.push("init".to_string());
 
@@ -512,9 +501,7 @@ impl<'a> SwiftVisitor<'a> {
         }
         .and_then(|b| b.utf8_text(self.source).ok())
         .filter(|t| !t.is_empty())
-        .map(|t| {
-            truncate_body_prefix(t)
-        })
+        .map(truncate_body_prefix)
         .map(|t| t.to_string());
         func.attributes.push("deinit".to_string());
 
@@ -570,7 +557,15 @@ impl<'a> SwiftVisitor<'a> {
                 "navigation_expression" => {
                     // Get the last identifier in a.b.c()
                     if let Some(suffix) = child.child_by_field_name("suffix") {
-                        return self.node_text(suffix);
+                        // The suffix is a `navigation_suffix` node wrapping
+                        // `.name`; return the bare identifier, not `.name`.
+                        let mut sc = suffix.walk();
+                        for s in suffix.children(&mut sc) {
+                            if s.kind() == "simple_identifier" || s.kind() == "identifier" {
+                                return self.node_text(s);
+                            }
+                        }
+                        return self.node_text(suffix).trim_start_matches('.').to_string();
                     }
                     let mut inner_cursor = child.walk();
                     let mut last_id = String::new();
@@ -606,9 +601,7 @@ impl<'a> SwiftVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -757,11 +750,13 @@ impl<'a> SwiftVisitor<'a> {
     fn extract_single_parameter(&self, node: Node) -> Option<Parameter> {
         let mut name = String::new();
         let mut param_type = String::new();
+        let mut seen_colon = false;
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
-                "simple_identifier" | "identifier" => {
+                ":" => seen_colon = true,
+                "simple_identifier" | "identifier" if !seen_colon => {
                     if name.is_empty() {
                         name = self.node_text(child);
                     }
@@ -774,6 +769,12 @@ impl<'a> SwiftVisitor<'a> {
                             break;
                         }
                     }
+                }
+                // In tree-sitter-swift a parameter's type is a bare type node
+                // (user_type, optional_type, array_type, ...) directly after the
+                // `:` token rather than wrapped in a type_annotation node.
+                _ if seen_colon && param_type.is_empty() => {
+                    param_type = self.node_text(child);
                 }
                 _ => {}
             }
@@ -793,7 +794,22 @@ impl<'a> SwiftVisitor<'a> {
 
     fn extract_return_type(&self, node: Node) -> Option<String> {
         let mut cursor = node.walk();
+        let mut seen_arrow = false;
         for child in node.children(&mut cursor) {
+            // Grammar variant: the return type is a bare type node placed
+            // directly after the `->` token (no function_result wrapper).
+            if seen_arrow {
+                let type_str = self.node_text(child);
+                if type_str != "Void" && !type_str.is_empty() {
+                    return Some(type_str);
+                }
+                return None;
+            }
+            if child.kind() == "->" {
+                seen_arrow = true;
+                continue;
+            }
+            // Grammar variant: type wrapped in a function_result/type_annotation.
             if child.kind() == "function_result" || child.kind() == "type_annotation" {
                 let mut type_cursor = child.walk();
                 for type_child in child.children(&mut type_cursor) {
@@ -932,6 +948,19 @@ impl<'a> SwiftVisitor<'a> {
             }
         }
         "internal".to_string() // Swift default visibility
+    }
+
+    /// Detect an `async` function/method. In tree-sitter-swift the `async`
+    /// keyword is a bare child of the declaration (between the parameters and
+    /// the body) rather than living inside a `modifiers` node, so `has_modifier`
+    /// never sees it.
+    fn is_async_declaration(&self, node: Node) -> bool {
+        if self.has_modifier(node, "async") {
+            return true;
+        }
+        let mut cursor = node.walk();
+        let has_async = node.children(&mut cursor).any(|c| c.kind() == "async");
+        has_async
     }
 
     fn has_modifier(&self, node: Node, modifier: &str) -> bool {
@@ -1349,5 +1378,316 @@ class Calculator {
             complexity.branches
         );
         assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    // Extraction tests
+
+    #[test]
+    fn test_free_function_has_no_parent_class() {
+        let source = b"func greet(name: String) -> String { return name }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].parent_class, None);
+    }
+
+    #[test]
+    fn test_method_gets_parent_class() {
+        let source = br#"
+class Calculator {
+    func add(x: Int, y: Int) -> Int { return x + y }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "add")
+            .expect("method not found");
+        assert_eq!(method.parent_class, Some("Calculator".to_string()));
+    }
+
+    #[test]
+    fn test_function_parameters_extracted() {
+        let source = b"func greet(name: String, count: Int) { }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "name");
+        assert_eq!(params[0].type_annotation.as_deref(), Some("String"));
+        assert_eq!(params[1].name, "count");
+        assert_eq!(params[1].type_annotation.as_deref(), Some("Int"));
+    }
+
+    #[test]
+    fn test_function_return_type_extracted() {
+        let source = b"func compute() -> Double { return 1.0 }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].return_type.as_deref(), Some("Double"));
+    }
+
+    #[test]
+    fn test_void_return_type_is_none() {
+        // An explicit -> Void return is normalized to None
+        let source = b"func noop() -> Void { }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].return_type, None);
+    }
+
+    #[test]
+    fn test_no_return_type_is_none() {
+        let source = b"func noop() { }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].return_type, None);
+    }
+
+    #[test]
+    fn test_static_method_flag() {
+        let source = br#"
+class Factory {
+    static func create() -> Int { return 0 }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "create")
+            .expect("method not found");
+        assert!(method.is_static);
+    }
+
+    #[test]
+    fn test_async_function_flag() {
+        let source = b"func fetch() async { }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0].is_async);
+    }
+
+    #[test]
+    fn test_init_extraction() {
+        let source = br#"
+class Person {
+    init(name: String) { }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let init = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "init")
+            .expect("init not found");
+        assert!(init.attributes.contains(&"init".to_string()));
+        assert_eq!(init.parent_class, Some("Person".to_string()));
+        assert_eq!(init.parameters.len(), 1);
+        assert_eq!(init.parameters[0].name, "name");
+    }
+
+    #[test]
+    fn test_convenience_init_attribute() {
+        let source = br#"
+class Person {
+    convenience init() { }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let init = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "init")
+            .expect("init not found");
+        assert!(init.attributes.contains(&"convenience".to_string()));
+    }
+
+    #[test]
+    fn test_deinit_extraction() {
+        let source = br#"
+class Resource {
+    deinit { }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let deinit = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "deinit")
+            .expect("deinit not found");
+        assert!(deinit.attributes.contains(&"deinit".to_string()));
+        assert_eq!(deinit.visibility, "internal");
+        assert_eq!(deinit.parent_class, Some("Resource".to_string()));
+    }
+
+    #[test]
+    fn test_override_method_attribute() {
+        let source = br#"
+class Dog {
+    override func speak() { }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "speak")
+            .expect("method not found");
+        assert!(method.attributes.contains(&"override".to_string()));
+    }
+
+    #[test]
+    fn test_mutating_method_attribute() {
+        let source = br#"
+struct Counter {
+    mutating func increment() { }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "increment")
+            .expect("method not found");
+        assert!(method.attributes.contains(&"mutating".to_string()));
+    }
+
+    #[test]
+    fn test_call_extraction_in_body() {
+        let source = br#"
+func caller() {
+    helper()
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("call not found");
+        assert_eq!(call.caller, "caller");
+    }
+
+    #[test]
+    fn test_navigation_call_extracts_suffix() {
+        let source = br#"
+func caller() {
+    obj.doWork()
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.calls.iter().any(|c| c.callee == "doWork"),
+            "expected a call to doWork, got {:?}",
+            visitor.calls.iter().map(|c| &c.callee).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_extension_method_gets_extended_type_as_parent() {
+        let source = br#"
+extension String {
+    func shout() -> String { return self }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "shout")
+            .expect("extension method not found");
+        assert_eq!(method.parent_class, Some("String".to_string()));
+    }
+
+    #[test]
+    fn test_doc_comment_extracted() {
+        let source = br#"/// Greets a person
+func greet() { }
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(
+            visitor.functions[0].doc_comment.as_deref(),
+            Some("/// Greets a person")
+        );
+    }
+
+    #[test]
+    fn test_plain_comment_not_doc() {
+        let source = br#"// just a comment
+func greet() { }
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].doc_comment, None);
+    }
+
+    #[test]
+    fn test_generic_class_type_parameters() {
+        let source = b"class Box<T> { }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(
+            !visitor.classes[0].type_parameters.is_empty(),
+            "expected generic type parameters"
+        );
+        assert!(visitor.classes[0]
+            .type_parameters
+            .iter()
+            .any(|p| p.contains('T')));
+    }
+
+    #[test]
+    fn test_public_visibility() {
+        let source = b"public func api() { }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_default_visibility_is_internal() {
+        let source = b"func plain() { }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "internal");
+    }
+
+    #[test]
+    fn test_import_is_wildcard_from_file() {
+        let source = b"import Foundation";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Foundation");
+        assert_eq!(visitor.imports[0].importer, "file");
+        assert!(visitor.imports[0].is_wildcard);
+        assert!(visitor.imports[0].symbols.is_empty());
+    }
+
+    #[test]
+    fn test_function_body_prefix() {
+        let source = br#"func compute() -> Int {
+    let x = 42
+    return x
+}
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let prefix = visitor.functions[0]
+            .body_prefix
+            .as_ref()
+            .expect("body_prefix missing");
+        assert!(prefix.contains("let x = 42"));
     }
 }
