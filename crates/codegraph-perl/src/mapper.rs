@@ -216,6 +216,7 @@ mod tests {
     use codegraph::PropertyValue;
     use codegraph_parser_api::{
         CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
+        Parameter,
     };
     use std::path::PathBuf;
 
@@ -452,5 +453,68 @@ mod tests {
             .get_edges_between(caller_id, info.file_id)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn function_doc_body_and_parameters_props_recorded() {
+        // A sub carrying a doc comment, body_prefix, and parameters populates the
+        // three optional `if let Some`/non-empty arms on the Function node.
+        let mut ir = CodeIR::new(PathBuf::from("test.pl"));
+        ir.add_function(
+            FunctionEntity::new("configure", 1, 9)
+                .with_doc("sets up the app")
+                .with_body_prefix("my $self = shift;")
+                .with_parameters(vec![Parameter::new("self"), Parameter::new("opts")]),
+        );
+        let (graph, info) = map(&ir);
+
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.properties.get_string("doc"), Some("sets up the app"));
+        assert_eq!(
+            func.properties.get_string("body_prefix"),
+            Some("my $self = shift;")
+        );
+        // parameters is emitted as a string list of the parameter names.
+        assert!(func.properties.get("parameters").is_some());
+    }
+
+    #[test]
+    fn module_doc_comment_prop_recorded() {
+        // A module carrying a doc comment populates the file node's `doc` prop -
+        // the module-doc arm that module_drives_file_metadata never sets.
+        let mut ir = CodeIR::new(PathBuf::from("test.pl"));
+        ir.set_module(
+            ModuleEntity::new("MyApp", "lib/MyApp.pm", "perl").with_doc("the application root"),
+        );
+        let (graph, info) = map(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get_string("doc"),
+            Some("the application root")
+        );
+    }
+
+    #[test]
+    fn class_doc_comment_prop_recorded() {
+        // A package carrying a doc comment populates the Class node's `doc` prop.
+        let mut ir = CodeIR::new(PathBuf::from("User.pm"));
+        ir.add_class(ClassEntity::new("MyApp::User", 1, 20).with_doc("a user record"));
+        let (graph, info) = map(&ir);
+
+        let class = graph.get_node(info.classes[0]).unwrap();
+        assert_eq!(class.properties.get_string("doc"), Some("a user record"));
+    }
+
+    #[test]
+    fn no_module_no_file_stem_falls_back_to_unknown() {
+        // A path with no file_stem (`..`) exercises the unwrap_or("unknown") arm,
+        // which every other test bypasses by using a stem-bearing path.
+        let ir = CodeIR::new(PathBuf::from(".."));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, Path::new("..")).unwrap();
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("unknown"));
     }
 }
