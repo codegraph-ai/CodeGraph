@@ -49,3 +49,33 @@ impl CallRelation {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_defaults_to_direct_no_vtable() {
+        let c = CallRelation::new("a", "b", 7);
+        assert_eq!(c.caller, "a");
+        assert_eq!(c.callee, "b");
+        assert_eq!(c.call_site_line, 7);
+        assert!(c.is_direct);
+        assert_eq!(c.struct_type, None);
+        assert_eq!(c.field_name, None);
+    }
+
+    #[test]
+    fn indirect_clears_direct_flag() {
+        assert!(!CallRelation::new("a", "b", 1).indirect().is_direct);
+    }
+
+    #[test]
+    fn with_vtable_sets_fields_and_marks_indirect() {
+        let c = CallRelation::new("register", "ndo_open", 42)
+            .with_vtable("net_device_ops".to_string(), "ndo_open".to_string());
+        assert_eq!(c.struct_type, Some("net_device_ops".to_string()));
+        assert_eq!(c.field_name, Some("ndo_open".to_string()));
+        assert!(!c.is_direct);
+    }
+}

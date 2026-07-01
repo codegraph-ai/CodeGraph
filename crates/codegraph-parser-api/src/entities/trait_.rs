@@ -71,3 +71,45 @@ impl TraitEntity {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trait_new_defaults() {
+        let t = TraitEntity::new("Drawable", 5, 15);
+        assert_eq!(t.name, "Drawable");
+        assert_eq!(t.visibility, "public");
+        assert_eq!(t.line_start, 5);
+        assert_eq!(t.line_end, 15);
+        assert!(t.required_methods.is_empty());
+        assert!(t.parent_traits.is_empty());
+        assert_eq!(t.doc_comment, None);
+        assert!(t.attributes.is_empty());
+    }
+
+    #[test]
+    fn trait_builder_covers_all_setters() {
+        let methods = vec![FunctionEntity::new("draw", 1, 2)];
+        let t = TraitEntity::new("Widget", 1, 20)
+            .with_visibility("private")
+            .with_methods(methods.clone())
+            .with_parent_traits(vec!["Base".to_string()])
+            .with_doc("widget trait")
+            .with_attributes(vec!["#[async_trait]".to_string()]);
+        assert_eq!(t.visibility, "private");
+        assert_eq!(t.required_methods, methods);
+        assert_eq!(t.parent_traits, vec!["Base".to_string()]);
+        assert_eq!(t.doc_comment, Some("widget trait".to_string()));
+        assert_eq!(t.attributes, vec!["#[async_trait]".to_string()]);
+    }
+
+    #[test]
+    fn trait_serde_round_trip() {
+        let t = TraitEntity::new("Rt", 1, 2).with_parent_traits(vec!["P".to_string()]);
+        let json = serde_json::to_string(&t).unwrap();
+        let back: TraitEntity = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+}

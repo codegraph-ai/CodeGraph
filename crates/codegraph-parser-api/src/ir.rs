@@ -118,3 +118,26 @@ impl CodeIR {
         self.type_references.push(type_ref);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_references_count_toward_relationships() {
+        let mut ir = CodeIR::new(PathBuf::from("t.rs"));
+        assert_eq!(ir.relationship_count(), 0);
+        ir.add_type_reference(TypeReference::new("f", "Widget", 3));
+        assert_eq!(ir.type_references.len(), 1);
+        assert_eq!(ir.relationship_count(), 1);
+        assert_eq!(ir.type_references[0].type_name, "Widget");
+    }
+
+    #[test]
+    fn default_is_empty() {
+        let ir = CodeIR::default();
+        assert_eq!(ir.file_path, PathBuf::new());
+        assert_eq!(ir.entity_count(), 0);
+        assert_eq!(ir.relationship_count(), 0);
+    }
+}

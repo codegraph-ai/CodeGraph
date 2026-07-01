@@ -48,3 +48,32 @@ impl ImportRelation {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_defaults() {
+        let i = ImportRelation::new("app", "std::io");
+        assert_eq!(i.importer, "app");
+        assert_eq!(i.imported, "std::io");
+        assert!(i.symbols.is_empty());
+        assert!(!i.is_wildcard);
+        assert_eq!(i.alias, None);
+    }
+
+    #[test]
+    fn wildcard_sets_flag() {
+        assert!(ImportRelation::new("a", "b").wildcard().is_wildcard);
+    }
+
+    #[test]
+    fn builder_symbols_and_alias() {
+        let i = ImportRelation::new("app", "collections")
+            .with_symbols(vec!["Map".to_string(), "Set".to_string()])
+            .with_alias("c");
+        assert_eq!(i.symbols, vec!["Map".to_string(), "Set".to_string()]);
+        assert_eq!(i.alias, Some("c".to_string()));
+    }
+}

@@ -107,3 +107,64 @@ impl ParserConfig {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_timeout_is_30s() {
+        let c = ParserConfig::default();
+        assert_eq!(c.timeout_per_file, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn fast_disables_docs_types_and_skips_tests() {
+        let c = ParserConfig::fast();
+        assert!(c.skip_tests);
+        assert!(!c.include_docs);
+        assert!(!c.extract_types);
+        // Other fields keep their defaults.
+        assert_eq!(c.max_file_size, 10 * 1024 * 1024);
+        assert!(!c.parallel);
+    }
+
+    #[test]
+    fn comprehensive_keeps_docs_and_types() {
+        let c = ParserConfig::comprehensive();
+        assert!(!c.skip_private);
+        assert!(!c.skip_tests);
+        assert!(c.include_docs);
+        assert!(c.extract_types);
+    }
+
+    #[test]
+    fn builder_setters_apply() {
+        let c = ParserConfig::default()
+            .with_parallel(true)
+            .with_max_file_size(42);
+        assert!(c.parallel);
+        assert_eq!(c.max_file_size, 42);
+    }
+
+    #[test]
+    fn serde_round_trip_with_some_timeout() {
+        let c = ParserConfig::default();
+        let json = serde_json::to_string(&c).unwrap();
+        let back: ParserConfig = serde_json::from_str(&json).unwrap();
+        // duration_option serializes as whole seconds.
+        assert_eq!(back.timeout_per_file, Some(Duration::from_secs(30)));
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn serde_round_trip_with_none_timeout() {
+        let c = ParserConfig {
+            timeout_per_file: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let back: ParserConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timeout_per_file, None);
+    }
+}

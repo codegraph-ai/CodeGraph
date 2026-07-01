@@ -26,3 +26,24 @@ impl TypeReference {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sets_all_fields() {
+        let t = TypeReference::new("buildGraph", "DependencyGraphParams", 12);
+        assert_eq!(t.referrer, "buildGraph");
+        assert_eq!(t.type_name, "DependencyGraphParams");
+        assert_eq!(t.line_number, 12);
+    }
+
+    #[test]
+    fn serde_round_trip() {
+        let t = TypeReference::new("f", "T", 3);
+        let json = serde_json::to_string(&t).unwrap();
+        let back: TypeReference = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+}
