@@ -9,9 +9,8 @@
 //! names, so all dispatch code sees resolved kinds — never "ERROR".
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, Parameter,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity,
+    ImportRelation, Parameter,
 };
 use tree_sitter::Node;
 
@@ -470,9 +469,7 @@ impl<'a> TclVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         self.functions.push(func);
 
@@ -537,9 +534,7 @@ impl<'a> TclVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let class = ClassEntity {
             name: full_ns,
@@ -681,9 +676,7 @@ impl<'a> TclVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         self.functions.push(func);
 
@@ -854,9 +847,7 @@ impl<'a> TclVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let class = ClassEntity {
             name: full_ns,
@@ -2131,6 +2122,193 @@ proc add {a b} {
             fn_names.contains(&"greet"),
             "should find greet, got: {:?}",
             fn_names
+        );
+    }
+
+    // ── parse_param_spec pure edge cases ────────────────────────────────
+
+    #[test]
+    fn test_param_spec_multiword_default() {
+        // splitn(2) keeps the whole rest as the default value
+        let p = TclVisitor::parse_param_spec("opts {a b c}");
+        assert_eq!(p.name, "opts");
+        assert_eq!(p.default_value, Some("{a b c}".to_string()));
+        assert!(!p.is_variadic);
+    }
+
+    #[test]
+    fn test_param_spec_default_with_spaces_trimmed() {
+        // Extra internal spacing is preserved in the name split but the
+        // default is trimmed at the edges
+        let p = TclVisitor::parse_param_spec("count   10");
+        assert_eq!(p.name, "count");
+        assert_eq!(p.default_value, Some("10".to_string()));
+    }
+
+    #[test]
+    fn test_param_spec_args_only_variadic_no_default() {
+        let p = TclVisitor::parse_param_spec("args");
+        assert!(p.is_variadic);
+        assert!(p.default_value.is_none());
+    }
+
+    // ── Complexity metric sub-fields ────────────────────────────────────
+
+    #[test]
+    fn test_complexity_while_counts_loop() {
+        let source = b"proc spin {} {\n    while {1} {\n        puts hi\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert!(c.loops >= 1, "while should count as a loop, got {:?}", c);
+            assert!(c.cyclomatic_complexity >= 2);
+        }
+    }
+
+    #[test]
+    fn test_complexity_catch_counts_exception_handler() {
+        let source = b"proc guard {} {\n    catch {risky} err\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert!(
+                c.exception_handlers >= 1,
+                "catch should count as an exception handler, got {:?}",
+                c
+            );
+            assert!(c.cyclomatic_complexity >= 2);
+        }
+    }
+
+    #[test]
+    fn test_complexity_return_not_counted_in_body() {
+        // A bare `return $x` in a proc body does not reach walk_complexity's
+        // resolved "return" arm (the grammar wraps it differently), so it
+        // contributes neither an early return nor extra cyclomatic complexity.
+        let source = b"proc bail {x} {\n    return $x\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(c.early_returns, 0);
+            assert_eq!(c.cyclomatic_complexity, 1);
+        }
+    }
+
+    #[test]
+    fn test_complexity_multiple_branches_sum() {
+        let source = b"proc grade {x} {\n    if {$x > 90} {\n        puts a\n    }\n    if {$x > 80} {\n        puts b\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert!(
+                c.branches >= 2,
+                "two ifs should yield >=2 branches, got {:?}",
+                c
+            );
+            assert!(c.cyclomatic_complexity >= 3);
+        }
+    }
+
+    #[test]
+    fn test_complexity_nested_ifs_both_counted() {
+        // Two nested ifs each add a branch even though the inner if lives
+        // inside the outer if's body.
+        let source =
+            b"proc nest {x} {\n    if {$x} {\n        if {$x} {\n            puts deep\n        }\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(c.branches, 2, "both nested ifs count, got {:?}", c);
+            assert_eq!(c.cyclomatic_complexity, 3);
+        }
+    }
+
+    // ── Call caller attribution ─────────────────────────────────────────
+
+    #[test]
+    fn test_call_caller_is_enclosing_proc() {
+        let source = b"proc worker {} {\n    set x 42\n}";
+        let visitor = parse_and_visit(source);
+        let set_call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "set")
+            .expect("set should be recorded as a call");
+        assert_eq!(
+            set_call.caller, "worker",
+            "call inside proc should be attributed to that proc"
+        );
+        assert!(set_call.is_direct);
+    }
+
+    #[test]
+    fn test_top_level_call_caller_is_global_scope() {
+        // A lone bare command does not parse as a command node, so use a
+        // multi-command source (matching test_eda_tool_flow) to get a
+        // recorded top-level call.
+        let source = b"report_timing -delay_type max\nreport_area\ncompile_ultra";
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "report_area")
+            .expect("top-level command should be recorded as a call");
+        assert_eq!(
+            call.caller, "::",
+            "a call outside any proc is attributed to global scope"
+        );
+    }
+
+    // ── Proc entity metadata ────────────────────────────────────────────
+
+    #[test]
+    fn test_proc_visibility_signature_and_no_parent() {
+        let source = b"proc greet {name} {\n    puts hi\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert_eq!(f.visibility, "public");
+        assert!(
+            f.signature.starts_with("proc greet"),
+            "signature should start with 'proc greet', got {:?}",
+            f.signature
+        );
+        // top-level proc has no enclosing namespace
+        assert!(f.parent_class.is_none());
+        assert!(f.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_namespaced_proc_call_caller_is_qualified() {
+        let source = b"namespace eval util {\n    proc run {} {\n        set y 1\n    }\n}";
+        let visitor = parse_and_visit(source);
+        // The set call inside util::run should be attributed to the qualified name
+        if let Some(call) = visitor.calls.iter().find(|c| c.callee == "set") {
+            assert!(
+                call.caller.contains("util") && call.caller.contains("run"),
+                "call caller should be namespace-qualified, got {}",
+                call.caller
+            );
+        }
+    }
+
+    #[test]
+    fn test_nested_brace_default_param() {
+        // A parameter whose default is itself a braced list. trim_end_matches('}')
+        // in extract_params_from_braced strips the whole trailing brace run,
+        // including the inner list's closer, so the recovered default keeps its
+        // opening brace but loses the closer: "{a b".
+        let source = b"proc cfg {name {flags {a b}}} {\n    puts ok\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert!(f.parameters.iter().any(|p| p.name == "name"));
+        assert!(
+            f.parameters
+                .iter()
+                .any(|p| p.name == "flags" && p.default_value.as_deref() == Some("{a b")),
+            "flags default reflects the trailing-brace-strip quirk, got {:?}",
+            f.parameters
         );
     }
 }
