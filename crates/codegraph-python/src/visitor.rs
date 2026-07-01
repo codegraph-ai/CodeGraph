@@ -54,3 +54,116 @@ pub fn extract_decorators(source: &[u8], node: Node) -> Vec<String> {
 
     decorators
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tree_sitter::{Parser, Tree};
+
+    fn parse(source: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .expect("load python grammar");
+        parser.parse(source, None).expect("parse python source")
+    }
+
+    /// First node of the given kind found in a pre-order walk of the tree.
+    fn find_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = find_kind(child, kind) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Extract the docstring of the first function in `source`.
+    fn docstring_of(source: &str) -> Option<String> {
+        let tree = parse(source);
+        let func = find_kind(tree.root_node(), "function_definition").expect("function node");
+        let body = func.child_by_field_name("body").expect("body node");
+        extract_docstring(source.as_bytes(), body)
+    }
+
+    #[test]
+    fn triple_quoted_docstring_is_trimmed() {
+        let src = "def f():\n    \"\"\"  spaced doc  \"\"\"\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some("spaced doc"));
+    }
+
+    #[test]
+    fn triple_single_quoted_docstring() {
+        let src = "def f():\n    '''doc3'''\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some("doc3"));
+    }
+
+    #[test]
+    fn single_quoted_docstring() {
+        let src = "def f():\n    \"one line\"\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some("one line"));
+    }
+
+    #[test]
+    fn comment_before_docstring_is_skipped() {
+        let src = "def f():\n    # a comment\n    \"\"\"real doc\"\"\"\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some("real doc"));
+    }
+
+    #[test]
+    fn assignment_first_yields_no_docstring() {
+        let src = "def f():\n    x = 1\n    return x\n";
+        assert_eq!(docstring_of(src), None);
+    }
+
+    #[test]
+    fn non_expression_statement_stops_search() {
+        // `pass` is a pass_statement (not a comment or expression_statement),
+        // so the scan breaks immediately and finds no docstring.
+        let src = "def f():\n    pass\n";
+        assert_eq!(docstring_of(src), None);
+    }
+
+    /// Extract decorators of the first decorated definition in `source`.
+    fn decorators_of(source: &str) -> Vec<String> {
+        let tree = parse(source);
+        let node = find_kind(tree.root_node(), "decorated_definition").expect("decorated node");
+        extract_decorators(source.as_bytes(), node)
+    }
+
+    #[test]
+    fn single_decorator_is_prefixed() {
+        let src = "@staticmethod\ndef f():\n    pass\n";
+        assert_eq!(decorators_of(src), vec!["@staticmethod".to_string()]);
+    }
+
+    #[test]
+    fn decorator_with_arguments_is_preserved() {
+        let src = "@app.get(\"/users\")\ndef f():\n    pass\n";
+        assert_eq!(decorators_of(src), vec!["@app.get(\"/users\")".to_string()]);
+    }
+
+    #[test]
+    fn multiple_decorators_kept_in_order() {
+        let src = "@staticmethod\n@app.route(\"/x\")\ndef f():\n    pass\n";
+        assert_eq!(
+            decorators_of(src),
+            vec![
+                "@staticmethod".to_string(),
+                "@app.route(\"/x\")".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_function_has_no_decorators() {
+        let src = "def f():\n    pass\n";
+        let tree = parse(src);
+        let func = find_kind(tree.root_node(), "function_definition").expect("function node");
+        assert!(extract_decorators(src.as_bytes(), func).is_empty());
+    }
+}
