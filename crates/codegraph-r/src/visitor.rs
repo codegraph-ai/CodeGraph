@@ -556,4 +556,131 @@ mod tests {
         let visitor = parse_and_visit(source);
         assert!(visitor.functions.is_empty());
     }
+
+    fn complexity_of(source: &[u8]) -> u32 {
+        let v = parse_and_visit(source);
+        v.functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity
+    }
+
+    #[test]
+    fn test_for_loop_complexity() {
+        let plain = b"f <- function(x) {\n    x\n}";
+        let looped = b"g <- function(x) {\n    for (i in 1:x) {\n        i\n    }\n}";
+        assert!(complexity_of(looped) > complexity_of(plain));
+    }
+
+    #[test]
+    fn test_while_loop_complexity() {
+        let plain = b"f <- function(x) {\n    x\n}";
+        let looped = b"g <- function(x) {\n    while (x > 0) {\n        x <- x - 1\n    }\n}";
+        assert!(complexity_of(looped) > complexity_of(plain));
+    }
+
+    #[test]
+    fn test_repeat_loop_complexity() {
+        let plain = b"f <- function(x) {\n    x\n}";
+        let looped = b"g <- function(x) {\n    repeat {\n        break\n    }\n}";
+        assert!(complexity_of(looped) > complexity_of(plain));
+    }
+
+    #[test]
+    fn test_logical_and_operator_complexity() {
+        let plain = b"f <- function(a, b) {\n    a\n}";
+        let logical = b"g <- function(a, b) {\n    a && b\n}";
+        assert!(complexity_of(logical) > complexity_of(plain));
+    }
+
+    #[test]
+    fn test_vectorized_and_not_counted() {
+        // A single `&` is R's vectorized AND and must not raise complexity,
+        // unlike the scalar `&&`.
+        let plain = b"f <- function(a, b) {\n    a\n}";
+        let vectorized = b"g <- function(a, b) {\n    a & b\n}";
+        assert_eq!(complexity_of(vectorized), complexity_of(plain));
+    }
+
+    #[test]
+    fn test_trycatch_exception_handler_complexity() {
+        let plain = b"f <- function(x) {\n    x\n}";
+        let guarded = b"g <- function(x) {\n    tryCatch(x, error = function(e) NULL)\n}";
+        assert!(complexity_of(guarded) > complexity_of(plain));
+    }
+
+    #[test]
+    fn test_call_metadata_defaults() {
+        let source = b"main <- function() {\n    helper()\n}";
+        let visitor = parse_and_visit(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("helper call recorded");
+        assert_eq!(call.caller, "main");
+        assert_eq!(call.call_site_line, 2);
+        assert!(call.is_direct);
+        assert_eq!(call.struct_type, None);
+        assert_eq!(call.field_name, None);
+    }
+
+    #[test]
+    fn test_import_default_fields() {
+        let source = b"library(ggplot2)";
+        let visitor = parse_and_visit(source);
+
+        let import = &visitor.imports[0];
+        assert_eq!(import.importer, "main");
+        assert!(import.symbols.is_empty());
+        assert!(!import.is_wildcard);
+        assert_eq!(import.alias.as_deref(), Some("library"));
+    }
+
+    #[test]
+    fn test_multiple_imports_order_preserved() {
+        let source = b"library(ggplot2)\nrequire(dplyr)\nsource(\"utils.R\")";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 3);
+        assert_eq!(visitor.imports[0].imported, "ggplot2");
+        assert_eq!(visitor.imports[1].imported, "dplyr");
+        assert_eq!(visitor.imports[2].imported, "utils.R");
+    }
+
+    #[test]
+    fn test_body_prefix_contains_body_text() {
+        let source = b"add <- function(a, b) {\n    a + b\n}";
+        let visitor = parse_and_visit(source);
+        let prefix = visitor.functions[0].body_prefix.as_deref().unwrap();
+        assert!(prefix.contains("a + b"));
+    }
+
+    #[test]
+    fn test_line_numbering_offset_by_leading_blanks() {
+        let source = b"\n\nadd <- function(a, b) {\n    a + b\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].line_start, 3);
+        assert_eq!(visitor.functions[0].line_end, 5);
+    }
+
+    #[test]
+    fn test_nested_function_assignment_not_extracted() {
+        // Once an outer function is found, its body is traversed only by
+        // visit_body_for_calls (call tracking), not visit_node, so a nested
+        // `inner <- function()` assignment is never emitted as its own entity.
+        let source =
+            b"outer <- function() {\n    inner <- function() {\n        1\n    }\n    inner()\n}";
+        let visitor = parse_and_visit(source);
+
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["outer"]);
+        // The nested call is still attributed to the outer function.
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "outer" && c.callee == "inner"));
+    }
 }
