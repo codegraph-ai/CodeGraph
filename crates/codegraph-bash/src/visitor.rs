@@ -487,4 +487,110 @@ mod tests {
         assert_eq!(f.line_start, 3);
         assert_eq!(f.line_end, 5);
     }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        let mut source = Vec::from(&b"greet() {\n    echo \""[..]);
+        source.extend(std::iter::repeat_n(b'x', BODY_PREFIX_MAX_CHARS + 200));
+        source.extend_from_slice(b"\"\n}\n");
+        let f = &parse_and_visit(&source).functions[0];
+        assert_eq!(f.body_prefix.as_ref().unwrap().len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_two_calls_recorded() {
+        let source = b"greet() {\n    echo hi\n    printf bye\n}\n";
+        let visitor = parse_and_visit(source);
+        let n = visitor.calls.iter().filter(|c| c.caller == "greet").count();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn test_call_inside_loop_attributed() {
+        let source = b"greet() {\n    for x in 1 2; do\n        printf $x\n    done\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "greet" && c.callee == "printf"));
+    }
+
+    #[test]
+    fn test_doc_comment_not_from_command_sibling() {
+        // A command (not a comment) immediately preceding a function yields no doc comment.
+        let source = b"echo start\ngreet() {\n    echo hi\n}\n";
+        let f = &parse_and_visit(source).functions[0];
+        assert!(f.doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_source_single_quotes_stripped() {
+        let source = b"source './lib.sh'\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "./lib.sh");
+    }
+
+    #[test]
+    fn test_nested_if_raises_complexity_further() {
+        let one = b"greet() {\n    if true; then\n        echo a\n    fi\n}\n";
+        let two = b"greet() {\n    if true; then\n        if false; then\n            echo a\n        fi\n    fi\n}\n";
+        let cc_one = parse_and_visit(one).functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        let cc_two = parse_and_visit(two).functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        assert!(cc_two > cc_one);
+    }
+
+    #[test]
+    fn test_dot_import_inside_function_recorded() {
+        let source = b"greet() {\n    . ./lib.sh\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "./lib.sh");
+        assert!(!visitor.calls.iter().any(|c| c.callee == "."));
+    }
+
+    #[test]
+    fn test_multiple_functions_line_progression() {
+        let source = b"a() {\n    echo 1\n}\nb() {\n    echo 2\n}\n";
+        let fns = parse_and_visit(source).functions;
+        assert_eq!(fns[0].line_start, 1);
+        assert!(fns[1].line_start > fns[0].line_end);
+    }
+
+    #[test]
+    fn test_case_multi_arm_higher_than_single() {
+        let single = b"greet() {\n    case $1 in\n        a) echo a ;;\n    esac\n}\n";
+        let multi = b"greet() {\n    case $1 in\n        a) echo a ;;\n        b) echo b ;;\n        *) echo x ;;\n    esac\n}\n";
+        let cc_single = parse_and_visit(single).functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        let cc_multi = parse_and_visit(multi).functions[0]
+            .complexity
+            .as_ref()
+            .unwrap()
+            .cyclomatic_complexity;
+        assert!(cc_multi >= cc_single);
+    }
+
+    #[test]
+    fn test_call_before_function_definition_not_tracked() {
+        // Commands outside any function are not recorded even when functions exist later.
+        let source = b"echo top\ngreet() {\n    echo hi\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(!visitor
+            .calls
+            .iter()
+            .any(|c| c.callee == "echo" && c.call_site_line == 1));
+    }
 }
