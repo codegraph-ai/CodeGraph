@@ -676,4 +676,170 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(stats.definitions_count, 1000);
     }
+
+    #[test]
+    fn test_symbol_search_cache_set_and_get() {
+        let cache = QueryCache::new(100);
+        let key = "query:user scope:workspace limit:10";
+
+        assert!(cache.get_symbol_search(key).is_none()); // miss before insert
+
+        cache.set_symbol_search(
+            key.to_string(),
+            SymbolSearchCache {
+                results: vec![(7, 0.91, "name match".to_string())],
+                total_matches: 3,
+                query_time_ms: 12,
+            },
+        );
+
+        let hit = cache.get_symbol_search(key).expect("cached entry");
+        assert_eq!(hit.results, vec![(7, 0.91, "name match".to_string())]);
+        assert_eq!(hit.total_matches, 3);
+        assert_eq!(hit.query_time_ms, 12);
+        // A different query key is a distinct cache slot -> miss.
+        assert!(cache.get_symbol_search("query:other").is_none());
+    }
+
+    #[test]
+    fn test_symbol_search_cache_overwrites_same_key() {
+        let cache = QueryCache::new(100);
+        let key = "q".to_string();
+        cache.set_symbol_search(
+            key.clone(),
+            SymbolSearchCache {
+                results: vec![],
+                total_matches: 1,
+                query_time_ms: 1,
+            },
+        );
+        cache.set_symbol_search(
+            key.clone(),
+            SymbolSearchCache {
+                results: vec![(9, 0.5, "later".to_string())],
+                total_matches: 99,
+                query_time_ms: 5,
+            },
+        );
+        // Re-putting the same key replaces the value; count stays 1.
+        let hit = cache.get_symbol_search(&key).expect("cached entry");
+        assert_eq!(hit.total_matches, 99);
+        assert_eq!(cache.stats().symbol_searches_count, 1);
+    }
+
+    #[test]
+    fn test_traversal_cache_set_and_get() {
+        let cache = QueryCache::new(100);
+        let node_id: NodeId = 5;
+
+        assert!(cache.get_traversal(node_id, "outgoing", 2).is_none()); // miss
+
+        cache.set_traversal(
+            node_id,
+            "outgoing".to_string(),
+            2,
+            TraversalCache {
+                nodes: vec![(6, 1, "calls".to_string())],
+                query_time_ms: 8,
+            },
+        );
+
+        let hit = cache
+            .get_traversal(node_id, "outgoing", 2)
+            .expect("cached entry");
+        assert_eq!(hit.nodes, vec![(6, 1, "calls".to_string())]);
+        assert_eq!(hit.query_time_ms, 8);
+    }
+
+    #[test]
+    fn test_traversal_cache_key_includes_direction_and_depth() {
+        let cache = QueryCache::new(100);
+        let node_id: NodeId = 5;
+        cache.set_traversal(
+            node_id,
+            "outgoing".to_string(),
+            2,
+            TraversalCache {
+                nodes: vec![],
+                query_time_ms: 0,
+            },
+        );
+        // Same node but a different direction or depth is a distinct key -> miss.
+        assert!(cache.get_traversal(node_id, "incoming", 2).is_none());
+        assert!(cache.get_traversal(node_id, "outgoing", 3).is_none());
+        assert!(cache.get_traversal(node_id, "outgoing", 2).is_some());
+    }
+
+    #[test]
+    fn test_invalidate_all_clears_ai_query_caches() {
+        let cache = QueryCache::new(100);
+        cache.set_symbol_search(
+            "q".to_string(),
+            SymbolSearchCache {
+                results: vec![],
+                total_matches: 0,
+                query_time_ms: 0,
+            },
+        );
+        cache.set_traversal(
+            1,
+            "outgoing".to_string(),
+            1,
+            TraversalCache {
+                nodes: vec![],
+                query_time_ms: 0,
+            },
+        );
+        assert_eq!(cache.stats().symbol_searches_count, 1);
+        assert_eq!(cache.stats().traversals_count, 1);
+
+        cache.invalidate_all();
+
+        let after = cache.stats();
+        assert_eq!(after.symbol_searches_count, 0);
+        assert_eq!(after.traversals_count, 0);
+    }
+
+    #[test]
+    fn test_invalidate_file_preserves_ai_query_and_context_caches() {
+        // invalidate_file only touches definitions, references, call_hierarchies,
+        // and dependency_graphs - it intentionally leaves the AI context, symbol
+        // search, and traversal caches intact. Pin that asymmetry.
+        let cache = QueryCache::new(100);
+        let path = PathBuf::from("/test/file.rs");
+        let node_id: NodeId = 3;
+
+        cache.set_ai_context(
+            node_id,
+            "summary".to_string(),
+            AIContextCache {
+                primary_code: "fn f() {}".to_string(),
+                related_symbols: vec![],
+            },
+        );
+        cache.set_symbol_search(
+            "q".to_string(),
+            SymbolSearchCache {
+                results: vec![],
+                total_matches: 0,
+                query_time_ms: 0,
+            },
+        );
+        cache.set_traversal(
+            node_id,
+            "outgoing".to_string(),
+            1,
+            TraversalCache {
+                nodes: vec![],
+                query_time_ms: 0,
+            },
+        );
+
+        cache.invalidate_file(&path);
+
+        let after = cache.stats();
+        assert_eq!(after.ai_contexts_count, 1);
+        assert_eq!(after.symbol_searches_count, 1);
+        assert_eq!(after.traversals_count, 1);
+    }
 }
