@@ -111,7 +111,7 @@ fn test_parse_sample_app_imports() {
 
     // Should find @import("std") imports
     assert!(
-        file_info.imports.len() >= 1,
+        !file_info.imports.is_empty(),
         "Expected at least 1 import, found {}",
         file_info.imports.len()
     );
