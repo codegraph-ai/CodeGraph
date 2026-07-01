@@ -516,4 +516,45 @@ mod tests {
         assert_eq!(paths[0].first(), Some(&a));
         assert_eq!(paths[0].last(), Some(&c));
     }
+
+    #[test]
+    fn test_find_all_paths_skips_back_edge_to_ancestor() {
+        // a -> b -> c plus a back edge b -> a. Searching a..c, when the recursion
+        // reaches b it explores both neighbors: c (the target) and a. Because a is
+        // the start and is already in `visited`, the `!visited.contains(&neighbor)`
+        // guard takes its false arm and the back edge is skipped, so exactly one
+        // path is enumerated. Every prior path test was acyclic or returned at the
+        // target before any back edge, leaving that visited-skip arm unexercised.
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, c, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, a, vec![]).unwrap();
+
+        let paths = find_all_paths(&graph, a, c, None).unwrap();
+        assert_eq!(paths, vec![vec![a, b, c]]);
+    }
+
+    #[test]
+    fn test_find_all_paths_terminates_on_deep_cycle() {
+        // a -> b -> c -> a is a 3-node cycle; c also branches to d. Searching a..d,
+        // when the recursion reaches c it hits the back edge c -> a (a already on the
+        // path/visited) and skips it, then follows c -> d to the target. This drives
+        // the visited-skip arm one level deeper than the two-node case and confirms
+        // the traversal terminates rather than looping the cycle forever.
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        let d = helpers::add_file(&mut graph, "d.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, c, vec![]).unwrap();
+        helpers::add_import(&mut graph, c, a, vec![]).unwrap();
+        helpers::add_import(&mut graph, c, d, vec![]).unwrap();
+
+        let paths = find_all_paths(&graph, a, d, None).unwrap();
+        assert_eq!(paths, vec![vec![a, b, c, d]]);
+    }
 }
