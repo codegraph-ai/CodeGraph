@@ -211,4 +211,47 @@ mod tests {
         let back: ParserMetrics = serde_json::from_str(&json).unwrap();
         assert_eq!(back.total_parse_time, Duration::from_secs(2));
     }
+
+    #[test]
+    fn default_serializes_to_exact_wire_format() {
+        // Pin the exact snake_case field names, total_parse_time emitted as a
+        // bare whole-second number (not a {secs,nanos} Duration struct) via
+        // duration_serde, and peak_memory_bytes as explicit null (Option has no
+        // skip_serializing_if). An accidental rename or serde change is caught here.
+        let json = serde_json::to_string(&ParserMetrics::default()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"files_attempted":0,"files_succeeded":0,"files_failed":0,"total_parse_time":0,"total_entities":0,"total_relationships":0,"peak_memory_bytes":null}"#
+        );
+    }
+
+    #[test]
+    fn populated_serializes_to_exact_wire_format() {
+        // Pin the Some arm of peak_memory_bytes and a non-zero whole-second
+        // total_parse_time, guarding the multi-word snake_case field names.
+        let m = ParserMetrics {
+            files_attempted: 10,
+            files_succeeded: 8,
+            files_failed: 2,
+            total_parse_time: Duration::from_secs(42),
+            total_entities: 100,
+            total_relationships: 50,
+            peak_memory_bytes: Some(2048),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(
+            json,
+            r#"{"files_attempted":10,"files_succeeded":8,"files_failed":2,"total_parse_time":42,"total_entities":100,"total_relationships":50,"peak_memory_bytes":2048}"#
+        );
+    }
+
+    #[test]
+    fn merge_memory_stays_none_when_both_sides_none() {
+        // The (None, None) arm of merge's peak_memory_bytes match was never
+        // exercised: prior tests covered Some/Some, Some/None and None/Some only.
+        let mut a = ParserMetrics::default();
+        let b = ParserMetrics::default();
+        a.merge(&b);
+        assert_eq!(a.peak_memory_bytes, None);
+    }
 }
