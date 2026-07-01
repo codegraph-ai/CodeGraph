@@ -675,6 +675,7 @@ impl<'a> RubyVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> RubyVisitor<'_> {
         use tree_sitter::Parser;
@@ -1137,5 +1138,135 @@ end
             "expected && and || counted, got {}",
             complexity.logical_operators
         );
+    }
+
+    #[test]
+    fn test_visitor_body_prefix_truncated() {
+        // An oversized method body is truncated to exactly BODY_PREFIX_MAX_CHARS
+        let filler = "a".repeat(BODY_PREFIX_MAX_CHARS + 100);
+        let src = format!("def big\n  x = \"{}\"\nend", filler);
+        let visitor = parse_and_visit(src.as_bytes());
+
+        assert_eq!(visitor.functions.len(), 1);
+        let body_prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(body_prefix.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_visitor_method_body_prefix_content() {
+        // A short method body is captured verbatim as body_prefix
+        let source = b"def greet\n  puts 1\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let body_prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(body_prefix.contains("puts 1"));
+    }
+
+    #[test]
+    fn test_visitor_hash_splat_parameter_variadic() {
+        // **kwargs is captured as a single variadic parameter
+        let source = b"def opts(**kwargs)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].parameters.len(), 1);
+        assert_eq!(visitor.functions[0].parameters[0].name, "kwargs");
+        assert!(visitor.functions[0].parameters[0].is_variadic);
+    }
+
+    #[test]
+    fn test_visitor_block_parameter() {
+        // &block is captured as an ordinary (non-variadic) parameter
+        let source = b"def each_item(&block)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].parameters.len(), 1);
+        assert_eq!(visitor.functions[0].parameters[0].name, "block");
+        assert!(!visitor.functions[0].parameters[0].is_variadic);
+    }
+
+    #[test]
+    fn test_complexity_until_loop() {
+        // until is counted as a loop like while
+        let source = b"def wait(n)\n  until n == 0\n    n -= 1\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.loops >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_unless_branch() {
+        // unless adds a branch like if
+        let source = b"def check(x)\n  unless x\n    puts 1\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.branches >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_ternary_conditional() {
+        // A ternary (cond ? a : b) parses as a conditional node and adds a branch
+        let source = b"def pick(x)\n  x ? 1 : 2\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.branches >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_for_loop() {
+        // A `for x in coll` loop is counted as a loop
+        let source = b"def loop_it(items)\n  for i in items\n    puts i\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.loops >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_visitor_prepend_inclusion() {
+        // prepend is treated like include/extend for implementation relations
+        let source = b"module M\nend\nclass C\n  prepend M\nend";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|i| i.implementor == "C" && i.trait_name == "M"));
+    }
+
+    #[test]
+    fn test_visitor_scope_resolution_module_inclusion() {
+        // A namespaced module (Foo::Bar) included in a class is recorded verbatim
+        let source = b"class C\n  include Foo::Bar\nend";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|i| i.implementor == "C" && i.trait_name == "Foo::Bar"));
+    }
+
+    #[test]
+    fn test_visitor_require_in_class_importer_main() {
+        // A require inside a class (not a module) defaults importer to "main"
+        let source = b"class App\n  require 'json'\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "json");
+        assert_eq!(visitor.imports[0].importer, "main");
     }
 }
