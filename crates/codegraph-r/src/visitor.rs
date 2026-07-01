@@ -683,4 +683,112 @@ mod tests {
             .iter()
             .any(|c| c.caller == "outer" && c.callee == "inner"));
     }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // A body longer than the truncation limit must be clipped to exactly
+        // BODY_PREFIX_MAX_CHARS bytes.
+        let filler = "x <- x + 1\n".repeat(200);
+        let source = format!("big <- function(x) {{\n{filler}}}");
+        let visitor = parse_and_visit(source.as_bytes());
+        let prefix = visitor.functions[0].body_prefix.as_deref().unwrap();
+        assert_eq!(prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_variadic_only_signature() {
+        // A function whose sole parameter is `...` renders the dots in the
+        // signature.
+        let source = b"f <- function(...) {\n    NULL\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "f <- function(...)");
+    }
+
+    #[test]
+    fn test_default_param_not_in_signature() {
+        // The signature lists only parameter names, dropping default values.
+        let source = b"f <- function(x, y = 10) {\n    x + y\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "f <- function(x, y)");
+    }
+
+    #[test]
+    fn test_logical_or_operator_complexity() {
+        let plain = b"f <- function(a, b) {\n    a\n}";
+        let logical = b"g <- function(a, b) {\n    a || b\n}";
+        assert!(complexity_of(logical) > complexity_of(plain));
+    }
+
+    #[test]
+    fn test_baseline_complexity_is_one() {
+        let source = b"f <- function(x) {\n    x + 1\n}";
+        assert_eq!(complexity_of(source), 1);
+    }
+
+    #[test]
+    fn test_nested_if_raises_complexity() {
+        let flat = b"f <- function(x) {\n    if (x > 0) {\n        1\n    }\n}";
+        let nested =
+            b"g <- function(x) {\n    if (x > 0) {\n        if (x > 1) {\n            2\n        }\n    }\n}";
+        assert!(complexity_of(nested) > complexity_of(flat));
+    }
+
+    #[test]
+    fn test_no_param_signature() {
+        let source = b"noop <- function() {\n    NULL\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "noop <- function()");
+        assert!(visitor.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn test_empty_body_prefix_is_braces() {
+        // An empty `{}` body still has non-empty node text, so body_prefix is
+        // Some("{}") rather than None.
+        let source = b"noop <- function() {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].body_prefix.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn test_call_inside_if_attributed() {
+        let source = b"main <- function(x) {\n    if (x > 0) {\n        helper()\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "main" && c.callee == "helper"));
+    }
+
+    #[test]
+    fn test_two_calls_recorded_separately() {
+        let source = b"main <- function() {\n    first()\n    second()\n}";
+        let visitor = parse_and_visit(source);
+        let callees: Vec<&str> = visitor
+            .calls
+            .iter()
+            .filter(|c| c.caller == "main")
+            .map(|c| c.callee.as_str())
+            .collect();
+        assert!(callees.contains(&"first"));
+        assert!(callees.contains(&"second"));
+    }
+
+    #[test]
+    fn test_try_exception_handler_complexity() {
+        // `try` (not just `tryCatch`) counts as an exception handler.
+        let plain = b"f <- function(x) {\n    x\n}";
+        let guarded = b"g <- function(x) {\n    try(x)\n}";
+        assert!(complexity_of(guarded) > complexity_of(plain));
+    }
+
+    #[test]
+    fn test_top_level_call_not_tracked() {
+        // A call outside any function has no current_function, so no
+        // CallRelation is recorded.
+        let source = b"helper()";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
 }
