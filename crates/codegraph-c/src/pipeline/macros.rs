@@ -1626,4 +1626,105 @@ mod tests {
         let out = n.neutralize("x = READ_ONCE(y");
         assert!(out.contains("READ_ONCE(y"));
     }
+
+    // --- handle_typeof: cast context collapses to `void *` ---
+
+    #[test]
+    fn test_typeof_cast_context_becomes_void_ptr() {
+        let mut n = MacroNeutralizer::new();
+        // (typeof(x))y is a cast; the closing paren immediately follows the arg.
+        let out = n.handle_typeof("z = (typeof(x))y;");
+        assert_eq!(out, "z = (void *)y;");
+        assert_eq!(n.stats.typeof_replaced, 1);
+    }
+
+    // --- handle_typeof: declaration context becomes __auto_type ---
+
+    #[test]
+    fn test_typeof_declaration_becomes_auto_type() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.handle_typeof("typeof(a) b = a;");
+        assert!(out.starts_with("__auto_type /* typeof(a) */"));
+        assert!(out.contains("b = a;"));
+        assert_eq!(n.stats.typeof_replaced, 1);
+    }
+
+    // --- handle_typeof: cast where something follows the inner paren keeps __auto_type ---
+
+    #[test]
+    fn test_typeof_paren_prefix_but_trailing_content_keeps_auto_type() {
+        let mut n = MacroNeutralizer::new();
+        // '(' precedes typeof but the token after the inner ')' is not ')',
+        // so it takes the __auto_type branch rather than the void* cast.
+        let out = n.handle_typeof("(typeof(x) v)");
+        assert!(out.contains("__auto_type /* typeof(x) */"));
+        assert!(!out.contains("void *"));
+    }
+
+    // --- handle_typeof: unmatched paren leaves the token untouched ---
+
+    #[test]
+    fn test_typeof_unmatched_paren_left_intact() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.handle_typeof("typeof(x");
+        assert_eq!(out, "typeof(x");
+        assert_eq!(n.stats.typeof_replaced, 0);
+    }
+
+    // --- handle_module_macros: EXPORT_SYMBOL / MODULE_* become comments ---
+
+    #[test]
+    fn test_module_macros_commented_out() {
+        let n = MacroNeutralizer::new();
+        let src = "int foo(void) { return 0; }\nEXPORT_SYMBOL(foo);\nMODULE_LICENSE(\"GPL\");\n";
+        let out = n.handle_module_macros(src);
+        assert!(out.contains("/* EXPORT_SYMBOL(foo); */"));
+        assert!(out.contains("/* MODULE_LICENSE(\"GPL\"); */"));
+        // Non-macro lines are preserved verbatim.
+        assert!(out.contains("int foo(void) { return 0; }"));
+    }
+
+    #[test]
+    fn test_module_macros_no_trailing_newline_preserved() {
+        let n = MacroNeutralizer::new();
+        // Source without a trailing newline should not gain one.
+        let out = n.handle_module_macros("int x;");
+        assert_eq!(out, "int x;");
+        assert!(!out.ends_with('\n'));
+    }
+
+    // --- handle_caps_macros: array-initializer element collapses to `{ 0 }` ---
+
+    #[test]
+    fn test_caps_macro_in_array_initializer_becomes_zero_init() {
+        let n = MacroNeutralizer::new();
+        let out = n.handle_caps_macros("struct s arr[] = { MY_ENTRY(1) };");
+        assert_eq!(out, "struct s arr[] = { { 0 } };");
+    }
+
+    #[test]
+    fn test_caps_macro_skips_known_expression_macros() {
+        let n = MacroNeutralizer::new();
+        // ARRAY_SIZE is in the skip list; must be left untouched even in braces.
+        let out = n.handle_caps_macros("int n[] = { ARRAY_SIZE(x) };");
+        assert!(out.contains("ARRAY_SIZE(x)"));
+    }
+
+    #[test]
+    fn test_caps_macro_not_replaced_outside_initializer() {
+        let n = MacroNeutralizer::new();
+        // Assignment context (after '='), not an initializer element -> unchanged.
+        let out = n.handle_caps_macros("result = FOO_BAR(1);");
+        assert_eq!(out, "result = FOO_BAR(1);");
+    }
+
+    // --- handle_container_of: single-arg falls back to a void* cast ---
+
+    #[test]
+    fn test_container_of_single_arg_falls_back_to_void_ptr() {
+        let mut n = MacroNeutralizer::new();
+        let out = n.handle_container_of("p = container_of(ptr);");
+        assert!(out.contains("((void*)ptr)"));
+        assert_eq!(n.stats.container_of_expanded, 1);
+    }
 }
