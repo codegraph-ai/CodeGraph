@@ -649,10 +649,7 @@ mod tests {
         assert_eq!(visitor.functions[0].parameters.len(), 2);
         assert_eq!(visitor.functions[0].parameters[0].name, "name");
         assert_eq!(visitor.functions[0].parameters[1].name, "email");
-        assert_eq!(
-            visitor.functions[0].return_type,
-            Some("User".to_string())
-        );
+        assert_eq!(visitor.functions[0].return_type, Some("User".to_string()));
     }
 
     #[test]

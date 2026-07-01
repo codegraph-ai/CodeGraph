@@ -134,8 +134,7 @@ pub(crate) fn ir_to_graph(
             props = props.with("return_type", ret.clone());
         }
         if !func.parameters.is_empty() {
-            let param_names: Vec<String> =
-                func.parameters.iter().map(|p| p.name.clone()).collect();
+            let param_names: Vec<String> = func.parameters.iter().map(|p| p.name.clone()).collect();
             props = props.with("parameters", param_names);
         }
         if let Some(ref complexity) = func.complexity {
@@ -229,4 +228,271 @@ pub(crate) fn ir_to_graph(
         line_count,
         byte_count: 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{Direction, PropertyValue};
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
+        TraitEntity,
+    };
+
+    fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(ir, &mut graph, Path::new("Solver.jl")).unwrap();
+        (graph, info)
+    }
+
+    fn name_of(graph: &CodeGraph, id: NodeId) -> String {
+        match graph.get_node(id).unwrap().properties.get("name") {
+            Some(PropertyValue::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn empty_ir_creates_file_node_from_path_stem() {
+        let ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        let (graph, info) = build(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("Solver".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("language"),
+            Some(&PropertyValue::String("julia".to_string()))
+        );
+        assert!(info.functions.is_empty());
+        assert!(info.classes.is_empty());
+        assert!(info.traits.is_empty());
+        assert!(info.imports.is_empty());
+        assert_eq!(info.line_count, 0);
+    }
+
+    #[test]
+    fn module_drives_file_node_metadata_and_line_count() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        let mut module = ModuleEntity::new("Solver", "src/Solver.jl", "julia");
+        module.line_count = 120;
+        module.doc_comment = Some("module docs".to_string());
+        ir.set_module(module);
+
+        let (graph, info) = build(&ir);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(
+            file.properties.get("name"),
+            Some(&PropertyValue::String("Solver".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("path"),
+            Some(&PropertyValue::String("src/Solver.jl".to_string()))
+        );
+        assert_eq!(
+            file.properties.get("line_count"),
+            Some(&PropertyValue::Int(120))
+        );
+        assert_eq!(
+            file.properties.get("doc"),
+            Some(&PropertyValue::String("module docs".to_string()))
+        );
+        assert_eq!(info.line_count, 120);
+    }
+
+    #[test]
+    fn struct_maps_to_class_node_and_drops_its_methods() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        let mut class = ClassEntity::new("Point", 1, 5)
+            .with_visibility("public")
+            .abstract_class();
+        // The julia mapper never iterates class.methods, so this is dropped.
+        class
+            .methods
+            .push(FunctionEntity::new("norm", 2, 4).with_visibility("public"));
+        ir.add_class(class);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.classes.len(), 1);
+        // Methods on the ClassEntity are silently dropped by the julia mapper.
+        assert!(info.functions.is_empty());
+        // Only the file node and the class node exist.
+        assert_eq!(graph.node_count(), 2);
+
+        let class_id = info.classes[0];
+        let class_node = graph.get_node(class_id).unwrap();
+        assert_eq!(class_node.node_type, NodeType::Class);
+        assert_eq!(name_of(&graph, class_id), "Point");
+        assert_eq!(
+            class_node.properties.get("is_abstract"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert!(!graph
+            .get_edges_between(info.file_id, class_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn abstract_type_maps_to_interface_node_contained_by_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        let mut tr = TraitEntity::new("AbstractShape", 1, 3);
+        tr.doc_comment = Some("abstract type".to_string());
+        ir.add_trait(tr);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.traits.len(), 1);
+
+        let trait_id = info.traits[0];
+        let trait_node = graph.get_node(trait_id).unwrap();
+        assert_eq!(trait_node.node_type, NodeType::Interface);
+        assert_eq!(name_of(&graph, trait_id), "AbstractShape");
+        assert_eq!(
+            trait_node.properties.get("doc"),
+            Some(&PropertyValue::String("abstract type".to_string()))
+        );
+
+        let edge_ids = graph.get_edges_between(info.file_id, trait_id).unwrap();
+        assert_eq!(edge_ids.len(), 1);
+        assert_eq!(
+            graph.get_edge(edge_ids[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    #[test]
+    fn free_function_is_contained_by_file_with_complexity_and_flag_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 12,
+            branches: 6,
+            loops: 2,
+            ..Default::default()
+        };
+        let func = FunctionEntity::new("solve", 1, 30)
+            .with_signature("function solve(x)")
+            .with_complexity(metrics)
+            .async_fn();
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.functions.len(), 1);
+
+        let func_id = info.functions[0];
+        // Julia keeps function names bare (no Class#/Class. qualification).
+        assert_eq!(name_of(&graph, func_id), "solve");
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        assert!(neighbors.contains(&func_id));
+
+        let node = graph.get_node(func_id).unwrap();
+        assert_eq!(
+            node.properties.get("complexity"),
+            Some(&PropertyValue::Int(12))
+        );
+        // Grade 12 falls in the C band.
+        assert_eq!(
+            node.properties.get("complexity_grade"),
+            Some(&PropertyValue::String("C".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("is_async"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            node.properties.get("is_static"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn import_creates_external_module_with_symbols_edge_prop() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_import(
+            ImportRelation::new("Solver", "LinearAlgebra").with_symbols(vec!["dot".to_string()]),
+        );
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 1);
+
+        let import_id = info.imports[0];
+        let import_node = graph.get_node(import_id).unwrap();
+        assert_eq!(import_node.node_type, NodeType::Module);
+        assert_eq!(
+            import_node.properties.get("name"),
+            Some(&PropertyValue::String("LinearAlgebra".to_string()))
+        );
+        assert_eq!(
+            import_node.properties.get("is_external"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+
+        let edge_ids = graph.get_edges_between(info.file_id, import_id).unwrap();
+        assert_eq!(edge_ids.len(), 1);
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        // The julia mapper records the imported symbols on the edge.
+        assert_eq!(
+            edge.properties.get("symbols"),
+            Some(&PropertyValue::StringList(vec!["dot".to_string()]))
+        );
+    }
+
+    #[test]
+    fn call_relation_wires_calls_edge_only_between_known_nodes() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        ir.add_call(CallRelation::new("caller", "callee", 3));
+        // Unknown callee -> silently skipped.
+        ir.add_call(CallRelation::new("caller", "ghost", 4));
+
+        let (graph, info) = build(&ir);
+        let caller_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "caller")
+            .unwrap();
+        let callee_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "callee")
+            .unwrap();
+
+        let call_edges: Vec<_> = graph
+            .get_edges_between(caller_id, callee_id)
+            .unwrap()
+            .into_iter()
+            .filter(|&e| graph.get_edge(e).unwrap().edge_type == EdgeType::Calls)
+            .collect();
+        assert_eq!(call_edges.len(), 1);
+        let edge = graph.get_edge(call_edges[0]).unwrap();
+        assert_eq!(
+            edge.properties.get("call_site_line"),
+            Some(&PropertyValue::Int(3))
+        );
+
+        let outgoing = graph.get_neighbors(caller_id, Direction::Outgoing).unwrap();
+        assert_eq!(outgoing, vec![callee_id]);
+    }
+
+    #[test]
+    fn duplicate_import_target_reuses_existing_node() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_import(ImportRelation::new("Solver", "Base"));
+        ir.add_import(ImportRelation::new("Solver", "Base"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.imports.len(), 2);
+        assert_eq!(info.imports[0], info.imports[1]);
+        let edges = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(edges.len(), 2);
+    }
 }
