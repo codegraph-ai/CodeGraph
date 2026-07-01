@@ -402,4 +402,46 @@ mod tests {
             assert_eq!(back, et);
         }
     }
+
+    #[test]
+    fn node_type_wire_format_is_bare_variant_string() {
+        // Every NodeType is embedded in each persisted Node, so its exact
+        // externally-tagged wire form (a bare JSON string equal to the variant
+        // identifier) is an on-disk contract. The round-trip test above would
+        // still pass under a #[serde(rename)] that silently invalidates existing
+        // databases; only pinning the literal bytes catches that.
+        for (nt, wire) in [
+            (NodeType::CodeFile, "\"CodeFile\""),
+            (NodeType::Function, "\"Function\""),
+            (NodeType::Class, "\"Class\""),
+            (NodeType::Module, "\"Module\""),
+            (NodeType::Variable, "\"Variable\""),
+            (NodeType::Type, "\"Type\""),
+            (NodeType::Interface, "\"Interface\""),
+            (NodeType::Generic, "\"Generic\""),
+        ] {
+            assert_eq!(serde_json::to_string(&nt).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn edge_type_wire_format_is_bare_variant_string() {
+        // Same on-disk contract for EdgeType, embedded in every persisted Edge.
+        for (et, wire) in [
+            (EdgeType::Imports, "\"Imports\""),
+            (EdgeType::ImportsFrom, "\"ImportsFrom\""),
+            (EdgeType::Contains, "\"Contains\""),
+            (EdgeType::Calls, "\"Calls\""),
+            (EdgeType::Invokes, "\"Invokes\""),
+            (EdgeType::Instantiates, "\"Instantiates\""),
+            (EdgeType::Extends, "\"Extends\""),
+            (EdgeType::Implements, "\"Implements\""),
+            (EdgeType::Uses, "\"Uses\""),
+            (EdgeType::Defines, "\"Defines\""),
+            (EdgeType::References, "\"References\""),
+            (EdgeType::RuntimeCalls, "\"RuntimeCalls\""),
+        ] {
+            assert_eq!(serde_json::to_string(&et).unwrap(), wire);
+        }
+    }
 }
