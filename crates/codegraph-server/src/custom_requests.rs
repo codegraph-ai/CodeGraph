@@ -366,3 +366,149 @@ impl CodeGraphBackend {
         Ok(Value::Null)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai_query::QueryEngine;
+    use codegraph::CodeGraph;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use tower_lsp::jsonrpc::ErrorCode;
+
+    /// Build a backend over an empty in-memory graph.
+    fn test_backend() -> CodeGraphBackend {
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("Failed to create graph"),
+        ));
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        CodeGraphBackend::new_for_test(graph, query_engine)
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_method_not_found() {
+        let backend = test_backend();
+        let err = backend
+            .handle_custom_request("codegraph/doesNotExist", Value::Null)
+            .await
+            .expect_err("unknown method must error");
+        assert_eq!(err.code, ErrorCode::MethodNotFound);
+    }
+
+    #[tokio::test]
+    async fn typed_handler_rejects_malformed_params() {
+        let backend = test_backend();
+        // A bare number cannot deserialize into the DependencyGraphParams struct.
+        let err = backend
+            .handle_custom_request("codegraph/getDependencyGraph", json!(42))
+            .await
+            .expect_err("malformed params must error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("Invalid params"));
+    }
+
+    #[tokio::test]
+    async fn index_files_requires_non_empty_list() {
+        let backend = test_backend();
+        let err = backend
+            .handle_custom_request("codegraph/indexFiles", json!({}))
+            .await
+            .expect_err("missing files must error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("files parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn index_files_counts_missing_paths_as_failed() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexFiles",
+                json!({ "paths": ["/definitely/not/a/real/file.rs"] }),
+            )
+            .await
+            .expect("dispatch should succeed");
+        assert_eq!(result["files_indexed"], json!(0));
+        assert_eq!(result["files_failed"], json!(1));
+        assert_eq!(result["status"], json!("success"));
+    }
+
+    #[tokio::test]
+    async fn index_files_indexes_a_real_source_file() {
+        let backend = test_backend();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "fn hello() -> i32 { 1 }\n").expect("write file");
+
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexFiles",
+                json!({ "files": [file.to_string_lossy()] }),
+            )
+            .await
+            .expect("dispatch should succeed");
+        assert_eq!(result["files_indexed"], json!(1));
+        assert_eq!(result["files_failed"], json!(0));
+
+        // The parsed function should now be present in the graph.
+        let count = {
+            let graph = backend.graph.read().await;
+            graph.node_count()
+        };
+        assert!(count > 0, "graph should contain the indexed function");
+    }
+
+    #[tokio::test]
+    async fn index_directory_requires_a_path() {
+        let backend = test_backend();
+        let err = backend
+            .handle_custom_request("codegraph/indexDirectory", json!({}))
+            .await
+            .expect_err("missing path must error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("path parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn update_configuration_accepts_values_and_returns_null() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/updateConfiguration",
+                json!({ "maxFileSizeKb": 512, "embedOnOpen": false }),
+            )
+            .await
+            .expect("valid config should apply");
+        assert_eq!(result, Value::Null);
+
+        let config = backend.config.read().await;
+        assert_eq!(config.max_file_size_kb, 512);
+        assert!(!config.embed_on_open);
+    }
+
+    #[tokio::test]
+    async fn update_configuration_rejects_wrong_types() {
+        let backend = test_backend();
+        let err = backend
+            .handle_custom_request(
+                "codegraph/updateConfiguration",
+                json!({ "maxFileSizeKb": "not-a-number" }),
+            )
+            .await
+            .expect_err("bad config must error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("Invalid configuration"));
+    }
+
+    #[tokio::test]
+    async fn reindex_workspace_with_no_folders_indexes_zero() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request("codegraph/reindexWorkspace", Value::Null)
+            .await
+            .expect("reindex should succeed on an empty workspace");
+        assert_eq!(result["files_indexed"], json!(0));
+        assert_eq!(result["status"], json!("success"));
+    }
+}
