@@ -832,4 +832,181 @@ mod tests {
         assert!(visitor.imports.is_empty());
         assert!(visitor.calls.is_empty());
     }
+
+    #[test]
+    fn test_method_line_numbers_one_indexed() {
+        // The method_definition starts on physical line 3 (leading newline = line 1).
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let greet = &visitor.functions[0];
+        assert_eq!(greet.line_start, 3);
+        assert_eq!(greet.line_end, 5);
+    }
+
+    #[test]
+    fn test_method_def_signature_first_line_only() {
+        // Signature keeps only the first physical line of the definition (with the `{`).
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "- (void)greet {");
+    }
+
+    #[test]
+    fn test_method_def_body_prefix_content() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let body = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(body.contains("return"));
+    }
+
+    #[test]
+    fn test_method_default_flags() {
+        // is_async/is_test are always false for ObjC methods.
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let greet = &visitor.functions[0];
+        assert!(!greet.is_async);
+        assert!(!greet.is_test);
+        assert!(greet.return_type.is_none());
+        assert!(greet.doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_method_complexity_loop() {
+        let source = br#"
+@implementation MyClass
+- (void)loop:(int)n {
+    for (int i = 0; i < n; i++) {
+        NSLog(@"%d", i);
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "loop").unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_method_complexity_switch() {
+        let source = br#"
+@implementation MyClass
+- (void)choose:(int)x {
+    switch (x) {
+        case 1:
+            break;
+        default:
+            break;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "choose")
+            .unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_method_complexity_logical_operator() {
+        let source = br#"
+@implementation MyClass
+- (void)both:(BOOL)a with:(BOOL)b {
+    if (a && b) {
+        return;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "both").unwrap();
+        // if branch (+1) plus the && logical operator (+1) over the base of 1.
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_multiple_imports_order() {
+        let source = br#"
+#import <Foundation/Foundation.h>
+#import "MyHelper.h"
+#import <UIKit/UIKit.h>
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 3);
+        assert_eq!(visitor.imports[0].imported, "Foundation/Foundation.h");
+        assert_eq!(visitor.imports[1].imported, "MyHelper.h");
+        assert_eq!(visitor.imports[2].imported, "UIKit/UIKit.h");
+    }
+
+    #[test]
+    fn test_protocol_trait_metadata() {
+        let source = br#"
+@protocol MyProtocol
+- (void)doSomething;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let t = &visitor.traits[0];
+        assert_eq!(t.visibility, "public");
+        assert_eq!(t.line_start, 2);
+        assert!(t.parent_traits.is_empty());
+        assert!(t.doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_call_site_line_recorded() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"Hello");
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        // NSLog(...) sits on physical line 4.
+        assert_eq!(visitor.calls[0].call_site_line, 4);
+    }
+
+    #[test]
+    fn test_interface_multiple_methods_all_abstract() {
+        let source = br#"
+@interface MyClass : NSObject
+- (void)one;
+- (void)two;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+        assert!(visitor.functions.iter().all(|f| f.is_abstract));
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"one"));
+        assert!(names.contains(&"two"));
+    }
 }
