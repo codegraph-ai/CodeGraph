@@ -435,6 +435,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_get_node_location_relative_path_invalid() {
+        // A relative path property makes Url::from_file_path fail -> "Invalid path" error,
+        // distinct from the None-returning missing-path and missing-node branches.
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("Failed to create graph"),
+        ));
+
+        let node_id = {
+            let mut g = graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert(
+                "name".to_string(),
+                PropertyValue::String("rel_node".to_string()),
+            );
+            // Relative (non-absolute) path: Url::from_file_path rejects it.
+            props.insert(
+                "path".to_string(),
+                PropertyValue::String("relative/file.rs".to_string()),
+            );
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        let backend = CodeGraphBackend::new_for_test(graph, query_engine);
+
+        let params = GetNodeLocationParams {
+            node_id: node_id.to_string(),
+        };
+
+        let result = backend.handle_get_node_location(params).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_workspace_symbols_unknown_language() {
+        // A node with no language property surfaces as "unknown" (the empty-language branch),
+        // which every prior test skipped by always setting "rust".
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("Failed to create graph"),
+        ));
+
+        let node_id = {
+            let mut g = graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert(
+                "name".to_string(),
+                PropertyValue::String("langless_fn".to_string()),
+            );
+            props.insert(
+                "path".to_string(),
+                PropertyValue::String("/test/langless.rs".to_string()),
+            );
+            // No language property.
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        let backend = CodeGraphBackend::new_for_test(graph, query_engine);
+
+        let path = std::path::Path::new("/test/langless.rs");
+        add_node_to_index(&backend, path, node_id, "langless_fn", "Function", 1, 5);
+
+        let params = WorkspaceSymbolsParams {
+            query: Some("langless_fn".to_string()),
+        };
+
+        let response = backend.handle_get_workspace_symbols(params).await.unwrap();
+        let symbol = response
+            .symbols
+            .iter()
+            .find(|s| s.name == "langless_fn")
+            .expect("symbol present");
+        assert_eq!(symbol.language, "unknown");
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_workspace_symbols_empty_path_uri() {
+        // A node with no path property yields an empty uri (the !path.is_empty() else branch).
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("Failed to create graph"),
+        ));
+
+        let node_id = {
+            let mut g = graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert(
+                "name".to_string(),
+                PropertyValue::String("pathless_fn".to_string()),
+            );
+            props.insert(
+                "language".to_string(),
+                PropertyValue::String("rust".to_string()),
+            );
+            // No path property.
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        let backend = CodeGraphBackend::new_for_test(graph, query_engine);
+
+        // Register in the index under some path so search finds it; the node itself has no path.
+        let path = std::path::Path::new("/test/pathless.rs");
+        add_node_to_index(&backend, path, node_id, "pathless_fn", "Function", 1, 5);
+
+        let params = WorkspaceSymbolsParams {
+            query: Some("pathless_fn".to_string()),
+        };
+
+        let response = backend.handle_get_workspace_symbols(params).await.unwrap();
+        let symbol = response
+            .symbols
+            .iter()
+            .find(|s| s.name == "pathless_fn")
+            .expect("symbol present");
+        assert!(symbol.uri.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_workspace_symbols_relative_path_uri_fallback() {
+        // A non-empty but relative path makes Url::from_file_path fail, so uri falls back to the
+        // raw path string (the unwrap_or(path.clone()) arm) rather than a file:// URL.
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("Failed to create graph"),
+        ));
+
+        let node_id = {
+            let mut g = graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert(
+                "name".to_string(),
+                PropertyValue::String("rel_path_fn".to_string()),
+            );
+            props.insert(
+                "path".to_string(),
+                PropertyValue::String("relative/thing.rs".to_string()),
+            );
+            props.insert(
+                "language".to_string(),
+                PropertyValue::String("rust".to_string()),
+            );
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        let backend = CodeGraphBackend::new_for_test(graph, query_engine);
+
+        let path = std::path::Path::new("relative/thing.rs");
+        add_node_to_index(&backend, path, node_id, "rel_path_fn", "Function", 1, 5);
+
+        let params = WorkspaceSymbolsParams {
+            query: Some("rel_path_fn".to_string()),
+        };
+
+        let response = backend.handle_get_workspace_symbols(params).await.unwrap();
+        let symbol = response
+            .symbols
+            .iter()
+            .find(|s| s.name == "rel_path_fn")
+            .expect("symbol present");
+        // Not a file:// URL; the raw relative path is preserved verbatim.
+        assert_eq!(symbol.uri, "relative/thing.rs");
+    }
+
+    #[tokio::test]
     async fn test_symbol_info_structure() {
         let (backend, func_id, _) = create_backend_with_nodes().await;
 
