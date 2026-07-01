@@ -114,9 +114,15 @@ pub(crate) fn ir_to_graph(
                 .with("complexity_grade", complexity.grade().to_string())
                 .with("complexity_branches", complexity.branches as i64)
                 .with("complexity_loops", complexity.loops as i64)
-                .with("complexity_logical_ops", complexity.logical_operators as i64)
+                .with(
+                    "complexity_logical_ops",
+                    complexity.logical_operators as i64,
+                )
                 .with("complexity_nesting", complexity.max_nesting_depth as i64)
-                .with("complexity_exceptions", complexity.exception_handlers as i64)
+                .with(
+                    "complexity_exceptions",
+                    complexity.exception_handlers as i64,
+                )
                 .with("complexity_early_returns", complexity.early_returns as i64);
         }
 
@@ -207,54 +213,244 @@ pub(crate) fn ir_to_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{ClassEntity, FunctionEntity, ImportRelation};
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
+    };
     use std::path::PathBuf;
 
+    fn map(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(ir, &mut graph, Path::new("test.pl")).unwrap();
+        (graph, info)
+    }
+
+    /// Return the single edge between two nodes (fails if not exactly one).
+    fn edge_between(graph: &CodeGraph, src: NodeId, dst: NodeId) -> &codegraph::Edge {
+        let ids = graph.get_edges_between(src, dst).unwrap();
+        assert_eq!(ids.len(), 1, "expected exactly one edge {src}->{dst}");
+        graph.get_edge(ids[0]).unwrap()
+    }
+
     #[test]
-    fn test_ir_to_graph_empty() {
+    fn empty_ir_builds_file_node_from_path_stem() {
+        // No module set: name derives from the file stem, language is hard-coded
+        // "perl", the graph holds only the file node, and line_count is 0.
         let ir = CodeIR::new(PathBuf::from("test.pl"));
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.pl").as_path());
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.functions.len(), 0);
-        assert_eq!(file_info.classes.len(), 0);
+        let (graph, info) = map(&ir);
+
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.line_count, 0);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert!(matches!(file.node_type, NodeType::CodeFile));
+        assert_eq!(file.properties.get_string("name"), Some("test"));
+        assert_eq!(file.properties.get_string("language"), Some("perl"));
     }
 
     #[test]
-    fn test_ir_to_graph_with_function() {
+    fn module_drives_file_metadata() {
+        // When a module is set, the file node takes its name/path/language and
+        // line_count, and FileInfo.line_count mirrors the module value.
         let mut ir = CodeIR::new(PathBuf::from("test.pl"));
-        ir.add_function(FunctionEntity::new("greet", 1, 5));
+        ir.set_module(ModuleEntity::new("MyApp", "lib/MyApp.pm", "perl").with_line_count(42));
+        let (graph, info) = map(&ir);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.pl").as_path());
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.functions.len(), 1);
+        assert_eq!(info.line_count, 42);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("MyApp"));
+        assert_eq!(file.properties.get_string("path"), Some("lib/MyApp.pm"));
+        assert!(matches!(
+            file.properties.get("line_count"),
+            Some(PropertyValue::Int(42))
+        ));
     }
 
     #[test]
-    fn test_ir_to_graph_with_package() {
+    fn free_function_gets_file_contains_edge() {
+        // A subroutine with no parent_class is wired file -> function via
+        // Contains, keeps its bare name, and carries the boolean flags.
+        let mut ir = CodeIR::new(PathBuf::from("test.pl"));
+        ir.add_function(FunctionEntity::new("greet", 1, 5).with_visibility("public"));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(info.functions.len(), 1);
+        let func_id = info.functions[0];
+        let edge = edge_between(&graph, info.file_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
+
+        let func = graph.get_node(func_id).unwrap();
+        assert_eq!(func.properties.get_string("name"), Some("greet"));
+        assert!(matches!(func.node_type, NodeType::Function));
+        assert!(matches!(
+            func.properties.get("is_async"),
+            Some(PropertyValue::Bool(false))
+        ));
+        assert!(matches!(
+            func.properties.get("is_static"),
+            Some(PropertyValue::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn function_complexity_props_recorded() {
+        // A function carrying ComplexityMetrics gets the full complexity prop set.
+        let metrics = ComplexityMetrics::new()
+            .with_branches(3)
+            .with_loops(2)
+            .finalize();
+        let grade = metrics.grade();
+        let mut ir = CodeIR::new(PathBuf::from("test.pl"));
+        ir.add_function(FunctionEntity::new("busy", 1, 30).with_complexity(metrics));
+        let (graph, info) = map(&ir);
+
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert!(matches!(
+            func.properties.get("complexity_branches"),
+            Some(PropertyValue::Int(3))
+        ));
+        assert!(matches!(
+            func.properties.get("complexity_loops"),
+            Some(PropertyValue::Int(2))
+        ));
+        assert_eq!(
+            func.properties.get_string("complexity_grade"),
+            Some(grade.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn package_emits_class_node_with_file_contains() {
+        // A package maps to a Class node wired file -> class via Contains and
+        // carries the is_abstract flag.
         let mut ir = CodeIR::new(PathBuf::from("User.pm"));
         ir.add_class(ClassEntity::new("MyApp::User", 1, 20));
+        let (graph, info) = map(&ir);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("User.pm").as_path());
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.classes.len(), 1);
+        assert_eq!(info.classes.len(), 1);
+        let class_id = info.classes[0];
+        let class = graph.get_node(class_id).unwrap();
+        assert!(matches!(class.node_type, NodeType::Class));
+        assert_eq!(class.properties.get_string("name"), Some("MyApp::User"));
+        assert!(matches!(
+            class.properties.get("is_abstract"),
+            Some(PropertyValue::Bool(false))
+        ));
+        let edge = edge_between(&graph, info.file_id, class_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
     }
 
     #[test]
-    fn test_ir_to_graph_with_import() {
+    fn method_with_known_parent_links_to_class_not_file() {
+        // Classes are mapped before functions, so a sub whose parent_class matches
+        // a package is contained by the class - with no file -> function edge.
+        let mut ir = CodeIR::new(PathBuf::from("User.pm"));
+        ir.add_class(ClassEntity::new("MyApp::User", 1, 20));
+        ir.add_function(FunctionEntity::new("login", 5, 8).with_parent_class("MyApp::User"));
+        let (graph, info) = map(&ir);
+
+        let class_id = info.classes[0];
+        let func_id = info.functions[0];
+        let edge = edge_between(&graph, class_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
+        // No direct file -> method containment edge.
+        assert!(graph
+            .get_edges_between(info.file_id, func_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn method_with_unknown_parent_falls_back_to_file() {
+        // A parent_class not present as a mapped package falls back to a
+        // file -> function Contains edge.
+        let mut ir = CodeIR::new(PathBuf::from("test.pl"));
+        ir.add_function(FunctionEntity::new("orphan", 1, 3).with_parent_class("Missing::Pkg"));
+        let (graph, info) = map(&ir);
+
+        let func_id = info.functions[0];
+        let edge = edge_between(&graph, info.file_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
+    }
+
+    #[test]
+    fn import_creates_external_module_with_bare_edge() {
+        // An import creates an external Module node and a bare Imports edge
+        // (the perl mapper records no symbols/alias props on the edge).
+        let mut ir = CodeIR::new(PathBuf::from("test.pl"));
+        ir.add_import(ImportRelation::new("main", "POSIX").with_symbols(vec!["floor".to_string()]));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(info.imports.len(), 1);
+        let module_id = info.imports[0];
+        let module = graph.get_node(module_id).unwrap();
+        assert!(matches!(module.node_type, NodeType::Module));
+        assert_eq!(module.properties.get_string("name"), Some("POSIX"));
+        assert_eq!(module.properties.get_string("is_external"), Some("true"));
+
+        let edge = edge_between(&graph, info.file_id, module_id);
+        assert!(matches!(edge.edge_type, EdgeType::Imports));
+        assert!(edge.properties.get("symbols").is_none());
+        assert!(edge.properties.get("alias").is_none());
+    }
+
+    #[test]
+    fn duplicate_import_reuses_single_module_node() {
+        // Two imports of the same target share one Module node but yield two edges.
         let mut ir = CodeIR::new(PathBuf::from("test.pl"));
         ir.add_import(ImportRelation::new("main", "POSIX"));
-        ir.add_import(ImportRelation::new("main", "Scalar::Util"));
+        ir.add_import(ImportRelation::new("main", "POSIX"));
+        let (graph, info) = map(&ir);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, PathBuf::from("test.pl").as_path());
-        assert!(result.is_ok());
-        let file_info = result.unwrap();
-        assert_eq!(file_info.imports.len(), 2);
+        assert_eq!(info.imports.len(), 2);
+        assert_eq!(info.imports[0], info.imports[1]);
+        let ids = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn resolved_call_creates_calls_edge() {
+        // A call between two known subroutines yields a Calls edge carrying the
+        // call site line and is_direct flag.
+        let mut ir = CodeIR::new(PathBuf::from("test.pl"));
+        ir.add_function(FunctionEntity::new("caller_sub", 1, 5));
+        ir.add_function(FunctionEntity::new("callee_sub", 6, 10));
+        ir.add_call(CallRelation::new("caller_sub", "callee_sub", 3));
+        let (graph, info) = map(&ir);
+
+        let caller_id = info.functions[0];
+        let callee_id = info.functions[1];
+        let edge = edge_between(&graph, caller_id, callee_id);
+        assert!(matches!(edge.edge_type, EdgeType::Calls));
+        assert!(matches!(
+            edge.properties.get("call_site_line"),
+            Some(PropertyValue::Int(3))
+        ));
+        assert!(matches!(
+            edge.properties.get("is_direct"),
+            Some(PropertyValue::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn unresolved_call_creates_no_edge() {
+        // A call whose callee is not a mapped node produces no Calls edge.
+        let mut ir = CodeIR::new(PathBuf::from("test.pl"));
+        ir.add_function(FunctionEntity::new("caller_sub", 1, 5));
+        ir.add_call(CallRelation::new("caller_sub", "nonexistent", 3));
+        let (graph, info) = map(&ir);
+
+        let caller_id = info.functions[0];
+        // Only the file -> function Contains edge exists; no Calls edge added.
+        assert_eq!(graph.edge_count(), 1);
+        assert!(graph
+            .get_edges_between(caller_id, info.file_id)
+            .unwrap()
+            .is_empty());
     }
 }
