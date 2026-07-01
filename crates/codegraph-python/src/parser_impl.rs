@@ -141,9 +141,15 @@ impl PythonParser {
                     .with("complexity_grade", complexity.grade().to_string())
                     .with("complexity_branches", complexity.branches as i64)
                     .with("complexity_loops", complexity.loops as i64)
-                    .with("complexity_logical_ops", complexity.logical_operators as i64)
+                    .with(
+                        "complexity_logical_ops",
+                        complexity.logical_operators as i64,
+                    )
                     .with("complexity_nesting", complexity.max_nesting_depth as i64)
-                    .with("complexity_exceptions", complexity.exception_handlers as i64)
+                    .with(
+                        "complexity_exceptions",
+                        complexity.exception_handlers as i64,
+                    )
                     .with("complexity_early_returns", complexity.early_returns as i64);
             }
             if let Some(ref body) = func.body_prefix {
