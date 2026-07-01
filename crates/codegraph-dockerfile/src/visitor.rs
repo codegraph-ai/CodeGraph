@@ -314,4 +314,131 @@ mod tests {
         assert!(names.contains(&"FROM"), "missing FROM in {names:?}");
         assert!(names.contains(&"RUN"), "missing RUN in {names:?}");
     }
+
+    #[test]
+    fn test_directive_source_order_preserved() {
+        // Directives are emitted in the order they appear in the file.
+        let source = b"FROM alpine:3\nWORKDIR /app\nCOPY . .\nRUN make\nCMD [\"./app\"]\n";
+        let visitor = parse_and_visit(source);
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["FROM", "WORKDIR", "COPY", "RUN", "CMD"]);
+    }
+
+    #[test]
+    fn test_line_numbers_increase_across_directives() {
+        // Each successive directive reports a strictly larger start line.
+        let source = b"FROM alpine:3\nWORKDIR /app\nRUN make\n";
+        let visitor = parse_and_visit(source);
+        let starts: Vec<usize> = visitor.functions.iter().map(|f| f.line_start).collect();
+        assert_eq!(starts, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_leading_blank_lines_offset_line_numbers() {
+        // A blank first line pushes the FROM directive to physical line 2.
+        let source = b"\nFROM alpine:3\n";
+        let visitor = parse_and_visit(source);
+        let from = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "FROM")
+            .expect("FROM missing");
+        assert_eq!(from.line_start, 2);
+        assert_eq!(from.line_end, 2);
+    }
+
+    #[test]
+    fn test_multistage_from_as_stage_name_preserved() {
+        // Multi-stage builds use `FROM <img> AS <stage>`; the AS clause must
+        // survive so the scanner can reason about build stages.
+        let source = b"FROM golang:1.22 AS builder\nFROM scratch\n";
+        let visitor = parse_and_visit(source);
+        let froms: Vec<&FunctionEntity> = visitor
+            .functions
+            .iter()
+            .filter(|f| f.name == "FROM")
+            .collect();
+        assert_eq!(froms.len(), 2, "expected two FROM directives");
+        assert!(froms[0]
+            .body_prefix
+            .as_deref()
+            .unwrap_or("")
+            .contains("AS builder"));
+    }
+
+    #[test]
+    fn test_expose_port_captured_in_body() {
+        // The IaC scanner flags exposed port 22; ensure it survives extraction.
+        let source = b"EXPOSE 22\n";
+        let visitor = parse_and_visit(source);
+        let expose = &visitor.functions[0];
+        assert_eq!(expose.name, "EXPOSE");
+        assert!(expose.body_prefix.as_deref().unwrap_or("").contains("22"));
+    }
+
+    #[test]
+    fn test_arg_without_value_extracted() {
+        // A bare ARG with no default value is still emitted as a directive.
+        let source = b"ARG VERSION\n";
+        let visitor = parse_and_visit(source);
+        let arg = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "ARG")
+            .expect("ARG missing");
+        assert!(arg.body_prefix.as_deref().unwrap_or("").contains("VERSION"));
+    }
+
+    #[test]
+    fn test_label_directive_extracted() {
+        let source = b"LABEL maintainer=\"team@example.com\"\n";
+        let visitor = parse_and_visit(source);
+        let label = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "LABEL")
+            .expect("LABEL missing");
+        assert!(label
+            .body_prefix
+            .as_deref()
+            .unwrap_or("")
+            .contains("maintainer"));
+    }
+
+    #[test]
+    fn test_signature_equals_body_for_single_line_directive() {
+        // For a one-line directive with no continuation, the single-line
+        // signature and the (untruncated) body_prefix carry the same text.
+        let source = b"USER 1000\n";
+        let visitor = parse_and_visit(source);
+        let user = &visitor.functions[0];
+        assert_eq!(user.signature, user.body_prefix.as_deref().unwrap_or(""));
+        assert_eq!(user.signature, "USER 1000");
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max_chars() {
+        // An oversized RUN command is truncated to exactly BODY_PREFIX_MAX_CHARS.
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        let long_arg = "x".repeat(2000);
+        let source = format!("RUN echo {long_arg}\n");
+        let visitor = parse_and_visit(source.as_bytes());
+        let run = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "RUN")
+            .expect("RUN missing");
+        let body = run.body_prefix.as_deref().unwrap_or("");
+        assert_eq!(body.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_directive_with_inline_comment_after() {
+        // A trailing comment on its own line is not attributed to the
+        // preceding directive and yields no extra entity.
+        let source = b"FROM alpine:3\n# trailing note\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "FROM");
+    }
 }
