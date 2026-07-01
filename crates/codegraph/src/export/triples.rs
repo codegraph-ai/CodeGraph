@@ -210,4 +210,45 @@ mod tests {
         assert!(triples.contains("<node:0> <edge:Calls> <node:1> ."));
         assert!(triples.contains("<edge:0> <prop:weight> \"1.5\"^^<xsd:double> ."));
     }
+
+    #[test]
+    fn test_export_triples_pins_exact_node_type_triple() {
+        use crate::{NodeType, PropertyMap};
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        graph
+            .add_node(NodeType::Function, PropertyMap::new())
+            .unwrap();
+
+        let triples = graph.export_triples().unwrap();
+        // Pin the full node-type triple including the <type:{Debug}> object and
+        // trailing " ." terminator, which prior coverage only checked via the
+        // <node:0> <rdf:type> prefix.
+        assert!(
+            triples.contains("<node:0> <rdf:type> <type:Function> .\n"),
+            "exact node-type triple not found: {triples}"
+        );
+    }
+
+    #[test]
+    fn test_export_triples_propertyless_node_emits_only_type_triple() {
+        use crate::{NodeType, PropertyMap};
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // A node with an empty PropertyMap exercises the zero-iteration arm of
+        // the per-node property loop: it must emit its rdf:type triple and no
+        // <node:0> <prop:...> triples at all.
+        graph
+            .add_node(NodeType::Function, PropertyMap::new())
+            .unwrap();
+
+        let triples = graph.export_triples().unwrap();
+        assert!(triples.contains("<node:0> <rdf:type> <type:Function> .\n"));
+        assert!(
+            !triples.contains("<node:0> <prop:"),
+            "propertyless node must emit no property triples: {triples}"
+        );
+        // The type triple is the only line produced for this graph.
+        assert_eq!(triples.lines().count(), 1);
+    }
 }
