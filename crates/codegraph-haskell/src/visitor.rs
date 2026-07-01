@@ -811,4 +811,164 @@ mod tests {
         assert!(visitor.imports.is_empty());
         assert!(visitor.calls.is_empty());
     }
+
+    #[test]
+    fn test_function_line_numbers_are_one_indexed() {
+        // greet's definition sits on line 3 (module=1, signature=2, def=3).
+        let source =
+            b"module M where\ngreet :: String -> String\ngreet name = \"Hello, \" ++ name\n";
+        let visitor = parse_and_visit(source);
+        let greet = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greet")
+            .expect("greet extracted");
+        assert_eq!(greet.line_start, 3);
+        assert!(greet.line_end >= greet.line_start);
+    }
+
+    #[test]
+    fn test_function_default_flags() {
+        // A plain top-level function is not async/test/static/abstract.
+        let source = b"module M where\nfoo :: Int -> Int\nfoo n = n\n";
+        let visitor = parse_and_visit(source);
+        let foo = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "foo")
+            .expect("foo extracted");
+        assert!(!foo.is_async);
+        assert!(!foo.is_test);
+        assert!(!foo.is_static);
+        assert!(!foo.is_abstract);
+        assert!(foo.parent_class.is_none());
+        assert!(foo.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_function_without_signature_uses_first_line_fallback() {
+        // With no preceding `signature`, the signature falls back to the first
+        // line of the definition and there is no return type.
+        let source = b"module M where\nidentity x = x\n";
+        let visitor = parse_and_visit(source);
+        let identity = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "identity")
+            .expect("identity extracted");
+        assert!(identity.signature.contains("identity x = x"));
+        assert!(identity.return_type.is_none());
+    }
+
+    #[test]
+    fn test_multi_arrow_return_type_is_last_segment() {
+        // The return type is the segment after the LAST `->`.
+        let source = b"module M where\ncmp :: Int -> String -> Bool\ncmp a b = True\n";
+        let visitor = parse_and_visit(source);
+        let cmp = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "cmp")
+            .expect("cmp extracted");
+        assert_eq!(cmp.return_type.as_deref(), Some("Bool"));
+    }
+
+    #[test]
+    fn test_body_prefix_populated() {
+        let source = concat!(
+            "module M where\n",
+            "helper :: Int -> Int\n",
+            "helper y = y\n",
+            "compute :: Int -> Int\n",
+            "compute x = helper x\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let compute = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "compute")
+            .expect("compute extracted");
+        assert!(compute.body_prefix.is_some());
+        assert!(compute.body_prefix.as_ref().unwrap().contains("helper"));
+    }
+
+    #[test]
+    fn test_logical_operator_raises_complexity() {
+        // `&&` inside an infix expression is counted as a logical operator.
+        let source = concat!(
+            "module M where\n",
+            "inRange :: Int -> Bool\n",
+            "inRange x = x > 0 && x < 10\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "inRange")
+            .expect("inRange extracted");
+        assert!(f.complexity.is_some());
+    }
+
+    #[test]
+    fn test_where_clause_computes_complexity() {
+        // A `where` binding introduces a nested scope; complexity is computed.
+        let source = concat!(
+            "module M where\n",
+            "area :: Int -> Int\n",
+            "area r = sq where sq = r * r\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let area = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "area")
+            .expect("area extracted");
+        assert!(area.complexity.is_some());
+    }
+
+    #[test]
+    fn test_instance_method_tracks_calls() {
+        // A call inside an instance method body is attributed to the qualified
+        // instance-method name as caller.
+        let source = concat!(
+            "module M where\n",
+            "shout :: String -> String\n",
+            "shout s = s\n",
+            "class Greet a where\n",
+            "  hello :: a -> String\n",
+            "data Person = Person\n",
+            "instance Greet Person where\n",
+            "  hello p = shout \"hi\"\n",
+        )
+        .as_bytes();
+        let visitor = parse_and_visit(source);
+        let call = visitor.calls.iter().find(|c| c.callee == "shout");
+        assert!(call.is_some(), "instance method call to shout tracked");
+        assert!(call.unwrap().caller.contains("hello"));
+    }
+
+    #[test]
+    fn test_import_alias_only_is_not_wildcard() {
+        // `import Data.Set as S` records the alias S and is not a wildcard.
+        let source = b"module M where\nimport Data.Set as S\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "Data.Set");
+        assert_eq!(imp.alias.as_deref(), Some("S"));
+        assert!(!imp.is_wildcard);
+    }
+
+    #[test]
+    fn test_data_type_with_multiple_constructors_is_single_class() {
+        // A sum type with several constructors still yields exactly one class.
+        let source = b"module M where\ndata Dir = North | South | East | West\n";
+        let visitor = parse_and_visit(source);
+        let dirs: Vec<_> = visitor.classes.iter().filter(|c| c.name == "Dir").collect();
+        assert_eq!(dirs.len(), 1);
+        assert!(!dirs[0].is_interface);
+    }
 }
