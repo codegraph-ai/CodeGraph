@@ -793,4 +793,118 @@ mod tests {
         assert!(visitor.calls.iter().any(|c| c.callee == "helper"));
         assert!(visitor.calls.iter().all(|c| c.caller == "run"));
     }
+
+    #[test]
+    fn test_foreach_complexity_gap() {
+        // tree-sitter-perl emits `for_statement_2` for the `foreach my $i (@list)`
+        // form, which the complexity visitor does not match (it only handles
+        // for_statement/foreach_statement), so complexity stays at baseline 1.
+        let source =
+            b"sub iter {\n    foreach my $i (@list) {\n        print $i;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_complexity_until_increases() {
+        let source =
+            b"sub wait_loop {\n    until ($done) {\n        $done = check();\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_word_or_operator_increases() {
+        // The word form `or` in a binary_expression raises complexity like `||`.
+        let source = b"sub pick {\n    my $c = $a or $b;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_elsif_adds_branches() {
+        // if / elsif / else should push complexity to at least 3.
+        let source = b"sub grade {\n    if ($x) {\n        return 1;\n    } elsif ($y) {\n        return 2;\n    } else {\n        return 3;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_method_invocation_call_gap() {
+        // $obj->greet() parses as a `method_invocation` node, but the visitor only
+        // records call_expression_with_spaced_args/bareword/method_call_expression,
+        // so method calls are silently dropped - pinned as a regression test.
+        let source = b"sub run {\n    $obj->greet();\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.calls.is_empty(),
+            "method_invocation should not be recorded, got {:?}",
+            visitor.calls
+        );
+    }
+
+    #[test]
+    fn test_require_quoted_file_path_gap() {
+        // A quoted require ('Foo/Bar.pm') fails to parse - tree-sitter-perl wraps it
+        // in an ERROR node with no require_expression/require_statement, so the
+        // slash->:: / .pm-stripping normalization path never runs and no import is
+        // recorded. Only bareword `require Foo::Bar` is handled.
+        let source = b"require 'Foo/Bar.pm';\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_use_feature_excluded() {
+        let source = b"use feature 'say';\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_use_constant_excluded() {
+        let source = b"use constant PI => 3.14;\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_use_base_records_import() {
+        let source = b"use base 'Some::Base';\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Some::Base");
+    }
+
+    #[test]
+    fn test_use_parent_without_colons_dropped() {
+        // extract_use_list only keeps names containing "::", so a single-segment
+        // parent name yields no import - a latent gap pinned as a regression test.
+        let source = b"use parent 'Base';\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_comment_without_space_is_not_doc() {
+        // extract_doc_comment requires "##", "#!", or "# " - a bare "#word" comment
+        // is not attached as a doc_comment.
+        let source = b"#nospace\nsub greet {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_empty_body_yields_brace_prefix() {
+        // An empty {} block has non-empty text so body_prefix is Some, starting with
+        // the braces (the block node text spans through the trailing newline).
+        let source = b"sub noop {}\n";
+        let visitor = parse_and_visit(source);
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(bp.starts_with("{}"), "unexpected body_prefix {:?}", bp);
+    }
 }
