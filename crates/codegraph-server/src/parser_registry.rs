@@ -694,6 +694,10 @@ mod tests {
             .is_some());
         #[cfg(feature = "extra-languages")]
         assert!(registry.parser_for_path(&PathBuf::from("test.R")).is_some());
+        // `.pl` resolves through the perl entry appended to the fan-out; the
+        // other extra extensions above already cover their appended entries.
+        #[cfg(feature = "extra-languages")]
+        assert!(registry.parser_for_path(&PathBuf::from("test.pl")).is_some());
         assert!(registry
             .parser_for_path(&PathBuf::from("test.scala"))
             .is_some());
@@ -1027,6 +1031,14 @@ mod tests {
         assert_eq!(
             registry.language_for_path(&PathBuf::from("parser.ml")),
             Some("ocaml")
+        );
+        // Perl is the only gated grammar whose path-resolution arm
+        // (`extra_language_for_path`'s perl branch) was never exercised; every
+        // other extra-language extension already has a `language_for_path` case.
+        #[cfg(feature = "extra-languages")]
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("script.pl")),
+            Some("perl")
         );
         assert_eq!(
             registry.language_for_path(&PathBuf::from("Token.sol")),
