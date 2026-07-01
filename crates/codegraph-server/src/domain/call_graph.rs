@@ -337,3 +337,193 @@ fn build_call_graph_node(
         language,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{EdgeType, NodeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+
+    /// Add a node carrying the given key/value properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, PropertyValue)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), v.clone());
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn str_prop(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// Wrap a built graph in the Arc<RwLock<>> a QueryEngine owns and build the
+    /// call indexes so get_callers/get_callees resolve from Calls edges.
+    async fn engine_for(g: CodeGraph) -> (Arc<RwLock<CodeGraph>>, QueryEngine) {
+        let graph = Arc::new(RwLock::new(g));
+        let engine = QueryEngine::new(graph.clone());
+        engine.build_indexes().await;
+        (graph, engine)
+    }
+
+    #[tokio::test]
+    async fn missing_start_node_yields_empty_result_with_diagnostic() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, 999, 1, "both", false, None).await;
+
+        assert!(result.symbol_name.is_empty());
+        assert!(result.root_node.is_none());
+        assert!(result.nodes.is_empty());
+        assert!(result.edges.is_empty());
+        let diag = result.diagnostic.expect("diagnostic present when empty");
+        assert!(diag.node_found);
+    }
+
+    #[tokio::test]
+    async fn existing_start_node_populates_root_and_symbol_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 1, "both", false, None).await;
+
+        assert_eq!(result.symbol_name, "target");
+        assert_eq!(result.root, target.to_string());
+        let root = result
+            .root_node
+            .expect("root node built for existing start");
+        assert_eq!(root.depth, 0);
+        assert_eq!(root.name, "target");
+    }
+
+    #[tokio::test]
+    async fn callers_direction_builds_incoming_edge() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(&mut g, NodeType::Function, &[("name", str_prop("caller"))]);
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 1, "callers", false, None).await;
+
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0].name, "caller");
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].from, caller.to_string());
+        assert_eq!(result.edges[0].to, target.to_string());
+        assert_eq!(result.edges[0].edge_type, "calls");
+        assert!(result.diagnostic.is_none());
+    }
+
+    #[tokio::test]
+    async fn callees_direction_builds_outgoing_edge() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let source = add_node(&mut g, NodeType::Function, &[("name", str_prop("source"))]);
+        let callee = add_node(&mut g, NodeType::Function, &[("name", str_prop("callee"))]);
+        edge(&mut g, source, callee, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, source, 1, "callees", false, None).await;
+
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0].name, "callee");
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].from, source.to_string());
+        assert_eq!(result.edges[0].to, callee.to_string());
+    }
+
+    #[tokio::test]
+    async fn both_direction_tags_caller_and_callee_directions() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let mid = add_node(&mut g, NodeType::Function, &[("name", str_prop("mid"))]);
+        let caller = add_node(&mut g, NodeType::Function, &[("name", str_prop("caller"))]);
+        let callee = add_node(&mut g, NodeType::Function, &[("name", str_prop("callee"))]);
+        edge(&mut g, caller, mid, EdgeType::Calls);
+        edge(&mut g, mid, callee, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, mid, 1, "both", false, None).await;
+
+        assert_eq!(result.nodes.len(), 2);
+        let caller_node = result
+            .nodes
+            .iter()
+            .find(|n| n.name == "caller")
+            .expect("caller node present");
+        let callee_node = result
+            .nodes
+            .iter()
+            .find(|n| n.name == "callee")
+            .expect("callee node present");
+        assert_eq!(caller_node.direction.as_deref(), Some("caller"));
+        assert_eq!(callee_node.direction.as_deref(), Some("callee"));
+        assert_eq!(result.edges.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn caller_node_metadata_is_populated_from_properties() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("caller")),
+                ("path", str_prop("/src/lib.rs")),
+                ("signature", str_prop("fn caller()")),
+                ("language", str_prop("rust")),
+                ("line_start", PropertyValue::Int(10)),
+                ("line_end", PropertyValue::Int(20)),
+                ("col_start", PropertyValue::Int(4)),
+                ("col_end", PropertyValue::Int(8)),
+            ],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 1, "callers", false, None).await;
+
+        let node = &result.nodes[0];
+        assert_eq!(node.path, "/src/lib.rs");
+        assert_eq!(node.signature, "fn caller()");
+        assert_eq!(node.language, "rust");
+        assert_eq!(node.line_start, 10);
+        assert_eq!(node.line_end, 20);
+        assert_eq!(node.col_start, 4);
+        assert_eq!(node.col_end, 8);
+    }
+
+    #[tokio::test]
+    async fn used_fallback_sets_message_referencing_requested_line() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 1, "both", true, Some(42)).await;
+
+        assert_eq!(result.used_fallback, Some(true));
+        let msg = result.fallback_message.expect("fallback message present");
+        assert!(msg.contains("line 42"));
+        assert!(msg.contains("target"));
+    }
+
+    #[tokio::test]
+    async fn no_fallback_leaves_fallback_fields_none() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = get_call_graph(&graph, &engine, target, 1, "both", false, None).await;
+
+        assert!(result.used_fallback.is_none());
+        assert!(result.fallback_message.is_none());
+    }
+}
