@@ -257,8 +257,9 @@ impl<'a> JuliaVisitor<'a> {
                         params.push(Parameter::new(inner_name));
                     }
                 }
-                "optional_parameter" | "default_parameter" => {
-                    // `name=default` — first identifier is the name
+                "optional_parameter" | "default_parameter" | "named_argument" => {
+                    // `name=default` — first identifier is the name.
+                    // tree-sitter-julia models `f(x=1)` as `named_argument`.
                     let inner_name = self.first_identifier(child);
                     if !inner_name.is_empty() {
                         params.push(Parameter::new(inner_name));
@@ -524,11 +525,14 @@ impl<'a> JuliaVisitor<'a> {
     }
 
     fn visit_body_for_calls(&mut self, node: Node) {
+        // Check the node itself, not just its children: a bare statement like
+        // `helper()` in a function body is a `call_expression` passed in directly,
+        // so scanning only children would miss it.
+        if node.kind() == "call_expression" {
+            self.visit_call_expression(node);
+        }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.kind() == "call_expression" {
-                self.visit_call_expression(child);
-            }
             self.visit_body_for_calls(child);
         }
     }
@@ -712,5 +716,173 @@ end # module
         assert_eq!(visitor.functions.len(), 2, "expected 2 functions");
         assert_eq!(visitor.classes.len(), 1, "expected 1 struct");
         assert_eq!(visitor.imports.len(), 2, "expected 2 imports");
+    }
+
+    #[test]
+    fn test_visitor_function_private_by_default() {
+        let source = b"function helper(x)\n    return x\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+        assert!(!visitor.functions[0].is_async);
+        assert!(!visitor.functions[0].is_static);
+        assert!(!visitor.functions[0].is_abstract);
+    }
+
+    #[test]
+    fn test_visitor_exported_function_is_public() {
+        let source = b"export greet\nfunction greet(name)\n    println(name)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "greet");
+        assert_eq!(visitor.functions[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_visitor_function_without_return_type() {
+        let source = b"function noop(x)\n    x\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].return_type, None);
+    }
+
+    #[test]
+    fn test_visitor_variadic_param() {
+        let source = b"function collect_all(args...)\n    return args\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "args");
+        assert!(params[0].is_variadic);
+    }
+
+    #[test]
+    fn test_visitor_optional_param() {
+        let source = b"function greet(name, greeting=\"hi\")\n    return greeting\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "name");
+        assert_eq!(params[1].name, "greeting");
+    }
+
+    #[test]
+    fn test_visitor_mutable_struct_attribute() {
+        let source = b"mutable struct Counter\n    value::Int\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].name, "Counter");
+        assert!(visitor.classes[0]
+            .attributes
+            .contains(&"mutable".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_immutable_struct_no_mutable_attribute() {
+        let source = b"struct Point\n    x::Int\n    y::Int\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(!visitor.classes[0]
+            .attributes
+            .contains(&"mutable".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_abstract_type_is_trait() {
+        let source = b"abstract type Animal end";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.traits.len(), 1);
+        assert_eq!(visitor.traits[0].name, "Animal");
+        assert_eq!(visitor.classes.len(), 0);
+    }
+
+    #[test]
+    fn test_visitor_using_multiple_modules() {
+        let source = b"using DataFrames, JSON, HTTP\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 3);
+        let names: Vec<&str> = visitor
+            .imports
+            .iter()
+            .map(|i| i.imported.as_str())
+            .collect();
+        assert!(names.contains(&"DataFrames"));
+        assert!(names.contains(&"JSON"));
+        assert!(names.contains(&"HTTP"));
+    }
+
+    #[test]
+    fn test_visitor_using_selected_symbols() {
+        let source = b"using LinearAlgebra: dot, norm\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "LinearAlgebra");
+        assert!(visitor.imports[0].symbols.contains(&"dot".to_string()));
+        assert!(visitor.imports[0].symbols.contains(&"norm".to_string()));
+    }
+
+    #[test]
+    fn test_visitor_import_plain() {
+        let source = b"import JSON\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "JSON");
+        assert!(visitor.imports[0].symbols.is_empty());
+    }
+
+    #[test]
+    fn test_visitor_call_extraction_within_function() {
+        let source = b"function run()\n    helper()\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(
+            visitor.calls.iter().any(|c| c.callee == "helper"),
+            "expected a call to helper, got {:?}",
+            visitor.calls
+        );
+        assert!(visitor.calls.iter().all(|c| c.caller == "run"));
+    }
+
+    #[test]
+    fn test_visitor_complexity_branching() {
+        let source =
+            b"function classify(x)\n    if x > 0\n        return 1\n    else\n        return -1\n    end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("branching function should have complexity");
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "branching function should exceed base complexity, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_visitor_empty_source() {
+        let visitor = parse_and_visit(b"");
+
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.traits.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
     }
 }
