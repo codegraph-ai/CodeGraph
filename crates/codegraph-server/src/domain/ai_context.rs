@@ -1239,4 +1239,389 @@ mod tests {
         let desc = generate_usage_description("", "my_function", "my_function()");
         assert!(desc.contains("Usage of `my_function`"));
     }
+
+    // ============================================================
+    // get_ai_context end-to-end tests (in-memory graph)
+    // ============================================================
+
+    use codegraph::{PropertyMap, PropertyValue};
+
+    fn str_prop(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    fn int_prop(v: i64) -> PropertyValue {
+        PropertyValue::Int(v)
+    }
+
+    /// Add a node carrying the given key/value properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, PropertyValue)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), v.clone());
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// A Function node with path, an inline source, and a [start, end] line range.
+    fn add_fn(
+        graph: &mut CodeGraph,
+        name: &str,
+        path: &str,
+        start: i64,
+        end: i64,
+        source: &str,
+    ) -> NodeId {
+        add_node(
+            graph,
+            NodeType::Function,
+            &[
+                ("name", str_prop(name)),
+                ("path", str_prop(path)),
+                ("line_start", int_prop(start)),
+                ("line_end", int_prop(end)),
+                ("source", str_prop(source)),
+            ],
+        )
+    }
+
+    fn rels(result: &AiContextResult, relationship: &str) -> Vec<String> {
+        result
+            .related_symbols
+            .iter()
+            .filter(|s| s.relationship == relationship)
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn ai_context_none_for_unknown_file() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        assert!(get_ai_context(&g, "/nope.rs", 1, "explain", 1000).is_none());
+    }
+
+    #[test]
+    fn ai_context_assembles_primary_from_target() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("do_work")),
+                ("path", str_prop("/src/app.rs")),
+                ("language", str_prop("rust")),
+                ("line_start", int_prop(10)),
+                ("line_end", int_prop(20)),
+                ("source", str_prop("fn do_work() {}")),
+            ],
+        );
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 10_000).expect("context");
+        assert_eq!(r.primary_context.name, "do_work");
+        assert_eq!(r.primary_context.context_type, "function");
+        assert_eq!(r.primary_context.language, "rust");
+        assert_eq!(r.primary_context.code, "fn do_work() {}");
+        assert_eq!(r.primary_context.location.range.start.line, 10);
+        assert_eq!(r.primary_context.location.range.end.line, 20);
+        assert_eq!(r.primary_context.location.uri, "file:///src/app.rs");
+        // Exact containment — no fallback.
+        assert!(r.metadata.used_fallback.is_none());
+        assert!(r.metadata.fallback_message.is_none());
+        assert_eq!(r.metadata.graph_stats.entities_in_graph, 1);
+        assert_eq!(r.metadata.graph_stats.entities_kept, 1);
+        assert!(r.related_symbols.is_empty());
+    }
+
+    #[test]
+    fn ai_context_used_fallback_when_line_not_contained() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+
+        // Request line 5 — before the only node's range → proximity fallback.
+        let r = get_ai_context(&g, "/src/app.rs", 5, "explain", 10_000).expect("context");
+        assert_eq!(r.metadata.used_fallback, Some(true));
+        assert!(r
+            .metadata
+            .fallback_message
+            .as_deref()
+            .unwrap()
+            .contains("do_work"));
+    }
+
+    #[test]
+    fn ai_context_language_falls_back_to_extension() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No language property — must be derived from the file extension.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("do_work")),
+                ("path", str_prop("/src/app.rs")),
+                ("line_start", int_prop(10)),
+                ("line_end", int_prop(20)),
+                ("source", str_prop("fn do_work() {}")),
+            ],
+        );
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 10_000).expect("context");
+        assert_eq!(r.primary_context.language, "rs");
+    }
+
+    #[test]
+    fn ai_context_line_end_zero_collapses_to_line_start() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No line_end property → line_end reads as 0 and collapses onto line_start.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("do_work")),
+                ("path", str_prop("/src/app.rs")),
+                ("line_start", int_prop(7)),
+                ("source", str_prop("fn do_work() {}")),
+            ],
+        );
+
+        let r = get_ai_context(&g, "/src/app.rs", 7, "explain", 10_000).expect("context");
+        assert_eq!(r.primary_context.location.range.start.line, 7);
+        assert_eq!(r.primary_context.location.range.end.line, 7);
+    }
+
+    #[test]
+    fn ai_context_explain_surfaces_uses_and_called_by() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let dep = add_fn(&mut g, "helper", "/src/dep.rs", 1, 3, "fn helper() {}");
+        let caller = add_fn(
+            &mut g,
+            "caller",
+            "/src/c.rs",
+            1,
+            3,
+            "fn caller() { do_work(); }",
+        );
+        edge(&mut g, target, dep, EdgeType::Calls); // outgoing → "uses"
+        edge(&mut g, caller, target, EdgeType::Calls); // incoming Calls → "called_by"
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(rels(&r, "uses"), vec!["helper".to_string()]);
+        assert_eq!(rels(&r, "called_by"), vec!["caller".to_string()]);
+    }
+
+    #[test]
+    fn ai_context_explain_inherits_via_extends() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "Derived", "/src/app.rs", 10, 20, "struct Derived;");
+        let base = add_fn(&mut g, "Base", "/src/base.rs", 1, 3, "struct Base;");
+        edge(&mut g, base, target, EdgeType::Extends); // incoming Extends → "inherits"
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(rels(&r, "inherits"), vec!["Base".to_string()]);
+        let sym = r
+            .related_symbols
+            .iter()
+            .find(|s| s.relationship == "inherits")
+            .unwrap();
+        assert_eq!(sym.relevance_score, 0.9);
+    }
+
+    #[test]
+    fn ai_context_modify_surfaces_tests_and_swallows_callers() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let test_caller = add_fn(
+            &mut g,
+            "test_do_work",
+            "/src/t.rs",
+            1,
+            3,
+            "fn test_do_work() { do_work(); }",
+        );
+        let caller = add_fn(
+            &mut g,
+            "caller",
+            "/src/c.rs",
+            1,
+            3,
+            "fn caller() { do_work(); }",
+        );
+        edge(&mut g, test_caller, target, EdgeType::Calls);
+        edge(&mut g, caller, target, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "modify", 100_000).expect("context");
+        assert_eq!(rels(&r, "tests"), vec!["test_do_work".to_string()]);
+        // Latent behavior: the modify Priority-1 "tests" loop calls seen.insert on
+        // *every* Calls caller it visits (test or not), so the non-test "caller" is
+        // marked seen without being emitted. Priority 2 iterates the same take(5)
+        // set and finds nothing fresh, so "called_by" is never populated for callers
+        // that appeared in Priority 1's window — the non-test caller is swallowed.
+        assert!(rels(&r, "called_by").is_empty());
+    }
+
+    #[test]
+    fn ai_context_debug_includes_hints_and_call_chain() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let caller = add_fn(
+            &mut g,
+            "caller",
+            "/src/c.rs",
+            1,
+            3,
+            "fn caller() { do_work(); }",
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "debug", 100_000).expect("context");
+        assert!(r.debug_hints.is_some());
+        assert_eq!(
+            rels(&r, "call_chain_depth_0"),
+            vec!["caller".to_string()],
+            "debug intent walks the caller chain starting at depth 0"
+        );
+    }
+
+    #[test]
+    fn ai_context_debug_hints_absent_for_explain_intent() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 10_000).expect("context");
+        assert!(r.debug_hints.is_none());
+    }
+
+    #[test]
+    fn ai_context_test_intent_surfaces_example_test_and_mock() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let example = add_fn(
+            &mut g,
+            "test_do_work",
+            "/src/t.rs",
+            1,
+            3,
+            "fn test_do_work() { do_work(); }",
+        );
+        let dep = add_fn(&mut g, "helper", "/src/dep.rs", 1, 3, "fn helper() {}");
+        edge(&mut g, example, target, EdgeType::Calls); // incoming test → "example_test"
+        edge(&mut g, target, dep, EdgeType::Calls); // outgoing → "dependency_to_mock"
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "test", 100_000).expect("context");
+        assert_eq!(rels(&r, "example_test"), vec!["test_do_work".to_string()]);
+        assert_eq!(rels(&r, "dependency_to_mock"), vec!["helper".to_string()]);
+    }
+
+    #[test]
+    fn ai_context_dependencies_list_imports_only() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let module = add_node(
+            &mut g,
+            NodeType::Module,
+            &[("name", str_prop("serde")), ("path", str_prop("serde"))],
+        );
+        let helper = add_fn(&mut g, "helper", "/src/dep.rs", 1, 3, "fn helper() {}");
+        edge(&mut g, target, module, EdgeType::Imports);
+        edge(&mut g, target, helper, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(r.dependencies.len(), 1);
+        assert_eq!(r.dependencies[0].name, "serde");
+        assert_eq!(r.dependencies[0].dep_type, "import");
+        assert!(r.dependencies[0].code.is_none());
+    }
+
+    #[test]
+    fn ai_context_imports_collected_from_file_nodes() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let module = add_node(
+            &mut g,
+            NodeType::Module,
+            &[("name", str_prop("serde")), ("path", str_prop("serde"))],
+        );
+        edge(&mut g, target, module, EdgeType::Imports);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(r.imports, vec!["serde".to_string()]);
+    }
+
+    #[test]
+    fn ai_context_sibling_functions_exclude_target_and_sort() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("other")),
+                ("path", str_prop("/src/app.rs")),
+                ("line_start", int_prop(30)),
+                ("line_end", int_prop(40)),
+                ("signature", str_prop("fn other()")),
+                ("visibility", str_prop("private")),
+                ("source", str_prop("fn other() {}")),
+            ],
+        );
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(r.sibling_functions.len(), 1);
+        let sib = &r.sibling_functions[0];
+        assert_eq!(sib.name, "other");
+        assert_eq!(sib.signature, "fn other()");
+        assert_eq!(sib.visibility, "private");
+        assert_eq!(sib.line_start, 30);
+    }
+
+    #[test]
+    fn ai_context_architecture_reports_module_and_neighbors() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(
+            &mut g,
+            "doStuff",
+            "/src/services/auth.rs",
+            1,
+            5,
+            "fn doStuff() {}",
+        );
+        let neighbor = add_fn(&mut g, "Db", "/src/db/conn.rs", 1, 3, "struct Db;");
+        edge(&mut g, target, neighbor, EdgeType::Calls);
+
+        let r =
+            get_ai_context(&g, "/src/services/auth.rs", 2, "explain", 100_000).expect("context");
+        let arch = r.architecture.expect("architecture");
+        assert_eq!(arch.module, "auth");
+        assert_eq!(arch.layer, Some("service".to_string()));
+        let conn = arch.neighbors.iter().find(|n| n.module == "conn").unwrap();
+        assert!(conn.relationship.contains("calls"));
+    }
+
+    #[test]
+    fn ai_context_usage_examples_from_non_test_caller() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let runner = add_fn(
+            &mut g,
+            "runner",
+            "/src/r.rs",
+            1,
+            3,
+            "fn runner() { do_work(); }",
+        );
+        edge(&mut g, runner, target, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        let examples = r.usage_examples.expect("usage examples");
+        assert_eq!(examples.len(), 1);
+        let desc = examples[0].description.as_deref().unwrap();
+        assert!(desc.contains("runner"));
+        assert!(desc.contains("do_work"));
+    }
 }
