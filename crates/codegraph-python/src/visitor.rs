@@ -166,4 +166,63 @@ mod tests {
         let func = find_kind(tree.root_node(), "function_definition").expect("function node");
         assert!(extract_decorators(src.as_bytes(), func).is_empty());
     }
+
+    #[test]
+    fn empty_triple_quoted_docstring_yields_empty_string() {
+        // Six quotes: the outer trim/strip leaves an empty inner slice.
+        let src = "def f():\n    \"\"\"\"\"\"\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn only_first_docstring_string_is_returned() {
+        // Two consecutive string statements: the scan returns on the first.
+        let src = "def f():\n    \"first\"\n    \"second\"\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn non_string_expression_does_not_stop_search() {
+        // A bare call is an expression_statement with no string child, so the
+        // scan does not break and still finds the following docstring.
+        let src = "def f():\n    print()\n    \"doc\"\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some("doc"));
+    }
+
+    #[test]
+    fn multiple_comments_before_docstring_are_skipped() {
+        let src = "def f():\n    # one\n    # two\n    \"\"\"doc\"\"\"\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some("doc"));
+    }
+
+    #[test]
+    fn internal_content_preserved_after_outer_trim() {
+        // Only the leading/trailing whitespace is trimmed; internal newlines stay.
+        let src = "def f():\n    \"\"\"line1\n    line2\"\"\"\n    pass\n";
+        assert_eq!(docstring_of(src).as_deref(), Some("line1\n    line2"));
+    }
+
+    #[test]
+    fn class_body_docstring_is_extracted() {
+        let src = "class C:\n    \"\"\"class doc\"\"\"\n    pass\n";
+        let tree = parse(src);
+        let class = find_kind(tree.root_node(), "class_definition").expect("class node");
+        let body = class.child_by_field_name("body").expect("body node");
+        assert_eq!(
+            extract_docstring(src.as_bytes(), body).as_deref(),
+            Some("class doc")
+        );
+    }
+
+    #[test]
+    fn decorated_class_definition_decorators_extracted() {
+        let src = "@dataclass\nclass C:\n    pass\n";
+        assert_eq!(decorators_of(src), vec!["@dataclass".to_string()]);
+    }
+
+    #[test]
+    fn dotted_decorator_without_arguments_preserved() {
+        let src = "@app.route\ndef f():\n    pass\n";
+        assert_eq!(decorators_of(src), vec!["@app.route".to_string()]);
+    }
 }
