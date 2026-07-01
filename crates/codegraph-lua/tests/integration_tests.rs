@@ -4,8 +4,8 @@
 //! Integration tests for Lua parser
 
 use codegraph::CodeGraph;
-use codegraph_parser_api::CodeParser;
 use codegraph_lua::LuaParser;
+use codegraph_parser_api::CodeParser;
 use std::path::Path;
 
 const SAMPLE_APP: &str = include_str!("fixtures/sample_app.lua");
@@ -60,12 +60,16 @@ fn test_parse_sample_app_functions() {
 
     // Check for some specific functions
     assert!(
-        func_names.iter().any(|n| n.contains("addRole") || n.contains("add_role")),
+        func_names
+            .iter()
+            .any(|n| n.contains("addRole") || n.contains("add_role")),
         "Should contain addRole function, found: {:?}",
         func_names
     );
     assert!(
-        func_names.iter().any(|n| n.contains("createUser") || n.contains("create_user")),
+        func_names
+            .iter()
+            .any(|n| n.contains("createUser") || n.contains("create_user")),
         "Should contain createUser function, found: {:?}",
         func_names
     );
@@ -136,22 +140,29 @@ fn test_parse_sample_app_complexity() {
     let mut found_complex = false;
     for func_id in &file_info.functions {
         let node = graph.get_node(*func_id).unwrap();
-        if let Some(codegraph::PropertyValue::Int(complexity)) =
-            node.properties.get("complexity")
-        {
+        if let Some(codegraph::PropertyValue::Int(complexity)) = node.properties.get("complexity") {
             if *complexity > 1 {
                 found_complex = true;
                 let name = node
                     .properties
                     .get("name")
-                    .and_then(|v| if let codegraph::PropertyValue::String(s) = v { Some(s.as_str()) } else { None })
+                    .and_then(|v| {
+                        if let codegraph::PropertyValue::String(s) = v {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or("?");
                 println!("Complex function: {} (complexity={})", name, complexity);
             }
         }
     }
 
-    assert!(found_complex, "Expected at least one function with complexity > 1");
+    assert!(
+        found_complex,
+        "Expected at least one function with complexity > 1"
+    );
 }
 
 #[test]
