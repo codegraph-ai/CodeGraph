@@ -876,6 +876,192 @@ end # module
     }
 
     #[test]
+    fn test_visitor_line_numbers_one_indexed() {
+        let source = b"function greet(name)\n    println(name)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].line_start, 1);
+        assert_eq!(visitor.functions[0].line_end, 3);
+    }
+
+    #[test]
+    fn test_visitor_signature_first_line_only() {
+        // A signature split across physical lines should keep only the first line.
+        let source = b"function greet(\n    name,\n    other)\n    println(name)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].signature, "function greet(");
+        // Both parameters are still captured despite the multi-line declaration.
+        assert_eq!(visitor.functions[0].parameters.len(), 2);
+    }
+
+    #[test]
+    fn test_visitor_body_prefix_populated() {
+        let source = b"function compute(x)\n    y = x + 1\n    return y\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let body = visitor.functions[0]
+            .body_prefix
+            .as_ref()
+            .expect("function with a body should have a body_prefix");
+        assert!(
+            body.contains("return y"),
+            "body_prefix should include body text, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_for_loop() {
+        let source = b"function sum_all(xs)\n    total = 0\n    for x in xs\n        total += x\n    end\n    return total\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("looping function should have complexity");
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "for-loop should raise complexity above base, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_while_loop() {
+        let source =
+            b"function countdown(n)\n    while n > 0\n        n -= 1\n    end\n    return n\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("while-loop function should have complexity");
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "while-loop should raise complexity above base, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_logical_operator() {
+        let source = b"function both(a, b)\n    return a && b\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("logical-operator function should have complexity");
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "&& should raise complexity above base, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_ternary() {
+        let source = b"function sign(x)\n    x > 0 ? 1 : -1\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("ternary function should have complexity");
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "ternary should raise complexity above base, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_try_catch() {
+        let source =
+            b"function safe(f)\n    try\n        f()\n    catch\n        nothing\n    end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("try/catch function should have complexity");
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "try/catch should raise complexity above base, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
+    fn test_visitor_call_site_line_and_direct() {
+        let source = b"function run()\n    helper()\nend";
+        let visitor = parse_and_visit(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("expected a call to helper");
+        assert_eq!(call.caller, "run");
+        assert_eq!(call.call_site_line, 2);
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_visitor_doc_comment_line() {
+        let source = b"# Greets by name\nfunction greet(name)\n    println(name)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(
+            visitor.functions[0].doc_comment,
+            Some("# Greets by name".to_string())
+        );
+    }
+
+    #[test]
+    fn test_visitor_multiple_functions_order() {
+        let source = b"function first(x)\n    x\nend\n\nfunction second(y)\n    y\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "first");
+        assert_eq!(visitor.functions[1].name, "second");
+    }
+
+    #[test]
+    fn test_visitor_import_selected_symbol_named() {
+        let source = b"import JSON: parse as json_parse\n";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "JSON");
+        assert!(
+            visitor.imports[0].symbols.contains(&"parse".to_string()),
+            "expected the original symbol name recorded, got {:?}",
+            visitor.imports[0].symbols
+        );
+    }
+
+    #[test]
+    fn test_visitor_short_function_not_extracted() {
+        // `f(x) = x` parses as an `assignment`, not a function_definition, so it
+        // is not currently extracted as a FunctionEntity.
+        let source = b"square(x) = x * x\n";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions.is_empty());
+    }
+
+    #[test]
     fn test_visitor_empty_source() {
         let visitor = parse_and_visit(b"");
 
