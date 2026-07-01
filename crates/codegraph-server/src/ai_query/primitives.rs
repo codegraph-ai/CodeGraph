@@ -748,4 +748,41 @@ mod tests {
             EntryType::CliCommand
         );
     }
+
+    #[test]
+    fn entry_type_all_variants_round_trip_snake_case() {
+        // rename_all = "snake_case" applies a distinct per-variant boundary
+        // rewrite; the single-variant test above only pins http_handler /
+        // cli_command, leaving the remaining four wire strings unverified.
+        let cases = [
+            (EntryType::HttpHandler, "\"http_handler\""),
+            (EntryType::CliCommand, "\"cli_command\""),
+            (EntryType::PublicApi, "\"public_api\""),
+            (EntryType::EventHandler, "\"event_handler\""),
+            (EntryType::TestEntry, "\"test_entry\""),
+            (EntryType::Main, "\"main\""),
+        ];
+        for (variant, wire) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<EntryType>(wire).unwrap(), variant);
+        }
+    }
+
+    #[test]
+    fn traversal_direction_all_variants_round_trip_lowercase() {
+        // The serialize test above only pins Incoming; Outgoing and Both were
+        // never exercised for either serialize or deserialize.
+        let cases = [
+            (TraversalDirection::Outgoing, "\"outgoing\""),
+            (TraversalDirection::Incoming, "\"incoming\""),
+            (TraversalDirection::Both, "\"both\""),
+        ];
+        for (variant, wire) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<TraversalDirection>(wire).unwrap(),
+                variant
+            );
+        }
+    }
 }
