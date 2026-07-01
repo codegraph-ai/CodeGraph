@@ -377,3 +377,124 @@ fn file_references_module(
         })
     })
 }
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{PropertyMap, PropertyValue};
+
+    /// Add a node with a `name` and `path` property, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, name: &str, path: &str) -> NodeId {
+        let mut props = PropertyMap::new();
+        props.insert("name".to_string(), PropertyValue::String(name.to_string()));
+        props.insert("path".to_string(), PropertyValue::String(path.to_string()));
+        graph.add_node(ty, props).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    #[test]
+    fn used_import_is_not_flagged() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // File A imports module B; a function in A calls a function in B.
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "b.rs", "/src/b.rs");
+        let func_a = add_node(&mut g, NodeType::Function, "fa", "/src/a.rs");
+        let func_b = add_node(&mut g, NodeType::Function, "fb", "/src/b.rs");
+
+        edge(&mut g, file_a, func_a, EdgeType::Contains);
+        edge(&mut g, module_b, func_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        edge(&mut g, func_a, func_b, EdgeType::Calls);
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.total_imports, 1);
+        assert_eq!(result.dead_count, 0);
+        assert!(result.dead_imports.is_empty());
+        assert!(result.unresolved_imports.is_empty());
+    }
+
+    #[test]
+    fn unused_import_is_dead() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // File A imports module B (a real indexed module) but never calls into it.
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "b.rs", "/src/b.rs");
+        let func_a = add_node(&mut g, NodeType::Function, "fa", "/src/a.rs");
+        let func_b = add_node(&mut g, NodeType::Function, "fb", "/src/b.rs");
+
+        edge(&mut g, file_a, func_a, EdgeType::Contains);
+        edge(&mut g, module_b, func_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        // No Calls / usage edge from A into B.
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.total_imports, 1);
+        assert_eq!(result.dead_count, 1);
+        assert_eq!(result.dead_imports[0].file, "/src/a.rs");
+        assert_eq!(result.dead_imports[0].imported_module, "b.rs");
+        assert!(result.unresolved_imports.is_empty());
+    }
+
+    #[test]
+    fn external_module_without_path_is_unresolved() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // File A imports module X which is not in the graph (no children, no path).
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_x = add_node(&mut g, NodeType::Module, "serde", "");
+
+        edge(&mut g, file_a, module_x, EdgeType::Imports);
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.total_imports, 1);
+        assert_eq!(result.dead_count, 0);
+        assert!(result.dead_imports.is_empty());
+        assert_eq!(result.unresolved_imports.len(), 1);
+        assert_eq!(result.unresolved_imports[0].imported_module, "serde");
+    }
+
+    #[test]
+    fn non_call_usage_edge_keeps_import_alive() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Type-only usage: a child of A References a child of B (no Calls edge).
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "b.rs", "/src/b.rs");
+        let type_a = add_node(&mut g, NodeType::Function, "ta", "/src/a.rs");
+        let type_b = add_node(&mut g, NodeType::Function, "tb", "/src/b.rs");
+
+        edge(&mut g, file_a, type_a, EdgeType::Contains);
+        edge(&mut g, module_b, type_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        edge(&mut g, type_a, type_b, EdgeType::References);
+
+        let result = find_dead_imports(&g, None);
+        assert_eq!(result.dead_count, 0);
+    }
+
+    #[test]
+    fn file_path_filter_restricts_scan() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Two files, both with a dead import; filter to only one.
+        let file_a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let file_c = add_node(&mut g, NodeType::CodeFile, "c.rs", "/src/c.rs");
+        let module_b = add_node(&mut g, NodeType::Module, "b.rs", "/src/b.rs");
+        let func_b = add_node(&mut g, NodeType::Function, "fb", "/src/b.rs");
+
+        edge(&mut g, module_b, func_b, EdgeType::Contains);
+        edge(&mut g, file_a, module_b, EdgeType::Imports);
+        edge(&mut g, file_c, module_b, EdgeType::Imports);
+
+        let result = find_dead_imports(&g, Some("/src/a.rs"));
+        assert_eq!(result.total_imports, 1);
+        assert_eq!(result.dead_count, 1);
+        assert_eq!(result.dead_imports[0].file, "/src/a.rs");
+    }
+}
