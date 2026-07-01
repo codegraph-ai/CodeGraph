@@ -179,6 +179,35 @@ mod tests {
     }
 
     #[test]
+    fn source_exposes_wrapped_error_for_from_variants() {
+        use std::error::Error as _;
+
+        // #[from] variants auto-wire std::error::Error::source() to the inner error.
+        let io_err: MemoryError =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into();
+        let src = io_err.source().expect("Io variant chains a source");
+        assert!(src.downcast_ref::<std::io::Error>().is_some());
+
+        let json_err: MemoryError = serde_json::from_str::<i32>("nope").unwrap_err().into();
+        let json_src = json_err.source().expect("Json variant chains a source");
+        assert!(json_src.downcast_ref::<serde_json::Error>().is_some());
+
+        let uuid_err: MemoryError = uuid::Uuid::parse_str("not-a-uuid").unwrap_err().into();
+        let uuid_src = uuid_err.source().expect("Uuid variant chains a source");
+        assert!(uuid_src.downcast_ref::<uuid::Error>().is_some());
+    }
+
+    #[test]
+    fn source_is_none_for_string_variants() {
+        use std::error::Error as _;
+
+        // String-backed variants carry no inner error, so the chain terminates.
+        assert!(MemoryError::model("x").source().is_none());
+        assert!(MemoryError::not_found("y").source().is_none());
+        assert!(MemoryError::other("z").source().is_none());
+    }
+
+    #[test]
     fn result_alias_carries_memory_error() {
         let ok: Result<u32> = Ok(7);
         assert_eq!(ok.unwrap(), 7);
