@@ -4105,4 +4105,79 @@ mod tests {
         // Genuinely different types do not match.
         assert!(!engine.type_matches("User", "Account"));
     }
+
+    #[tokio::test]
+    async fn build_signature_match_reason_joins_all_present_criteria() {
+        let (engine, _) = create_test_engine().await;
+        // Distinct min/max renders a range; every criterion contributes a part
+        // and the parts are comma-joined in field order.
+        let pattern = SignaturePattern::new()
+            .with_name_pattern(".*validate.*")
+            .with_return_type("bool")
+            .with_param_count(1, 3)
+            .with_modifier("async")
+            .with_modifier("public");
+        assert_eq!(
+            engine.build_signature_match_reason(&pattern),
+            "name matches /.*validate.*/, returns bool, 1-3 parameters, modifiers: async, public"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_signature_match_reason_collapses_equal_param_bounds() {
+        let (engine, _) = create_test_engine().await;
+        // min == max drops the range form to a singular "{n} parameters".
+        let pattern = SignaturePattern::new().with_param_count(2, 2);
+        assert_eq!(
+            engine.build_signature_match_reason(&pattern),
+            "2 parameters"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_signature_match_reason_empty_pattern_uses_fallback() {
+        let (engine, _) = create_test_engine().await;
+        // No criteria set -> the parts vec is empty and the fallback string is
+        // returned rather than an empty join.
+        let pattern = SignaturePattern::new();
+        assert_eq!(
+            engine.build_signature_match_reason(&pattern),
+            "Signature match"
+        );
+    }
+
+    #[test]
+    fn count_params_from_signature_handles_unclosed_and_self_variants() {
+        // Unclosed paren never finds a matching ')', so paren_end is None -> 0.
+        assert_eq!(QueryEngine::count_params_from_signature("fn foo(a: i32"), 0);
+        // Whitespace-only parameter list trims to empty -> 0.
+        assert_eq!(QueryEngine::count_params_from_signature("fn foo(   )"), 0);
+        // A bare `self` receiver is subtracted, leaving 0.
+        assert_eq!(QueryEngine::count_params_from_signature("fn foo(self)"), 0);
+        // The `self: Type` receiver form is also subtracted.
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(self: Box<Self>, a: i32)"),
+            1
+        );
+    }
+
+    #[test]
+    fn extract_return_type_from_signature_edge_forms() {
+        // Arrow present but the type is empty after stripping the brace, so the
+        // arrow branch falls through and the colon branch finds nothing -> "".
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("fn foo() -> {"),
+            ""
+        );
+        // Trailing semicolon is stripped from the arrow return type.
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("fn foo() -> i32;"),
+            "i32"
+        );
+        // Colon after the closing paren with no type after it -> "".
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("function foo():"),
+            ""
+        );
+    }
 }
