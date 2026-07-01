@@ -236,7 +236,7 @@ mod tests {
     use codegraph::{Direction, PropertyValue};
     use codegraph_parser_api::{
         CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
-        TraitEntity,
+        Parameter, TraitEntity,
     };
 
     fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
@@ -479,6 +479,329 @@ mod tests {
 
         let outgoing = graph.get_neighbors(caller_id, Direction::Outgoing).unwrap();
         assert_eq!(outgoing, vec![callee_id]);
+    }
+
+    fn prop(graph: &CodeGraph, id: NodeId, key: &str) -> Option<PropertyValue> {
+        graph.get_node(id).unwrap().properties.get(key).cloned()
+    }
+
+    #[test]
+    fn module_without_doc_omits_doc_prop() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        let module = ModuleEntity::new("Solver", "src/Solver.jl", "julia");
+        ir.set_module(module);
+
+        let (graph, info) = build(&ir);
+        assert_eq!(prop(&graph, info.file_id, "doc"), None);
+    }
+
+    #[test]
+    fn function_optional_props_present() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        let func = FunctionEntity::new("solve", 1, 5)
+            .with_doc("solves it")
+            .with_body_prefix("x + 1")
+            .with_return_type("Int")
+            .with_parameters(vec![Parameter::new("x"), Parameter::new("y")]);
+        ir.add_function(func);
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(
+            prop(&graph, id, "doc"),
+            Some(PropertyValue::String("solves it".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "body_prefix"),
+            Some(PropertyValue::String("x + 1".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "return_type"),
+            Some(PropertyValue::String("Int".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "parameters"),
+            Some(PropertyValue::StringList(vec![
+                "x".to_string(),
+                "y".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn function_optional_props_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_function(FunctionEntity::new("solve", 1, 5));
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(prop(&graph, id, "doc"), None);
+        assert_eq!(prop(&graph, id, "body_prefix"), None);
+        assert_eq!(prop(&graph, id, "return_type"), None);
+        assert_eq!(prop(&graph, id, "parameters"), None);
+        assert_eq!(prop(&graph, id, "complexity"), None);
+    }
+
+    #[test]
+    fn all_eight_complexity_sub_props_grade_d() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        let metrics = ComplexityMetrics::new()
+            .with_branches(15)
+            .with_loops(4)
+            .with_logical_operators(3)
+            .with_exception_handlers(2)
+            .with_nesting_depth(5)
+            .with_early_returns(6)
+            .finalize();
+        // cyclomatic = 1 + 15 + 4 + 3 + 2 = 25 -> D band
+        ir.add_function(FunctionEntity::new("f", 1, 40).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(prop(&graph, id, "complexity"), Some(PropertyValue::Int(25)));
+        assert_eq!(
+            prop(&graph, id, "complexity_grade"),
+            Some(PropertyValue::String("D".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_branches"),
+            Some(PropertyValue::Int(15))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_loops"),
+            Some(PropertyValue::Int(4))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_logical_ops"),
+            Some(PropertyValue::Int(3))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_exceptions"),
+            Some(PropertyValue::Int(2))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_nesting"),
+            Some(PropertyValue::Int(5))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_early_returns"),
+            Some(PropertyValue::Int(6))
+        );
+    }
+
+    #[test]
+    fn complexity_grade_bands_a_and_f() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_function(
+            FunctionEntity::new("simple", 1, 3)
+                .with_complexity(ComplexityMetrics::new().with_branches(2).finalize()),
+        );
+        ir.add_function(
+            FunctionEntity::new("beast", 4, 90)
+                .with_complexity(ComplexityMetrics::new().with_branches(60).finalize()),
+        );
+
+        let (graph, info) = build(&ir);
+        let simple = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "simple")
+            .unwrap();
+        let beast = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "beast")
+            .unwrap();
+        assert_eq!(
+            prop(&graph, simple, "complexity_grade"),
+            Some(PropertyValue::String("A".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, beast, "complexity_grade"),
+            Some(PropertyValue::String("F".to_string()))
+        );
+    }
+
+    #[test]
+    fn function_static_and_abstract_flags() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_function(FunctionEntity::new("f", 1, 3).static_fn().abstract_fn());
+
+        let (graph, info) = build(&ir);
+        let id = info.functions[0];
+        assert_eq!(
+            prop(&graph, id, "is_static"),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            prop(&graph, id, "is_abstract"),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            prop(&graph, id, "is_async"),
+            Some(PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn class_optional_props_present_and_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_class(
+            ClassEntity::new("Rich", 1, 5)
+                .with_doc("a struct")
+                .with_attributes(vec!["export".to_string()])
+                .with_body_prefix("x::Int"),
+        );
+        ir.add_class(ClassEntity::new("Bare", 6, 8));
+
+        let (graph, info) = build(&ir);
+        let rich = info
+            .classes
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "Rich")
+            .unwrap();
+        let bare = info
+            .classes
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "Bare")
+            .unwrap();
+        assert_eq!(
+            prop(&graph, rich, "doc"),
+            Some(PropertyValue::String("a struct".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, rich, "attributes"),
+            Some(PropertyValue::StringList(vec!["export".to_string()]))
+        );
+        assert_eq!(
+            prop(&graph, rich, "body_prefix"),
+            Some(PropertyValue::String("x::Int".to_string()))
+        );
+        assert_eq!(prop(&graph, bare, "doc"), None);
+        assert_eq!(prop(&graph, bare, "attributes"), None);
+        assert_eq!(prop(&graph, bare, "body_prefix"), None);
+    }
+
+    #[test]
+    fn abstract_type_without_doc_omits_doc_prop() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_trait(TraitEntity::new("AbstractShape", 1, 3));
+
+        let (graph, info) = build(&ir);
+        let id = info.traits[0];
+        assert_eq!(prop(&graph, id, "doc"), None);
+        assert_eq!(
+            prop(&graph, id, "visibility"),
+            Some(PropertyValue::String("public".to_string()))
+        );
+    }
+
+    #[test]
+    fn import_matching_in_file_name_reuses_node_without_external_flag() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_function(FunctionEntity::new("helper", 1, 3));
+        // Import target matches the already-mapped function name.
+        ir.add_import(ImportRelation::new("Solver", "helper"));
+
+        let (graph, info) = build(&ir);
+        // No new Module node: file + function only.
+        assert_eq!(graph.node_count(), 2);
+        let import_id = info.imports[0];
+        assert_eq!(import_id, info.functions[0]);
+        // Reused node keeps its Function type, no is_external stamped.
+        assert_eq!(
+            graph.get_node(import_id).unwrap().node_type,
+            NodeType::Function
+        );
+        assert_eq!(prop(&graph, import_id, "is_external"), None);
+        // Both a Contains and an Imports edge now connect file -> node.
+        let edge_ids = graph.get_edges_between(info.file_id, import_id).unwrap();
+        assert_eq!(edge_ids.len(), 2);
+        let kinds: Vec<_> = edge_ids
+            .iter()
+            .map(|&e| graph.get_edge(e).unwrap().edge_type)
+            .collect();
+        assert!(kinds.contains(&EdgeType::Contains));
+        assert!(kinds.contains(&EdgeType::Imports));
+    }
+
+    #[test]
+    fn bare_import_has_empty_edge_props() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_import(ImportRelation::new("Solver", "Printf"));
+
+        let (graph, info) = build(&ir);
+        let edge_ids = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(edge_ids.len(), 1);
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        // No symbols provided -> no symbols prop on the edge.
+        assert_eq!(edge.properties.get("symbols"), None);
+    }
+
+    #[test]
+    fn indirect_call_records_is_direct_false() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        ir.add_call(CallRelation::new("caller", "callee", 3).indirect());
+
+        let (graph, info) = build(&ir);
+        let caller = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "caller")
+            .unwrap();
+        let callee = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "callee")
+            .unwrap();
+        let edge_ids = graph.get_edges_between(caller, callee).unwrap();
+        assert_eq!(edge_ids.len(), 1);
+        assert_eq!(
+            graph
+                .get_edge(edge_ids[0])
+                .unwrap()
+                .properties
+                .get("is_direct"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn multiple_classes_functions_traits_all_contained_by_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("Solver.jl"));
+        ir.add_class(ClassEntity::new("Point", 1, 2));
+        ir.add_class(ClassEntity::new("Line", 3, 4));
+        ir.add_trait(TraitEntity::new("Shape", 5, 6));
+        ir.add_function(FunctionEntity::new("area", 7, 8));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.classes.len(), 2);
+        assert_eq!(info.traits.len(), 1);
+        assert_eq!(info.functions.len(), 1);
+        // file + 2 classes + 1 trait + 1 function = 5 nodes.
+        assert_eq!(graph.node_count(), 5);
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        for id in info
+            .classes
+            .iter()
+            .chain(info.traits.iter())
+            .chain(info.functions.iter())
+        {
+            assert!(neighbors.contains(id));
+        }
     }
 
     #[test]
