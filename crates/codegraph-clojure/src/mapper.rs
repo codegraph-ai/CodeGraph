@@ -205,7 +205,7 @@ mod tests {
     use codegraph::{Direction, PropertyValue};
     use codegraph_parser_api::{
         CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
-        TraitEntity,
+        Parameter, TraitEntity,
     };
 
     fn build(ir: &CodeIR) -> (CodeGraph, FileInfo) {
@@ -219,6 +219,10 @@ mod tests {
             Some(PropertyValue::String(s)) => s.clone(),
             _ => String::new(),
         }
+    }
+
+    fn prop(graph: &CodeGraph, id: NodeId, key: &str) -> Option<PropertyValue> {
+        graph.get_node(id).unwrap().properties.get(key).cloned()
     }
 
     #[test]
@@ -453,5 +457,278 @@ mod tests {
             .get_edges_between(info.file_id, info.imports[0])
             .unwrap();
         assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn function_optional_props_present() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        ir.add_function(
+            FunctionEntity::new("solve", 1, 5)
+                .with_doc("solves it")
+                .with_body_prefix("(let [x 1]")
+                .with_parameters(vec![Parameter::new("x"), Parameter::new("y")]),
+        );
+
+        let (graph, info) = build(&ir);
+        let func_id = info.functions[0];
+        assert_eq!(
+            prop(&graph, func_id, "doc"),
+            Some(PropertyValue::String("solves it".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "body_prefix"),
+            Some(PropertyValue::String("(let [x 1]".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "parameters"),
+            Some(PropertyValue::StringList(vec![
+                "x".to_string(),
+                "y".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn function_optional_props_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        ir.add_function(FunctionEntity::new("solve", 1, 5));
+
+        let (graph, info) = build(&ir);
+        let func_id = info.functions[0];
+        // The clojure function loop only stamps doc/body_prefix/parameters/complexity when present.
+        assert_eq!(prop(&graph, func_id, "doc"), None);
+        assert_eq!(prop(&graph, func_id, "body_prefix"), None);
+        assert_eq!(prop(&graph, func_id, "parameters"), None);
+        assert_eq!(prop(&graph, func_id, "complexity"), None);
+    }
+
+    #[test]
+    fn function_all_eight_complexity_subprops_with_d_grade() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 30,
+            branches: 10,
+            loops: 4,
+            logical_operators: 5,
+            max_nesting_depth: 3,
+            exception_handlers: 2,
+            early_returns: 6,
+            ..Default::default()
+        };
+        ir.add_function(FunctionEntity::new("beast", 1, 40).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        let func_id = info.functions[0];
+        assert_eq!(
+            prop(&graph, func_id, "complexity"),
+            Some(PropertyValue::Int(30))
+        );
+        // Cyclomatic 21-50 => D band.
+        assert_eq!(
+            prop(&graph, func_id, "complexity_grade"),
+            Some(PropertyValue::String("D".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "complexity_branches"),
+            Some(PropertyValue::Int(10))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "complexity_loops"),
+            Some(PropertyValue::Int(4))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "complexity_logical_ops"),
+            Some(PropertyValue::Int(5))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "complexity_nesting"),
+            Some(PropertyValue::Int(3))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "complexity_exceptions"),
+            Some(PropertyValue::Int(2))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "complexity_early_returns"),
+            Some(PropertyValue::Int(6))
+        );
+    }
+
+    #[test]
+    fn function_complexity_grade_band_a() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 3,
+            ..Default::default()
+        };
+        ir.add_function(FunctionEntity::new("simple", 1, 3).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(
+            prop(&graph, info.functions[0], "complexity_grade"),
+            Some(PropertyValue::String("A".to_string()))
+        );
+    }
+
+    #[test]
+    fn function_complexity_grade_band_f() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 60,
+            ..Default::default()
+        };
+        ir.add_function(FunctionEntity::new("untestable", 1, 90).with_complexity(metrics));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(
+            prop(&graph, info.functions[0], "complexity_grade"),
+            Some(PropertyValue::String("F".to_string()))
+        );
+    }
+
+    #[test]
+    fn function_boolean_flags_are_stamped() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        ir.add_function(
+            FunctionEntity::new("flagged", 1, 5)
+                .async_fn()
+                .static_fn()
+                .abstract_fn(),
+        );
+
+        let (graph, info) = build(&ir);
+        let func_id = info.functions[0];
+        assert_eq!(
+            prop(&graph, func_id, "is_async"),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "is_static"),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            prop(&graph, func_id, "is_abstract"),
+            Some(PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn class_doc_attributes_and_body_prefix_present() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        ir.add_class(
+            ClassEntity::new("Shape", 1, 10)
+                .with_visibility("public")
+                .abstract_class()
+                .with_doc("a shape")
+                .with_attributes(vec!["deprecated".to_string()])
+                .with_body_prefix("(defprotocol Shape"),
+        );
+
+        let (graph, info) = build(&ir);
+        let class_id = info.classes[0];
+        assert_eq!(
+            prop(&graph, class_id, "doc"),
+            Some(PropertyValue::String("a shape".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, class_id, "attributes"),
+            Some(PropertyValue::StringList(vec!["deprecated".to_string()]))
+        );
+        assert_eq!(
+            prop(&graph, class_id, "body_prefix"),
+            Some(PropertyValue::String("(defprotocol Shape".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, class_id, "is_abstract"),
+            Some(PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn class_optional_props_absent() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        ir.add_class(ClassEntity::new("Bare", 1, 4));
+
+        let (graph, info) = build(&ir);
+        let class_id = info.classes[0];
+        // doc/attributes/body_prefix are only stamped when present/non-empty.
+        assert_eq!(prop(&graph, class_id, "doc"), None);
+        assert_eq!(prop(&graph, class_id, "attributes"), None);
+        assert_eq!(prop(&graph, class_id, "body_prefix"), None);
+    }
+
+    #[test]
+    fn import_reuses_in_file_class_node_without_external_flag() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        ir.add_class(ClassEntity::new("Shape", 1, 10));
+        // Import target name matches the already-mapped class node.
+        ir.add_import(ImportRelation::new("myapp.core", "Shape"));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.classes.len(), 1);
+        // No external Module node is created; the class node is reused.
+        let class_id = info.classes[0];
+        assert_eq!(info.imports[0], class_id);
+        assert_eq!(prop(&graph, class_id, "is_external"), None);
+
+        // Both a Contains and an Imports edge connect the file to the reused node.
+        let edge_ids = graph.get_edges_between(info.file_id, class_id).unwrap();
+        let edge_types: Vec<_> = edge_ids
+            .iter()
+            .map(|&e| graph.get_edge(e).unwrap().edge_type)
+            .collect();
+        assert_eq!(edge_types.len(), 2);
+        assert!(edge_types.contains(&EdgeType::Contains));
+        assert!(edge_types.contains(&EdgeType::Imports));
+    }
+
+    #[test]
+    fn indirect_call_sets_is_direct_false() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 10));
+        ir.add_call(CallRelation::new("caller", "callee", 3).indirect());
+
+        let (graph, info) = build(&ir);
+        let caller_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "caller")
+            .unwrap();
+        let callee_id = info
+            .functions
+            .iter()
+            .copied()
+            .find(|&id| name_of(&graph, id) == "callee")
+            .unwrap();
+        let edge_ids = graph.get_edges_between(caller_id, callee_id).unwrap();
+        let edge = graph.get_edge(edge_ids[0]).unwrap();
+        assert_eq!(
+            edge.properties.get("is_direct"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn multiple_classes_and_functions_are_contained_by_file() {
+        let mut ir = CodeIR::new(std::path::PathBuf::from("core.clj"));
+        ir.add_class(ClassEntity::new("Shape", 1, 5));
+        ir.add_class(ClassEntity::new("Color", 6, 10));
+        ir.add_function(FunctionEntity::new("area", 11, 15));
+        ir.add_function(FunctionEntity::new("hue", 16, 20));
+
+        let (graph, info) = build(&ir);
+        assert_eq!(info.classes.len(), 2);
+        assert_eq!(info.functions.len(), 2);
+        // file + 2 classes + 2 functions.
+        assert_eq!(graph.node_count(), 5);
+
+        let neighbors = graph
+            .get_neighbors(info.file_id, Direction::Outgoing)
+            .unwrap();
+        for id in info.classes.iter().chain(info.functions.iter()) {
+            assert!(neighbors.contains(id));
+        }
     }
 }
