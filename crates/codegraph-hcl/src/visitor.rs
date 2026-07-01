@@ -359,4 +359,186 @@ output "instance_ip" {
         assert!(names.contains(&"aws_instance.web"));
         assert!(names.contains(&"output.instance_ip"));
     }
+
+    #[test]
+    fn test_resource_full_props() {
+        let source = br#"resource "aws_instance" "web" {
+  ami = "ami-12345"
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.signature, "resource \"aws_instance\" \"web\"");
+        assert_eq!(f.visibility, "public");
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 3);
+        // Non-block-type props are all defaults for HCL entities.
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.return_type.is_none());
+        assert!(f.doc_comment.is_none());
+        assert!(f.parent_class.is_none());
+        assert!(f.complexity.is_none());
+        assert!(f.attributes.is_empty());
+        assert!(f.parameters.is_empty());
+        // body_prefix captures the block body text.
+        assert!(f.body_prefix.as_deref().unwrap().contains("ami-12345"));
+    }
+
+    #[test]
+    fn test_data_signature() {
+        let source = br#"data "aws_ami" "ubuntu" {
+  most_recent = true
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].signature,
+            "data \"aws_ami\" \"ubuntu\""
+        );
+        assert_eq!(visitor.functions[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_output_signature() {
+        let source = br#"output "instance_ip" {
+  value = "1.2.3.4"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "output \"instance_ip\"");
+    }
+
+    #[test]
+    fn test_variable_signature_and_parameter() {
+        let source = br#"variable "region" {
+  type = string
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "var.region");
+        assert_eq!(f.signature, "variable \"region\"");
+        // variable synthesizes a single parameter named after the label.
+        assert_eq!(f.parameters.len(), 1);
+        assert_eq!(f.parameters[0].name, "region");
+    }
+
+    #[test]
+    fn test_provider_extraction() {
+        let source = br#"provider "aws" {
+  region = "us-east-1"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "provider.aws");
+        assert_eq!(visitor.functions[0].signature, "provider \"aws\"");
+    }
+
+    #[test]
+    fn test_module_import_fields() {
+        let source = br#"module "vpc" {
+  source = "./modules/vpc"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.importer, "main");
+        assert_eq!(imp.imported, "./modules/vpc");
+        assert_eq!(imp.alias, Some("vpc".to_string()));
+        assert!(imp.symbols.is_empty());
+        assert!(!imp.is_wildcard);
+    }
+
+    #[test]
+    fn test_module_without_source_falls_back_to_label() {
+        // No `source` attribute → imported defaults to the module label.
+        let source = br#"module "vpc" {
+  cidr = "10.0.0.0/16"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "vpc");
+        assert_eq!(visitor.imports[0].alias, Some("vpc".to_string()));
+    }
+
+    #[test]
+    fn test_resource_body_nested_block_not_recursed() {
+        // Matched block arms push a function and do NOT recurse into the body,
+        // so a nested block inside a resource is not extracted.
+        let source = br#"resource "aws_instance" "web" {
+  network_interface {
+    device_index = 0
+  }
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "aws_instance.web");
+    }
+
+    #[test]
+    fn test_unknown_block_recurses_into_body() {
+        // An unrecognized block type falls through to the default arm, which
+        // recurses into the body so nested matched blocks are still extracted.
+        let source = br#"check "health" {
+  data "http" "test" {
+    url = "https://example.com"
+  }
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "data.http.test");
+    }
+
+    #[test]
+    fn test_terraform_block_yields_no_function() {
+        let source = br#"terraform {
+  required_version = ">= 1.0"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_resources_ordering() {
+        let source = br#"resource "aws_instance" "web" {
+  ami = "a"
+}
+
+resource "aws_s3_bucket" "data" {
+  bucket = "b"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "aws_instance.web");
+        assert_eq!(visitor.functions[1].name, "aws_s3_bucket.data");
+    }
+
+    #[test]
+    fn test_resource_single_label_skipped() {
+        // resource with fewer than 2 labels does not match the resource arm;
+        // it falls through to the default arm (no function, recurse empty body).
+        let source = br#"resource "aws_instance" {
+  ami = "a"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions.is_empty());
+    }
+
+    #[test]
+    fn test_module_source_strips_quotes() {
+        // The source attribute value has its surrounding double-quotes stripped.
+        let source = br#"module "net" {
+  source = "terraform-aws-modules/vpc/aws"
+}"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports[0].imported, "terraform-aws-modules/vpc/aws");
+    }
 }
