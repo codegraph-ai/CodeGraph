@@ -513,7 +513,6 @@ mod tests {
             max_nesting_depth: 3,
             exception_handlers: 2,
             early_returns: 6,
-            ..Default::default()
         };
         ir.add_function(FunctionEntity::new("beast", 1, 40).with_complexity(metrics));
 
