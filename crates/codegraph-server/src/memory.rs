@@ -192,7 +192,10 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create a new MemoryManager
     pub fn new(extension_path: Option<PathBuf>) -> Self {
-        Self::with_model(extension_path, codegraph_memory::EmbeddingBackend::default())
+        Self::with_model(
+            extension_path,
+            codegraph_memory::EmbeddingBackend::default(),
+        )
     }
 
     /// Create a new MemoryManager with a specific embedding backend

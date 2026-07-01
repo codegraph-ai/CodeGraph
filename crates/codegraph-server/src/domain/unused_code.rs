@@ -571,3 +571,126 @@ fn compute_unused_confidence(name: &str, is_exported: bool, _node: &codegraph::N
     // Private/unexported symbols with no callers — very likely unused
     0.9
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{Node, NodeType, PropertyMap};
+
+    fn node_with(name: &str, path: &str, is_test: Option<bool>) -> Node {
+        let mut props = PropertyMap::new();
+        props.insert("name", name);
+        props.insert("path", path);
+        if let Some(v) = is_test {
+            props.insert("is_test", v);
+        }
+        Node::new(0, NodeType::Function, props)
+    }
+
+    #[test]
+    fn is_test_node_respects_is_test_property() {
+        // The structural marker wins even when name/path look non-test.
+        let n = node_with("do_work", "src/lib.rs", Some(true));
+        assert!(is_test_node(&n));
+
+        // Explicit false with non-test name/path is not a test.
+        let n = node_with("do_work", "src/lib.rs", Some(false));
+        assert!(!is_test_node(&n));
+    }
+
+    #[test]
+    fn is_test_node_detects_by_name() {
+        assert!(is_test_node(&node_with("test_parse", "src/lib.rs", None)));
+        assert!(is_test_node(&node_with("parse_test", "src/lib.rs", None)));
+        assert!(is_test_node(&node_with("TestFixture", "src/lib.rs", None)));
+        assert!(!is_test_node(&node_with("parse", "src/lib.rs", None)));
+    }
+
+    #[test]
+    fn is_test_node_detects_by_path() {
+        assert!(is_test_node(&node_with("parse", "src/tests/mod.rs", None)));
+        assert!(is_test_node(&node_with("parse", "src/foo.test.ts", None)));
+        assert!(is_test_node(&node_with("parse", "src/foo.spec.ts", None)));
+        assert!(is_test_node(&node_with("parse", "pkg\\tests\\x.rs", None)));
+        assert!(is_test_node(&node_with("parse", "src/foo_test.go", None)));
+        assert!(!is_test_node(&node_with("parse", "src/foo.rs", None)));
+    }
+
+    #[test]
+    fn generate_test_path_patterns_covers_conventions() {
+        let patterns = generate_test_path_patterns("/src/foo.ts");
+        assert!(patterns.contains(&"/src/foo.test.ts".to_string()));
+        assert!(patterns.contains(&"/src/foo.spec.ts".to_string()));
+        assert!(patterns.contains(&"/src/foo_test.ts".to_string()));
+        assert!(patterns.contains(&"/src/tests/foo.ts".to_string()));
+        assert!(patterns.contains(&"/src/__tests__/foo.ts".to_string()));
+        assert!(patterns.contains(&"/src/test/foo.ts".to_string()));
+        assert!(patterns.contains(&"/src/tests/foo_test.ts".to_string()));
+    }
+
+    #[test]
+    fn generate_test_path_patterns_handles_missing_extension() {
+        // No extension -> no adjacent/subdir patterns are emitted.
+        assert!(generate_test_path_patterns("/src/Makefile").is_empty());
+        // No file stem at all -> empty.
+        assert!(generate_test_path_patterns("/").is_empty());
+    }
+
+    #[test]
+    fn is_build_output_path_matches_excluded_dirs() {
+        assert!(is_build_output_path("project/node_modules/pkg/index.js"));
+        assert!(is_build_output_path("a/dist/b.js"));
+        assert!(is_build_output_path("target/debug/foo"));
+        assert!(is_build_output_path("win\\build\\out.o"));
+        assert!(!is_build_output_path("src/domain/unused_code.rs"));
+        // Substring within a component must not match.
+        assert!(!is_build_output_path("src/distribution/x.rs"));
+    }
+
+    #[test]
+    fn is_framework_entry_point_recognizes_known_names() {
+        assert!(is_framework_entry_point("main"));
+        assert!(is_framework_entry_point("activate"));
+        assert!(is_framework_entry_point("did_open"));
+        assert!(is_framework_entry_point("provideCompletionItems"));
+        assert!(!is_framework_entry_point("my_helper"));
+    }
+
+    #[test]
+    fn is_trait_impl_method_recognizes_known_names() {
+        assert!(is_trait_impl_method("fmt"));
+        assert!(is_trait_impl_method("serialize"));
+        assert!(is_trait_impl_method("into_iter"));
+        assert!(is_trait_impl_method("toJSON"));
+        assert!(!is_trait_impl_method("business_logic"));
+    }
+
+    #[test]
+    fn compute_unused_confidence_scores_by_pattern() {
+        let dummy = node_with("x", "src/lib.rs", None);
+
+        // Dynamic dispatch patterns -> very low.
+        assert_eq!(
+            compute_unused_confidence("clickHandler", false, &dummy),
+            0.2
+        );
+        assert_eq!(compute_unused_confidence("myListener", false, &dummy), 0.2);
+        // MCP tool builders / serde defaults -> lowest.
+        assert_eq!(compute_unused_confidence("search_tool", false, &dummy), 0.1);
+        assert_eq!(
+            compute_unused_confidence("default_limit", false, &dummy),
+            0.1
+        );
+        // Migration + event handler naming -> low.
+        assert_eq!(compute_unused_confidence("migrate_v2", false, &dummy), 0.2);
+        assert_eq!(compute_unused_confidence("on_click", false, &dummy), 0.2);
+        assert_eq!(compute_unused_confidence("onChange", false, &dummy), 0.2);
+        assert_eq!(
+            compute_unused_confidence("handleSubmit", false, &dummy),
+            0.2
+        );
+        // Exported vs private plain symbols.
+        assert_eq!(compute_unused_confidence("plain", true, &dummy), 0.5);
+        assert_eq!(compute_unused_confidence("plain", false, &dummy), 0.9);
+    }
+}

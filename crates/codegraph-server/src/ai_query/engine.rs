@@ -3964,7 +3964,10 @@ mod tests {
 
     #[test]
     fn split_identifier_words_handles_camel_and_snake() {
-        assert_eq!(split_identifier_words("authenticate_user"), "authenticate user");
+        assert_eq!(
+            split_identifier_words("authenticate_user"),
+            "authenticate user"
+        );
         assert_eq!(split_identifier_words("getUserById"), "get user by id");
         // The existing tokenizer keeps acronym+word runs joined (HTML|Parser is
         // NOT split) and drops 1-char tokens — known limitations worth revisiting
@@ -3986,11 +3989,13 @@ mod tests {
         // Enabled: split name words are front-loaded for the static embedder.
         let with_split =
             QueryEngine::build_embed_text(&node, 0, "getUserById", false, true, &graph);
-        assert!(with_split.starts_with("get user by id"), "got: {with_split}");
+        assert!(
+            with_split.starts_with("get user by id"),
+            "got: {with_split}"
+        );
 
         // Disabled (default): original transformer-path text is unchanged.
-        let without =
-            QueryEngine::build_embed_text(&node, 0, "getUserById", false, false, &graph);
+        let without = QueryEngine::build_embed_text(&node, 0, "getUserById", false, false, &graph);
         assert!(without.starts_with("getUserById"), "got: {without}");
         assert!(!without.contains("get user by id"));
     }
