@@ -3962,6 +3962,83 @@ mod tests {
         assert!(results.len() >= 3);
     }
 
+    #[tokio::test]
+    async fn test_detect_entry_type_test_by_path_and_none_fallback() {
+        let (engine, graph) = create_test_engine().await;
+
+        {
+            let mut g = graph.write().await;
+
+            // Non-test *names* that only classify as tests via their file path.
+            // This exercises the path-based TestEntry branch that name-based
+            // tests (test_/_test/Test prefixes) never reach.
+            let by_path = [
+                ("helperA", "/src/__tests__/a.rs"), // "/__tests__/"
+                ("helperB", "/app/foo.spec.rs"),    // ".spec."
+                ("helperC", "/pkg/bar_test.go"),    // "_test."
+                ("helperD", "/lib/test/c.rs"),      // "/test/"
+            ];
+            for (i, (name, path)) in by_path.iter().enumerate() {
+                let mut props = PropertyMap::new();
+                props.insert(
+                    "name".to_string(),
+                    codegraph::PropertyValue::String(name.to_string()),
+                );
+                props.insert(
+                    "path".to_string(),
+                    codegraph::PropertyValue::String(path.to_string()),
+                );
+                props.insert(
+                    "line_start".to_string(),
+                    codegraph::PropertyValue::Int(i as i64 + 1),
+                );
+                g.add_node(NodeType::Function, props)
+                    .expect("Failed to add path-test node");
+            }
+
+            // A plain, non-public function with a non-matching name in a
+            // non-test path: matches no entry-type branch, so detect_entry_type
+            // returns None and it must be absent from the results.
+            let mut plain = PropertyMap::new();
+            plain.insert(
+                "name".to_string(),
+                codegraph::PropertyValue::String("compute".to_string()),
+            );
+            plain.insert(
+                "path".to_string(),
+                codegraph::PropertyValue::String("/src/util.rs".to_string()),
+            );
+            plain.insert("line_start".to_string(), codegraph::PropertyValue::Int(99));
+            // visibility defaults to "public" when unset, which would classify
+            // this as PublicApi; force it private so it reaches the None branch.
+            plain.insert(
+                "visibility".to_string(),
+                codegraph::PropertyValue::String("private".to_string()),
+            );
+            g.add_node(NodeType::Function, plain)
+                .expect("Failed to add plain node");
+        }
+
+        engine.build_indexes().await;
+
+        let tests = engine.find_entry_points(&[EntryType::TestEntry]).await;
+        assert_eq!(
+            tests.len(),
+            4,
+            "all four path-based test files classify as TestEntry"
+        );
+        assert!(tests
+            .iter()
+            .all(|e| matches!(e.entry_type, EntryType::TestEntry)));
+
+        // The None-classified "compute" node appears under no entry type.
+        let all = engine.find_entry_points(&[]).await;
+        assert!(
+            !all.iter().any(|e| e.symbol.name == "compute"),
+            "unclassified function must not surface as an entry point"
+        );
+    }
+
     #[test]
     fn split_identifier_words_handles_camel_and_snake() {
         assert_eq!(
