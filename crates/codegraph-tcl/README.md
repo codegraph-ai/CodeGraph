@@ -9,7 +9,7 @@ Tcl/SDC/UPF parser for CodeGraph — extracts code entities, EDA commands, and S
 - **SDC constraint extraction**: Parses clocks, delays, timing exceptions, and false paths
 - **Full CodeParser trait**: Integrates with the codegraph parser ecosystem
 - **Complexity analysis**: Cyclomatic complexity for all procedures
-- **55 tests** across visitor, SDC, EDA, extractor, and parser modules
+- **138 tests** across visitor, SDC, EDA, extractor, mapper, and parser modules
 - **Criterion benchmarks** included
 
 ## What it Extracts
