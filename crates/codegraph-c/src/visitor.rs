@@ -1445,6 +1445,28 @@ mod tests {
     }
 
     #[test]
+    fn test_visitor_complexity_else_branch() {
+        let source = b"void test(int x) { if (x) {} else {} }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        // if_statement and else_clause each add a branch
+        assert!(complexity.branches >= 2);
+        assert!(complexity.cyclomatic_complexity > 2);
+    }
+
+    #[test]
+    fn test_visitor_complexity_max_nesting_depth() {
+        let source = b"void test(int x) { if (x) { while (x) { if (x) {} } } }";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.max_nesting_depth >= 3);
+    }
+
+    #[test]
     fn test_visitor_array_parameter_type() {
         let source = b"void process(int arr[]) {}";
         let visitor = parse_and_visit(source);
