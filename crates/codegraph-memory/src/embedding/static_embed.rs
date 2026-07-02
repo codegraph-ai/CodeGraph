@@ -311,6 +311,39 @@ mod tests {
         assert_eq!(cfg.hidden_dim, Some(256));
     }
 
+    #[test]
+    fn from_pretrained_missing_config_errors() {
+        // An empty directory fails at the very first step: reading config.json.
+        // The load tests above skip when the real models are absent, so this
+        // read-failure arm (and its "read config.json" message prefix) was
+        // otherwise unexercised.
+        let dir = tempfile::TempDir::new().unwrap();
+        let Err(err) = StaticEmbedding::from_pretrained(dir.path()) else {
+            panic!("expected an error loading from an empty directory");
+        };
+        assert!(
+            err.to_string().contains("read config.json"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_pretrained_missing_tokenizer_errors() {
+        // With a valid config.json present, loading advances past the config
+        // read/parse and fails at the next step: loading tokenizer.json. This
+        // reaches the tokenizer-load error arm that the missing-config test
+        // short-circuits before and the model-present tests never hit.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("config.json"), "{}").unwrap();
+        let Err(err) = StaticEmbedding::from_pretrained(dir.path()) else {
+            panic!("expected an error with no tokenizer.json present");
+        };
+        assert!(
+            err.to_string().contains("load tokenizer.json"),
+            "unexpected error: {err}"
+        );
+    }
+
     fn static_dir(name: &str) -> std::path::PathBuf {
         std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
             .join(".codegraph/static_models")
