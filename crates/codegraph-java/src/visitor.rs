@@ -1774,4 +1774,21 @@ public class Holder {
         assert_eq!(visitor.imports.len(), 1);
         assert_eq!(visitor.imports[0].importer, "default");
     }
+
+    #[test]
+    fn test_qualify_name_no_package_verbatim() {
+        // With no current_package, qualify_name returns the bare name unchanged
+        let visitor = JavaVisitor::new(b"");
+        assert!(visitor.current_package.is_none());
+        assert_eq!(visitor.qualify_name("Widget"), "Widget");
+    }
+
+    #[test]
+    fn test_qualify_name_prefixes_dotted_package() {
+        // With a current_package set, qualify_name joins package and name with a dot,
+        // preserving the package's own dotted segments verbatim
+        let mut visitor = JavaVisitor::new(b"");
+        visitor.current_package = Some("com.example.app".to_string());
+        assert_eq!(visitor.qualify_name("Widget"), "com.example.app.Widget");
+    }
 }
