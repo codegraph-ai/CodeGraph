@@ -314,6 +314,47 @@ mod tests {
     }
 
     #[test]
+    fn collection_tool_inherits_sort_only() {
+        // Analysis/context tools that return unordered collections get the
+        // collection profile: sort arrays, but no rounding, no dropping, and
+        // no extra volatile stripping (distinguishing it from search/similarity).
+        let p = default_for("codegraph_analyze_complexity");
+        assert_eq!(p.sort_arrays, Some(true));
+        assert_eq!(p.float_decimals, None);
+        assert!(p.drop_where.is_empty());
+        assert!(p.extra_volatile.is_empty());
+        assert!(p.keep_volatile.is_empty());
+    }
+
+    #[test]
+    fn memory_tool_strips_ids_and_timestamps() {
+        // Memory tools carry per-run ids/timestamps that must be treated as
+        // volatile in addition to sorting arrays.
+        let p = default_for("codegraph_memory_store");
+        assert_eq!(p.sort_arrays, Some(true));
+        for key in ["id", "created_at", "updated_at", "timestamp"] {
+            assert!(
+                p.extra_volatile.iter().any(|s| s == key),
+                "memory profile must mark {key} volatile"
+            );
+        }
+    }
+
+    #[test]
+    fn git_tool_strips_hashes_and_dates() {
+        // Git history tools return commit hashes and dates that change every
+        // run even with pinned author dates; the git profile strips them.
+        let p = default_for("codegraph_mine_git_history");
+        assert_eq!(p.sort_arrays, Some(true));
+        for key in ["sha", "commit_hash", "date", "queryTime"] {
+            assert!(
+                p.extra_volatile.iter().any(|s| s == key),
+                "git profile must mark {key} volatile"
+            );
+        }
+    }
+
+    #[test]
     fn merge_overlay_wins_for_some() {
         let base = NormalizeOpts {
             sort_arrays: Some(true),
