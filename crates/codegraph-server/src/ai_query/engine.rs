@@ -4249,4 +4249,54 @@ mod tests {
             "f: fn f()"
         );
     }
+
+    #[test]
+    fn resolve_edge_types_returns_forward_edge_types() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "a"))
+            .unwrap();
+        let b = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "b"))
+            .unwrap();
+        graph
+            .add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        graph
+            .add_edge(a, b, EdgeType::Uses, PropertyMap::new())
+            .unwrap();
+
+        // Forward edges a->b are found first, so their types are returned and
+        // the reverse-direction fallback scan is never consulted.
+        let types = QueryEngine::resolve_edge_types(&graph, a, b);
+        assert_eq!(types.len(), 2);
+        assert!(types.contains(&"Calls".to_string()));
+        assert!(types.contains(&"Uses".to_string()));
+    }
+
+    #[test]
+    fn resolve_edge_types_falls_back_to_reverse_then_empty() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "a"))
+            .unwrap();
+        let b = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "b"))
+            .unwrap();
+        // Only a reverse edge b->a exists: the forward scan is empty, so the
+        // fallback branch reports the reverse edge's type.
+        graph
+            .add_edge(b, a, EdgeType::Imports, PropertyMap::new())
+            .unwrap();
+        assert_eq!(
+            QueryEngine::resolve_edge_types(&graph, a, b),
+            vec!["Imports".to_string()]
+        );
+
+        // A pair with no edges in either direction yields an empty vec.
+        let c = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "c"))
+            .unwrap();
+        assert!(QueryEngine::resolve_edge_types(&graph, a, c).is_empty());
+    }
 }
