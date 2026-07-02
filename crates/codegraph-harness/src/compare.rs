@@ -399,6 +399,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_tol_accepts_well_formed_sentinel_object() {
+        let band = parse_tol(&json!({TOL_SENTINEL: {"value": 10.0, "tol": 0.5}}))
+            .expect("well-formed sentinel should parse");
+        assert_eq!(band.value, 10.0);
+        assert_eq!(band.tol, 0.5);
+    }
+
+    #[test]
+    fn parse_tol_rejects_non_object_and_wrong_arity() {
+        // Not an object at all.
+        assert!(parse_tol(&json!(5)).is_none());
+        assert!(parse_tol(&json!("x")).is_none());
+        // Object but not a single key.
+        assert!(parse_tol(&json!({})).is_none());
+        assert!(parse_tol(&json!({TOL_SENTINEL: {"value": 1.0, "tol": 0.1}, "extra": 1})).is_none());
+    }
+
+    #[test]
+    fn parse_tol_rejects_bad_sentinel_and_missing_fields() {
+        // Single key but not the sentinel.
+        assert!(parse_tol(&json!({"other": {"value": 1.0, "tol": 0.1}})).is_none());
+        // Sentinel value is not an object.
+        assert!(parse_tol(&json!({TOL_SENTINEL: 3})).is_none());
+        // Missing / non-numeric value.
+        assert!(parse_tol(&json!({TOL_SENTINEL: {"tol": 0.1}})).is_none());
+        assert!(parse_tol(&json!({TOL_SENTINEL: {"value": "x", "tol": 0.1}})).is_none());
+        // Missing / non-numeric tol.
+        assert!(parse_tol(&json!({TOL_SENTINEL: {"value": 1.0}})).is_none());
+        assert!(parse_tol(&json!({TOL_SENTINEL: {"value": 1.0, "tol": "x"}})).is_none());
+    }
+
+    #[test]
+    fn short_kind_names_every_json_variant() {
+        assert_eq!(short_kind(&json!(null)), "null");
+        assert_eq!(short_kind(&json!(true)), "bool");
+        assert_eq!(short_kind(&json!(42)), "number");
+        assert_eq!(short_kind(&json!("s")), "string");
+        assert_eq!(short_kind(&json!([1, 2])), "array");
+        assert_eq!(short_kind(&json!({"a": 1})), "object");
+    }
+
+    #[test]
     fn diff_truncates_long_multibyte_scalar_without_panicking() {
         // 40 euro signs -> ~122 bytes as a JSON string, over the 80-byte
         // truncate_for_diff threshold. Byte 77 lands mid-char, so the
