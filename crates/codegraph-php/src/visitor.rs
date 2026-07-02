@@ -1833,6 +1833,109 @@ function loadFile(string $path): string {
         );
     }
 
+    #[test]
+    fn test_visitor_complexity_word_logical_operators() {
+        let source = b"<?php\nfunction f(bool $a, bool $b): bool { return $a and $b or $a; }";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.logical_operators >= 2,
+            "expected word logical operators counted, got {}",
+            complexity.logical_operators
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_do_while_loop() {
+        let source = b"<?php
+function countUp(int $n): int {
+    $i = 0;
+    do {
+        $i++;
+    } while ($i < $n);
+    return $i;
+}
+";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.loops >= 1,
+            "expected do-while counted as loop, got {}",
+            complexity.loops
+        );
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_visitor_complexity_try_finally() {
+        let source = b"<?php
+function withCleanup(): void {
+    try {
+        doWork();
+    } finally {
+        cleanup();
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.exception_handlers >= 1,
+            "expected finally counted as exception handler, got {}",
+            complexity.exception_handlers
+        );
+    }
+
+    #[test]
+    fn test_visitor_complexity_switch_cases() {
+        let source = b"<?php
+function describe(int $x): string {
+    switch ($x) {
+        case 1:
+            return 'one';
+        case 2:
+            return 'two';
+        default:
+            return 'many';
+    }
+}
+";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.branches >= 3,
+            "expected 2 cases + default counted as branches, got {}",
+            complexity.branches
+        );
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_visitor_complexity_match_expression() {
+        let source = b"<?php
+function label(int $x): string {
+    return match ($x) {
+        1 => 'one',
+        2 => 'two',
+        default => 'many',
+    };
+}
+";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.branches >= 2,
+            "expected match conditional arms counted as branches, got {}",
+            complexity.branches
+        );
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
     // --- Call attribution tests ---
 
     #[test]
