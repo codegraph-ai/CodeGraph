@@ -208,6 +208,26 @@ mod tests {
     }
 
     #[test]
+    fn from_bincode_error_yields_bincode_variant() {
+        // Two bytes cannot decode into a u64, producing a bincode::Error that the
+        // #[from] impl lifts into the Bincode variant with the "Serialization error:" prefix.
+        let bincode_err = bincode::deserialize::<u64>(&[0u8, 1]).unwrap_err();
+        let err: MemoryError = bincode_err.into();
+        assert!(matches!(err, MemoryError::Bincode(_)));
+        assert!(err.to_string().starts_with("Serialization error: "));
+    }
+
+    #[test]
+    fn from_msgpack_decode_error_yields_variant() {
+        // 0xc1 is a reserved MessagePack marker that never decodes, so rmp_serde
+        // returns a decode error the #[from] impl maps to MessagePackDecode.
+        let mp_err = rmp_serde::from_slice::<u64>(&[0xc1u8]).unwrap_err();
+        let err: MemoryError = mp_err.into();
+        assert!(matches!(err, MemoryError::MessagePackDecode(_)));
+        assert!(err.to_string().starts_with("MessagePack decode error: "));
+    }
+
+    #[test]
     fn result_alias_carries_memory_error() {
         let ok: Result<u32> = Ok(7);
         assert_eq!(ok.unwrap(), 7);
