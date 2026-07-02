@@ -1025,6 +1025,67 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_visibility_explicit_modifiers() {
+        let visitor = CSharpVisitor::new(b"");
+        // Each simple access modifier is returned verbatim.
+        assert_eq!(
+            visitor.extract_visibility(&["public".to_string()]),
+            "public"
+        );
+        assert_eq!(
+            visitor.extract_visibility(&["private".to_string()]),
+            "private"
+        );
+        assert_eq!(
+            visitor.extract_visibility(&["protected".to_string()]),
+            "protected"
+        );
+        assert_eq!(
+            visitor.extract_visibility(&["internal".to_string()]),
+            "internal"
+        );
+    }
+
+    #[test]
+    fn test_extract_visibility_combined_modifiers() {
+        let visitor = CSharpVisitor::new(b"");
+        // The two combined access levels are recognised as single units.
+        assert_eq!(
+            visitor.extract_visibility(&["protected internal".to_string()]),
+            "protected internal"
+        );
+        assert_eq!(
+            visitor.extract_visibility(&["private protected".to_string()]),
+            "private protected"
+        );
+    }
+
+    #[test]
+    fn test_extract_visibility_first_match_wins_skips_noise() {
+        let visitor = CSharpVisitor::new(b"");
+        // Non-access modifiers are skipped and the first access modifier wins.
+        assert_eq!(
+            visitor.extract_visibility(&[
+                "static".to_string(),
+                "public".to_string(),
+                "private".to_string(),
+            ]),
+            "public"
+        );
+    }
+
+    #[test]
+    fn test_extract_visibility_defaults_to_internal() {
+        let visitor = CSharpVisitor::new(b"");
+        // No modifiers, or only non-access modifiers, fall back to C#'s internal default.
+        assert_eq!(visitor.extract_visibility(&[]), "internal");
+        assert_eq!(
+            visitor.extract_visibility(&["static".to_string(), "sealed".to_string()]),
+            "internal"
+        );
+    }
+
+    #[test]
     fn test_visitor_class_extraction() {
         let source = b"public class Person { public string Name; }";
         let visitor = parse_and_visit(source);
