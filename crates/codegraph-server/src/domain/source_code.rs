@@ -111,6 +111,24 @@ mod tests {
     }
 
     #[test]
+    fn missing_end_line_with_start_present_returns_none() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // path + line_start present, but line_end absent: passes the
+        // line_start_opt `?` and must short-circuit at line_end_opt `?`.
+        let n = add_node(
+            &mut g,
+            props_with(&[
+                (
+                    "path",
+                    PropertyValue::String("/tmp/whatever.rs".to_string()),
+                ),
+                ("line_start", PropertyValue::Int(1)),
+            ]),
+        );
+        assert_eq!(get_symbol_source(&g, n), None);
+    }
+
+    #[test]
     fn reads_line_range_from_disk() {
         let mut file = tempfile::NamedTempFile::new().expect("temp file");
         writeln!(file, "line one\nline two\nline three\nline four").expect("write");
