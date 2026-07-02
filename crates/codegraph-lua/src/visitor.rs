@@ -770,4 +770,43 @@ mod tests {
         assert_eq!(visitor.imports.len(), 1);
         assert_eq!(visitor.imports[0].imported, "mymod");
     }
+
+    #[test]
+    fn test_extract_require_from_text_rejects_malformed() {
+        // These malformed forms all reach extract_require_from_text's guard
+        // branches (no `require(` token, non-quote first char, unterminated
+        // quote) yet never appear in the valid-source parse tests, so each
+        // rejection arm is exercised here in isolation.
+        for text in [
+            "require (\"json\")", // space before paren: no `require(` substring
+            "require(mymod)",     // bare identifier arg: first char is not a quote
+            "require(\"mymod",    // unterminated quote: closing quote never found
+            "require()",          // empty arg list: first char is `)`, not a quote
+        ] {
+            let mut visitor = LuaVisitor::new(b"");
+            visitor.extract_require_from_text(text);
+            assert!(
+                visitor.imports.is_empty(),
+                "malformed require `{text}` should push no import"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_require_from_text_edge_cases() {
+        // Empty quoted module name is accepted verbatim (empty `imported`).
+        let mut empty = LuaVisitor::new(b"");
+        empty.extract_require_from_text("require(\"\")");
+        assert_eq!(empty.imports.len(), 1);
+        assert_eq!(empty.imports[0].imported, "");
+        assert_eq!(empty.imports[0].importer, "main");
+
+        // No loop: only the first require in the text is extracted; the
+        // recursion over function_call nodes (not this helper) is what
+        // catches additional requires in real source.
+        let mut multi = LuaVisitor::new(b"");
+        multi.extract_require_from_text("require(\"a\"), require(\"b\")");
+        assert_eq!(multi.imports.len(), 1);
+        assert_eq!(multi.imports[0].imported, "a");
+    }
 }
