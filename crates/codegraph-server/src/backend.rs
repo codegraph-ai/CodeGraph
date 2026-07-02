@@ -4139,6 +4139,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_find_node_at_position_fallback_skips_col_before_start() {
+        use codegraph::PropertyValue;
+        let backend = create_test_backend();
+        let path = Path::new("/test/file.rs");
+
+        // Node spans lines 5..25 but starts at column 8 on its first line.
+        let func_id = {
+            let mut g = backend.graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert("name".to_string(), PropertyValue::String("f".to_string()));
+            props.insert(
+                "path".to_string(),
+                PropertyValue::String("/test/file.rs".to_string()),
+            );
+            props.insert("line_start".to_string(), PropertyValue::Int(5));
+            props.insert("line_end".to_string(), PropertyValue::Int(25));
+            props.insert("col_start".to_string(), PropertyValue::Int(8));
+            props.insert("col_end".to_string(), PropertyValue::Int(50));
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+        // Index the node over lines 10..20 so the exact-match lookup misses line 5
+        // and we fall through to the graph-scan branch.
+        add_func_to_index(&backend, path, func_id, "f", 10, 20);
+
+        let graph = backend.graph.read().await;
+        // Line 5 (position.line + 1), column 3 < col_start (8) -> the col-before-start
+        // `continue` fires, leaving no match.
+        let position = Position {
+            line: 4,
+            character: 3,
+        };
+        let result = backend.find_node_at_position(&graph, path, position);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_find_node_at_position_fallback_skips_col_after_end() {
+        use codegraph::PropertyValue;
+        let backend = create_test_backend();
+        let path = Path::new("/test/file.rs");
+
+        // Node spans lines 5..25 and ends at column 50 on its last line.
+        let func_id = {
+            let mut g = backend.graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert("name".to_string(), PropertyValue::String("f".to_string()));
+            props.insert(
+                "path".to_string(),
+                PropertyValue::String("/test/file.rs".to_string()),
+            );
+            props.insert("line_start".to_string(), PropertyValue::Int(5));
+            props.insert("line_end".to_string(), PropertyValue::Int(25));
+            props.insert("col_start".to_string(), PropertyValue::Int(0));
+            props.insert("col_end".to_string(), PropertyValue::Int(50));
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+        // Index over lines 10..20 so line 25 misses the exact-match lookup.
+        add_func_to_index(&backend, path, func_id, "f", 10, 20);
+
+        let graph = backend.graph.read().await;
+        // Line 25 (position.line + 1), column 60 > col_end (50) -> the col-after-end
+        // `continue` fires, leaving no match.
+        let position = Position {
+            line: 24,
+            character: 60,
+        };
+        let result = backend.find_node_at_position(&graph, path, position);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn test_find_nearest_node_exact_match() {
         let (backend, func_id, _) = create_backend_with_nodes().await;
 
