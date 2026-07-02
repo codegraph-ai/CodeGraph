@@ -349,7 +349,58 @@ mod tests {
             ..Default::default()
         };
         let merged = NormalizeOpts::merge(base, overlay);
-        assert_eq!(merged.extra_volatile, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            merged.extra_volatile,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn family_of_buckets_every_family_including_prefix_and_fallback() {
+        // family_of has no direct unit test: report.rs only ever constructs
+        // CaseRecord with a hand-picked Family, so the list-membership and
+        // prefix arms here were never exercised. Pin one representative tool
+        // per family, both security/memory prefix arms, and the Other fallback.
+        assert_eq!(family_of("codegraph_symbol_search"), Family::Search);
+        assert_eq!(family_of("codegraph_find_similar"), Family::Similarity);
+        assert_eq!(family_of("codegraph_get_callers"), Family::Navigation);
+        assert_eq!(
+            family_of("codegraph_analyze_impact"),
+            Family::AnalysisCollection
+        );
+        assert_eq!(family_of("codegraph_security_scan"), Family::Security);
+        // Prefix arm: a security tool absent from SECURITY_TOOLS.
+        assert_eq!(
+            family_of("codegraph_security_check_jwt_completeness"),
+            Family::Security
+        );
+        assert_eq!(family_of("codegraph_memory_store"), Family::Memory);
+        // Prefix arm: a memory tool absent from MEMORY_TOOLS.
+        assert_eq!(
+            family_of("codegraph_memory_export_snapshot"),
+            Family::Memory
+        );
+        assert_eq!(family_of("codegraph_mine_git_history"), Family::Git);
+        assert_eq!(family_of("codegraph_index_directory"), Family::Indexing);
+        // Unlisted, non-prefixed tool falls through to Other.
+        assert_eq!(family_of("codegraph_made_up_tool"), Family::Other);
+    }
+
+    #[test]
+    fn family_as_str_pins_every_wire_name() {
+        // as_str is the reporting/serialisation contract (drift snapshots key
+        // on it). Only "search" and "memory" were reached via report.rs; pin
+        // all nine, notably AnalysisCollection -> "analysis" (name diverges
+        // from the variant) so a rename is caught here.
+        assert_eq!(Family::Search.as_str(), "search");
+        assert_eq!(Family::Similarity.as_str(), "similarity");
+        assert_eq!(Family::Navigation.as_str(), "navigation");
+        assert_eq!(Family::AnalysisCollection.as_str(), "analysis");
+        assert_eq!(Family::Security.as_str(), "security");
+        assert_eq!(Family::Memory.as_str(), "memory");
+        assert_eq!(Family::Git.as_str(), "git");
+        assert_eq!(Family::Indexing.as_str(), "indexing");
+        assert_eq!(Family::Other.as_str(), "other");
     }
 
     #[test]
