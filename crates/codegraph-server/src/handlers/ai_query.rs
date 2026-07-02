@@ -1928,4 +1928,89 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    // ==========================================
+    // Response Conversion Helper Tests
+    // ==========================================
+
+    #[test]
+    fn test_symbol_info_to_response_maps_all_fields() {
+        let info = crate::ai_query::SymbolInfo {
+            name: "findUser".to_string(),
+            kind: "function".to_string(),
+            location: crate::ai_query::SymbolLocation {
+                file: "src/db.rs".to_string(),
+                line: 10,
+                column: 4,
+                end_line: 20,
+                end_column: 1,
+            },
+            signature: Some("fn findUser(id: u64) -> User".to_string()),
+            docstring: Some("Looks up a user by id".to_string()),
+            is_public: true,
+            visibility: "pub(crate)".to_string(),
+        };
+
+        let resp = symbol_info_to_response(&info);
+
+        assert_eq!(resp.name, "findUser");
+        assert_eq!(resp.kind, "function");
+        assert_eq!(resp.location.file, "src/db.rs");
+        assert_eq!(resp.location.line, 10);
+        assert_eq!(resp.location.column, 4);
+        assert_eq!(resp.location.end_line, 20);
+        assert_eq!(resp.location.end_column, 1);
+        assert_eq!(
+            resp.signature.as_deref(),
+            Some("fn findUser(id: u64) -> User")
+        );
+        assert_eq!(resp.docstring.as_deref(), Some("Looks up a user by id"));
+        assert!(resp.is_public);
+        assert_eq!(resp.visibility, "pub(crate)");
+    }
+
+    #[test]
+    fn test_call_info_to_response_maps_fields_and_stringifies_node_id() {
+        let info = crate::ai_query::CallInfo {
+            node_id: 42,
+            symbol: crate::ai_query::SymbolInfo {
+                name: "callee".to_string(),
+                kind: "method".to_string(),
+                location: crate::ai_query::SymbolLocation {
+                    file: "src/svc.rs".to_string(),
+                    line: 5,
+                    column: 0,
+                    end_line: 8,
+                    end_column: 2,
+                },
+                signature: None,
+                docstring: None,
+                is_public: false,
+                visibility: "private".to_string(),
+            },
+            call_site: crate::ai_query::SymbolLocation {
+                file: "src/main.rs".to_string(),
+                line: 100,
+                column: 12,
+                end_line: 100,
+                end_column: 30,
+            },
+            depth: 3,
+            // These ops-struct fields are intentionally dropped by the response mapping.
+            via_ops_struct: Some("net_device_ops".to_string()),
+            ops_field: Some("ndo_open".to_string()),
+        };
+
+        let resp = call_info_to_response(info);
+
+        assert_eq!(resp.node_id, "42");
+        assert_eq!(resp.depth, 3);
+        assert_eq!(resp.symbol.name, "callee");
+        assert!(!resp.symbol.is_public);
+        assert_eq!(resp.call_site.file, "src/main.rs");
+        assert_eq!(resp.call_site.line, 100);
+        assert_eq!(resp.call_site.column, 12);
+        assert_eq!(resp.call_site.end_line, 100);
+        assert_eq!(resp.call_site.end_column, 30);
+    }
 }
