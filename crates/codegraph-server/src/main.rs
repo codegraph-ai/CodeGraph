@@ -489,6 +489,12 @@ async fn run() {
 #[cfg(test)]
 mod crash_breadcrumb_tests {
     use super::{classify_panic, write_crash_breadcrumb};
+    use std::sync::Mutex;
+
+    // Environment variables are process-global: any test in this binary that
+    // mutates HOME/USERPROFILE must hold this lock. (The library's shared
+    // `test_env` lock covers the lib test binary, a separate process.)
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn classify_panic_maps_message_class() {
@@ -573,6 +579,7 @@ mod crash_breadcrumb_tests {
 
     #[test]
     fn breadcrumb_roundtrip_writes_parseable_json() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Isolate HOME to a temp dir so we never touch the real ~/.codegraph.
         let tmp = std::env::temp_dir().join(format!("cg-crash-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

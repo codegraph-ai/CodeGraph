@@ -68,11 +68,11 @@ impl Drop for PhaseGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     // All tests here mutate the process-global HOME/USERPROFILE and write to the
-    // same PID-keyed marker file, so they must not run concurrently.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // same PID-keyed marker file, so they must not run concurrently with any
+    // other env-mutating test in this binary.
+    use crate::test_env;
 
     /// Path of this process's marker file under a given fake home.
     fn marker_path(home: &std::path::Path) -> PathBuf {
@@ -83,7 +83,7 @@ mod tests {
     /// Run `f` with HOME/USERPROFILE pointed at a fresh temp dir, restoring the
     /// previous values afterward. Returns the temp dir so callers can inspect it.
     fn with_isolated_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_env::lock();
         let tmp = std::env::temp_dir().join(format!("cg-phase-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let prev_home = std::env::var_os("HOME");
@@ -175,7 +175,7 @@ mod tests {
     fn mark_falls_back_to_userprofile_when_home_absent() {
         // Windows path: HOME is unset, so codegraph_dir() must fall through the
         // `.or_else` arm to USERPROFILE rather than short-circuiting on HOME.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_env::lock();
         let tmp = std::env::temp_dir().join(format!("cg-phase-up-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let prev_home = std::env::var_os("HOME");
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn mark_without_home_is_noop() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_env::lock();
         let prev_home = std::env::var_os("HOME");
         let prev_up = std::env::var_os("USERPROFILE");
         std::env::remove_var("HOME");

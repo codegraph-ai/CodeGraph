@@ -394,11 +394,10 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::sync::Mutex;
 
-        /// Serializes the env-mutating tests so a concurrent test never observes
-        /// a half-applied `CODEGRAPH_ENGINE_IDLE_SECS`/`HOME` value.
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        // Serializes the env-mutating tests so a concurrent test never observes
+        // a half-applied `CODEGRAPH_ENGINE_IDLE_SECS`/`HOME` value.
+        use crate::test_env;
 
         // parse_attach ---------------------------------------------------------
 
@@ -454,7 +453,7 @@ mod imp {
 
         #[test]
         fn idle_timeout_secs_defaults_when_unset() {
-            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_env::lock();
             let prev = std::env::var_os("CODEGRAPH_ENGINE_IDLE_SECS");
             std::env::remove_var("CODEGRAPH_ENGINE_IDLE_SECS");
             assert_eq!(idle_timeout_secs(), 1800);
@@ -465,7 +464,7 @@ mod imp {
 
         #[test]
         fn idle_timeout_secs_parses_valid_override() {
-            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_env::lock();
             let prev = std::env::var_os("CODEGRAPH_ENGINE_IDLE_SECS");
             std::env::set_var("CODEGRAPH_ENGINE_IDLE_SECS", "42");
             assert_eq!(idle_timeout_secs(), 42);
@@ -477,7 +476,7 @@ mod imp {
 
         #[test]
         fn idle_timeout_secs_falls_back_on_unparseable_value() {
-            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_env::lock();
             let prev = std::env::var_os("CODEGRAPH_ENGINE_IDLE_SECS");
             std::env::set_var("CODEGRAPH_ENGINE_IDLE_SECS", "not-a-number");
             assert_eq!(idle_timeout_secs(), 1800);
@@ -491,7 +490,7 @@ mod imp {
 
         #[test]
         fn model_cache_dir_joins_codegraph_fastembed_cache_under_home() {
-            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_env::lock();
             let prev = std::env::var_os("HOME");
             std::env::set_var("HOME", "/tmp/cg-home-fixture");
             let dir = model_cache_dir();
