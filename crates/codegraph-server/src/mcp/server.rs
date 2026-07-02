@@ -1387,7 +1387,7 @@ impl McpServer {
     pub async fn run(&mut self) -> std::io::Result<()> {
         let mut transport = AsyncStdioTransport::new();
         let start_time = std::time::Instant::now();
-        let mut tool_call_count = 0u64;
+        let tool_call_count = 0u64;
 
         tracing::info!("MCP server starting...");
         emit_tel(serde_json::json!({
@@ -4010,8 +4010,7 @@ impl McpServer {
                     let diff_text = String::from_utf8_lossy(&out.stdout);
                     let mut current_file: Option<String> = None;
                     for line in diff_text.lines() {
-                        if line.starts_with("+++ b/") {
-                            let rel = &line[6..];
+                        if let Some(rel) = line.strip_prefix("+++ b/") {
                             current_file = Some(
                                 std::path::Path::new(&workspace_root)
                                     .join(rel)
@@ -4058,9 +4057,7 @@ impl McpServer {
                         .iter_nodes()
                         .filter(|(_, n)| {
                             n.node_type == codegraph::NodeType::Function
-                                && n.properties
-                                    .get_string("path")
-                                    .map_or(false, |p| p == file.as_str())
+                                && (n.properties.get_string("path") == Some(file.as_str()))
                         })
                         .map(|(id, n)| {
                             let name = crate::domain::node_props::name(n).to_string();
@@ -4155,7 +4152,7 @@ impl McpServer {
                         let fn_is_test = graph
                             .get_node(*node_id)
                             .ok()
-                            .is_some_and(|n| crate::domain::node_props::is_test(n))
+                            .is_some_and(crate::domain::node_props::is_test)
                             || func_name.to_lowercase().starts_with("test_")
                             || func_name.to_lowercase().contains("_test")
                             || changed_rel[idx].contains("/tests/")

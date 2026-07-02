@@ -127,8 +127,10 @@ mod tests {
     fn test_validate_rejects_zero_max_file_size() {
         // The max_file_size == 0 guard (distinct from the num_threads guard)
         // returns its own error message.
-        let mut config = ParserConfig::default();
-        config.max_file_size = 0;
+        let config = ParserConfig {
+            max_file_size: 0,
+            ..Default::default()
+        };
         assert_eq!(
             config.validate().unwrap_err(),
             "max_file_size must be greater than 0"
@@ -152,8 +154,10 @@ mod tests {
         // pre-existing test_validate only asserted `.is_err()` here, leaving the
         // exact wording unpinned (unlike the max_file_size / file_extensions
         // guards, whose messages are asserted verbatim above).
-        let mut config = ParserConfig::default();
-        config.num_threads = Some(0);
+        let config = ParserConfig {
+            num_threads: Some(0),
+            ..Default::default()
+        };
         assert_eq!(
             config.validate().unwrap_err(),
             "num_threads must be greater than 0"

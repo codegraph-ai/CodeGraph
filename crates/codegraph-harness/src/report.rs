@@ -306,6 +306,7 @@ pub fn record_from_result(case: &crate::case::TestCase, result: &CaseResult) -> 
 /// - `languages/<lang>/<file>` — single-file fixtures
 /// - `multifile/<lang>_<scenario>/...` — multi-file fixtures, where
 ///   `<lang>` is everything before the first `_` of the directory name
+///
 /// Falls back to `unknown` for off-convention paths.
 fn language_from_fixture(fixture: &str) -> String {
     let parts: Vec<&str> = fixture.split('/').collect();

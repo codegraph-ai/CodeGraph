@@ -6,7 +6,7 @@
 use codegraph_parser_api::{
     truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
     FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
-    TraitEntity, BODY_PREFIX_MAX_CHARS,
+    TraitEntity,
 };
 use tree_sitter::Node;
 
@@ -180,7 +180,7 @@ impl<'a> JavaVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -306,7 +306,7 @@ impl<'a> JavaVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let enum_entity = ClassEntity {
@@ -381,7 +381,7 @@ impl<'a> JavaVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let record_entity = ClassEntity {
@@ -454,7 +454,7 @@ impl<'a> JavaVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| truncate_body_prefix(t))
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -930,6 +930,7 @@ impl<'a> JavaVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> JavaVisitor<'_> {
         use tree_sitter::Parser;

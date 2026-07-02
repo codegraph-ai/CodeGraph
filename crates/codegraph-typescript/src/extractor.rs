@@ -20,10 +20,7 @@ fn first_error_position(root: Node<'_>, source: &str) -> Option<(usize, usize, S
         if node.is_error() || node.is_missing() {
             let start = node.start_position();
             let byte_range = node.start_byte()..node.end_byte().min(node.start_byte() + 40);
-            let snippet = source
-                .get(byte_range)
-                .unwrap_or("")
-                .replace('\n', "\\n");
+            let snippet = source.get(byte_range).unwrap_or("").replace('\n', "\\n");
             return Some((start.row, start.column, snippet));
         }
         for child in node.children(&mut cursor) {

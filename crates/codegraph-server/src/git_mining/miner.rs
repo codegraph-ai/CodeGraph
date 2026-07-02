@@ -765,7 +765,8 @@ mod tests {
     #[test]
     fn test_should_process_pattern_each_toggled_kind() {
         let (_dir, miner) = init_repo();
-        let cases: Vec<(CommitPattern, fn(&mut MiningConfig))> = vec![
+        type Toggle = fn(&mut MiningConfig);
+        let cases: Vec<(CommitPattern, Toggle)> = vec![
             (CommitPattern::ArchitecturalDecision, |c| {
                 c.mine_arch_decisions = false
             }),

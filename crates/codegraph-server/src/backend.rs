@@ -1058,7 +1058,6 @@ impl LanguageServer for CodeGraphBackend {
 
         let folders = self.workspace_folders.read().await.clone();
         let config = self.config.read().await.clone();
-        let mut total_indexed = 0;
         let mut files_parsed = 0usize;
 
         // Try to load persisted graph from previous session (RocksDB).
@@ -1137,7 +1136,6 @@ impl LanguageServer for CodeGraphBackend {
                 .indexer
                 .index_workspace(&self.graph, &paths_to_index, &idx_config)
                 .await;
-            total_indexed = result.total_files;
             files_parsed = result.files_parsed;
 
             if result.files_parsed > 0 {

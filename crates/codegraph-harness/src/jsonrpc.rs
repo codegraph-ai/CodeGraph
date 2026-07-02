@@ -35,11 +35,20 @@ impl McpClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let mut child = cmd.spawn().with_context(|| {
-            format!("spawn {} --mcp --workspace {}", binary.display(), workspace.display())
+            format!(
+                "spawn {} --mcp --workspace {}",
+                binary.display(),
+                workspace.display()
+            )
         })?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
-        let mut client = McpClient { child, stdin, stdout, next_id: 1 };
+        let mut client = McpClient {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        };
         client.handshake()?;
         Ok(client)
     }

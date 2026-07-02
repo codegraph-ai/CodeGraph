@@ -257,7 +257,7 @@ mod tests {
         }
     }
 
-    fn prop<'a>(graph: &'a CodeGraph, id: NodeId, key: &str) -> Option<PropertyValue> {
+    fn prop(graph: &CodeGraph, id: NodeId, key: &str) -> Option<PropertyValue> {
         graph.get_node(id).unwrap().properties.get(key).cloned()
     }
 

@@ -63,14 +63,26 @@ pub fn compare(actual: &Value, expected: &Value, mode: MatchMode) -> Result<Comp
     let mut errors = Vec::new();
     walk(&mut path, actual, expected, mode, &mut errors);
     if errors.is_empty() {
-        Ok(Comparison { passed: true, diff: String::new() })
+        Ok(Comparison {
+            passed: true,
+            diff: String::new(),
+        })
     } else {
         let diff = format_diff(&errors, actual, expected, mode);
-        Ok(Comparison { passed: false, diff })
+        Ok(Comparison {
+            passed: false,
+            diff,
+        })
     }
 }
 
-fn walk(path: &mut String, actual: &Value, expected: &Value, mode: MatchMode, errors: &mut Vec<String>) {
+fn walk(
+    path: &mut String,
+    actual: &Value,
+    expected: &Value,
+    mode: MatchMode,
+    errors: &mut Vec<String>,
+) {
     // Tolerance sentinel: `expected` is `{ "__tol__": { value, tol } }`.
     // Recognised at every depth, every match mode.
     if let Some(band) = parse_tol(expected) {
@@ -99,13 +111,7 @@ fn walk(path: &mut String, actual: &Value, expected: &Value, mode: MatchMode, er
                 path.push_str(k);
                 match a.get(k) {
                     None => errors.push(format!("{}: missing key", path)),
-                    Some(av) => {
-                        if mode == MatchMode::CountOnly {
-                            walk(path, av, ev, mode, errors);
-                        } else {
-                            walk(path, av, ev, mode, errors);
-                        }
-                    }
+                    Some(av) => walk(path, av, ev, mode, errors),
                 }
                 path.truncate(len);
             }
@@ -121,12 +127,7 @@ fn walk(path: &mut String, actual: &Value, expected: &Value, mode: MatchMode, er
         (Value::Array(a), Value::Array(e)) => match mode {
             MatchMode::Exact | MatchMode::Structural | MatchMode::CountOnly => {
                 if a.len() != e.len() {
-                    errors.push(format!(
-                        "{}: array length {} != {}",
-                        path,
-                        a.len(),
-                        e.len()
-                    ));
+                    errors.push(format!("{}: array length {} != {}", path, a.len(), e.len()));
                     return;
                 }
                 if mode == MatchMode::CountOnly {
@@ -242,7 +243,10 @@ fn format_diff(errors: &[String], actual: &Value, expected: &Value, mode: MatchM
 }
 
 fn prefix_lines(s: &str, prefix: &str) -> String {
-    s.lines().map(|l| format!("{}{}", prefix, l)).collect::<Vec<_>>().join("\n")
+    s.lines()
+        .map(|l| format!("{}{}", prefix, l))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -258,12 +262,7 @@ mod tests {
 
     #[test]
     fn exact_flags_extra_actual_key() {
-        let r = compare(
-            &json!({"a": 1, "b": 2}),
-            &json!({"a": 1}),
-            MatchMode::Exact,
-        )
-        .unwrap();
+        let r = compare(&json!({"a": 1, "b": 2}), &json!({"a": 1}), MatchMode::Exact).unwrap();
         assert!(!r.passed);
         assert!(r.diff.contains("unexpected key"));
     }
@@ -413,7 +412,9 @@ mod tests {
         assert!(parse_tol(&json!("x")).is_none());
         // Object but not a single key.
         assert!(parse_tol(&json!({})).is_none());
-        assert!(parse_tol(&json!({TOL_SENTINEL: {"value": 1.0, "tol": 0.1}, "extra": 1})).is_none());
+        assert!(
+            parse_tol(&json!({TOL_SENTINEL: {"value": 1.0, "tol": 0.1}, "extra": 1})).is_none()
+        );
     }
 
     #[test]

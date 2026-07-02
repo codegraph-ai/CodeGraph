@@ -73,9 +73,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let binary = resolve_binary(args.binary.as_deref(), crate_root)?;
-    let cases_dir = args
-        .cases_dir
-        .unwrap_or_else(|| crate_root.join("cases"));
+    let cases_dir = args.cases_dir.unwrap_or_else(|| crate_root.join("cases"));
     let fixtures_dir = args
         .fixtures_dir
         .unwrap_or_else(|| crate_root.join("fixtures"));
@@ -179,7 +177,10 @@ fn main() -> Result<()> {
         match report.drift_against(&coverage_path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("warning: could not read previous coverage snapshot: {:#}", e);
+                eprintln!(
+                    "warning: could not read previous coverage snapshot: {:#}",
+                    e
+                );
                 None
             }
         }
@@ -214,7 +215,12 @@ fn discover_cases(cases_dir: &Path, filter: Option<&str>) -> Result<Vec<case::Te
         ));
     }
     let patterns: Vec<&str> = filter
-        .map(|f| f.split(',').map(str::trim).filter(|s| !s.is_empty()).collect())
+        .map(|f| {
+            f.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     for entry in walkdir::WalkDir::new(cases_dir) {
         let entry = entry?;

@@ -109,7 +109,7 @@ fn strip_volatile(value: &Value, extra: &[String], keep: &[String]) -> Value {
         Value::Object(map) => {
             let mut new_map = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                let is_global = VOLATILE_FIELDS.iter().any(|f| *f == k.as_str());
+                let is_global = VOLATILE_FIELDS.contains(&k.as_str());
                 let is_extra = extra.iter().any(|f| f == k);
                 let is_kept = keep.iter().any(|f| f == k);
                 if (is_global || is_extra) && !is_kept {
@@ -119,11 +119,9 @@ fn strip_volatile(value: &Value, extra: &[String], keep: &[String]) -> Value {
             }
             Value::Object(new_map)
         }
-        Value::Array(arr) => Value::Array(
-            arr.iter()
-                .map(|v| strip_volatile(v, extra, keep))
-                .collect(),
-        ),
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(|v| strip_volatile(v, extra, keep)).collect())
+        }
         other => other.clone(),
     }
 }
@@ -302,11 +300,7 @@ mod tests {
     #[test]
     fn strip_volatile_keep_overrides_extra() {
         let input = json!({"name": "foo", "trace_id": "abc"});
-        let out = strip_volatile(
-            &input,
-            &["trace_id".to_string()],
-            &["trace_id".to_string()],
-        );
+        let out = strip_volatile(&input, &["trace_id".to_string()], &["trace_id".to_string()]);
         assert_eq!(out, json!({"name": "foo", "trace_id": "abc"}));
     }
 
@@ -346,10 +340,13 @@ mod tests {
         ]);
         let out = canonical_sort(&input);
         // Sorted by JSON string — `{"id":1,"name":"a"}` < `{"id":2,"name":"b"}`.
-        assert_eq!(out, json!([
-            {"name": "a", "id": 1},
-            {"name": "b", "id": 2}
-        ]));
+        assert_eq!(
+            out,
+            json!([
+                {"name": "a", "id": 1},
+                {"name": "b", "id": 2}
+            ])
+        );
     }
 
     #[test]
@@ -387,10 +384,7 @@ mod tests {
         });
         let patterns = vec![json!({"kind": "y"})];
         let out = drop_array_elements_matching(&input, &patterns);
-        assert_eq!(
-            out,
-            json!({"outer": [{"inner": [{"kind": "x"}]}]})
-        );
+        assert_eq!(out, json!({"outer": [{"inner": [{"kind": "x"}]}]}));
     }
 
     #[test]
@@ -450,12 +444,15 @@ mod tests {
             drop_where: vec![],
         };
         let out = normalize(&input, "", "", &opts);
-        assert_eq!(out, json!({
-            "results": [
-                {"name": "a", "weight": 0.91},
-                {"name": "b", "weight": 0.78}
-            ]
-        }));
+        assert_eq!(
+            out,
+            json!({
+                "results": [
+                    {"name": "a", "weight": 0.91},
+                    {"name": "b", "weight": 0.78}
+                ]
+            })
+        );
     }
 
     #[test]

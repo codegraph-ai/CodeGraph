@@ -15,6 +15,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+/// Per-directory indexing stats:
+/// `(total_encountered, files_parsed, files_skipped, files_by_language, parse_errors_by_language)`.
+pub type DirIndexStats = (
+    usize,
+    usize,
+    usize,
+    std::collections::HashMap<String, usize>,
+    std::collections::HashMap<String, usize>,
+);
+
 /// Configuration for a single indexing run.
 #[derive(Debug, Clone)]
 pub struct IndexConfig {
@@ -130,8 +140,8 @@ impl IndexConfig {
 
     /// Built-in glob patterns for files we should never index — binary
     /// archives, prebuilt artifacts, OS metadata. These shapes are
-    /// near-universally non-source and dragging them through tree-sitter
-    /// + embedding wastes cycles. Bounty 2026-05-03: a `bounty/` workspace
+    /// near-universally non-source and dragging them through tree-sitter +
+    /// embedding wastes cycles. Bounty 2026-05-03: a `bounty/` workspace
     /// containing thousands of `.tar.gz` / `.deb` proof bundles caused a
     /// 4.3 GB / 644% CPU runaway during initial embedding because the
     /// indexer didn't filter binary file extensions.
@@ -429,20 +439,7 @@ impl Indexer {
         config: &'a IndexConfig,
         depth: u32,
         counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = (
-                        usize,
-                        usize,
-                        usize,
-                        std::collections::HashMap<String, usize>,
-                        std::collections::HashMap<String, usize>,
-                    ),
-                > + Send
-                + 'a,
-        >,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DirIndexStats> + Send + 'a>> {
         Box::pin(async move {
             use std::sync::atomic::Ordering;
 

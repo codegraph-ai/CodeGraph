@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn test_storage_error_with_source_chains() {
         use std::error::Error;
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let io_err = std::io::Error::other("disk full");
         let err = GraphError::storage("write failed", Some(io_err));
         assert_eq!(err.to_string(), "Storage error: write failed");
         // The Some(source) branch wraps the io error, exposed via Error::source().

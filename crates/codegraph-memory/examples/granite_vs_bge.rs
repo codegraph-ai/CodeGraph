@@ -242,7 +242,7 @@ fn extract_top_level_fns(text: &str, file_path: &str) -> Vec<FnEntry> {
             };
             // Find paren-balanced params, then body open `{`.
             let params_start = name_end;
-            let params_end = match find_matching(&bytes, params_start, b'(', b')') {
+            let params_end = match find_matching(bytes, params_start, b'(', b')') {
                 Some(p) => p,
                 None => {
                     i = after_fn;
@@ -256,7 +256,7 @@ fn extract_top_level_fns(text: &str, file_path: &str) -> Vec<FnEntry> {
                     continue;
                 }
             };
-            let body_end = match find_matching(&bytes, body_open, b'{', b'}') {
+            let body_end = match find_matching(bytes, body_open, b'{', b'}') {
                 Some(p) => p,
                 None => {
                     i = after_fn;

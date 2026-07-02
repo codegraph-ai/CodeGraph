@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn result_alias_carries_memory_error() {
         let ok: Result<u32> = Ok(7);
-        assert_eq!(ok.unwrap(), 7);
+        assert!(matches!(ok, Ok(7)));
         let err: Result<u32> = Err(MemoryError::not_found("z"));
         assert!(err.is_err());
     }

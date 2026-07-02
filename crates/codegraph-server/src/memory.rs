@@ -657,7 +657,7 @@ mod tests {
     fn project_slug_replaces_non_alphanumerics_with_dash() {
         // The '!' in the final component must become '-' in the slug base.
         let slug = project_slug(Path::new("/tmp/codegraph-slug-target/My App!"));
-        let base = slug.rsplitn(2, '-').nth(1).unwrap();
+        let base = slug.rsplit_once('-').unwrap().0;
         assert!(!base.contains(' '), "space must be replaced: {slug}");
         assert!(!base.contains('!'), "'!' must be replaced: {slug}");
         assert!(base.starts_with("my-app"), "unexpected base: {slug}");

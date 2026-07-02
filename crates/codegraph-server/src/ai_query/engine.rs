@@ -392,12 +392,12 @@ impl QueryEngine {
             pos = end;
             chunks_done += 1;
 
-            if chunks_done % 10 == 0 && pos < total {
+            if chunks_done.is_multiple_of(10) && pos < total {
                 tracing::info!("[QueryEngine] Embedded {}/{} symbols", pos, total);
             }
 
             // RAM backpressure: shed batch size under memory pressure.
-            let pressured = chunks_done % EMBED_MEM_CHECK_CHUNKS == 0
+            let pressured = chunks_done.is_multiple_of(EMBED_MEM_CHECK_CHUNKS)
                 && available_memory_mb() < EMBED_LOW_MEM_MB;
             if pressured && chunk_size > 4 {
                 chunk_size = (chunk_size / 2).max(4);
@@ -546,7 +546,7 @@ impl QueryEngine {
             pos = end;
             chunks_done += 1;
 
-            let pressured = chunks_done % EMBED_MEM_CHECK_CHUNKS == 0
+            let pressured = chunks_done.is_multiple_of(EMBED_MEM_CHECK_CHUNKS)
                 && available_memory_mb() < EMBED_LOW_MEM_MB;
             if pressured && chunk_size > 4 {
                 chunk_size = (chunk_size / 2).max(4);

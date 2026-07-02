@@ -27,10 +27,9 @@ use std::path::Path;
 /// YAML are preserved structurally — keys keep their order best-
 /// effort, but comments are lost.
 pub fn rewrite_expect_data(path: &Path, new_data: &Json) -> Result<()> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let mut doc: Yaml = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse {} as YAML", path.display()))?;
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut doc: Yaml =
+        serde_yaml::from_str(&raw).with_context(|| format!("parse {} as YAML", path.display()))?;
 
     let expect = doc
         .as_mapping_mut()
@@ -43,8 +42,7 @@ pub fn rewrite_expect_data(path: &Path, new_data: &Json) -> Result<()> {
 
     let serialised = serde_yaml::to_string(&doc)
         .with_context(|| format!("serialise {} after rewrite", path.display()))?;
-    std::fs::write(path, serialised)
-        .with_context(|| format!("write {}", path.display()))?;
+    std::fs::write(path, serialised).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -98,15 +96,8 @@ mod tests {
         // Round-trip the file through serde_yaml so we can assert on
         // the structured content rather than literal text formatting.
         let parsed: serde_yaml::Value = serde_yaml::from_str(&after).unwrap();
-        let data = parsed
-            .get("expect")
-            .unwrap()
-            .get("data")
-            .unwrap();
-        let expected_yaml: Yaml = serde_yaml::from_str(
-            "results:\n  - name: a\n",
-        )
-        .unwrap();
+        let data = parsed.get("expect").unwrap().get("data").unwrap();
+        let expected_yaml: Yaml = serde_yaml::from_str("results:\n  - name: a\n").unwrap();
         assert_eq!(*data, expected_yaml);
     }
 

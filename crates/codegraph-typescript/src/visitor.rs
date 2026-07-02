@@ -169,9 +169,7 @@ impl<'a> TypeScriptVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let attributes = self.extract_decorators(node);
@@ -253,9 +251,7 @@ impl<'a> TypeScriptVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -323,9 +319,7 @@ impl<'a> TypeScriptVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let attributes = self.extract_decorators(node);
@@ -382,9 +376,7 @@ impl<'a> TypeScriptVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class = ClassEntity {
@@ -557,9 +549,7 @@ impl<'a> TypeScriptVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class = ClassEntity {
@@ -1792,7 +1782,10 @@ mod tests {
         // Members become constant, static fields with their assigned value
         assert_eq!(enum_class.fields.len(), 2);
         assert_eq!(enum_class.fields[0].name, "Red");
-        assert_eq!(enum_class.fields[0].default_value, Some("'red'".to_string()));
+        assert_eq!(
+            enum_class.fields[0].default_value,
+            Some("'red'".to_string())
+        );
         assert!(enum_class.fields[0].is_constant);
         assert!(enum_class.fields[0].is_static);
     }
@@ -1884,7 +1877,10 @@ mod tests {
             .type_references
             .iter()
             .any(|t| t.referrer == "process" && t.type_name == "User"));
-        assert!(!visitor.type_references.iter().any(|t| t.type_name == "void"));
+        assert!(!visitor
+            .type_references
+            .iter()
+            .any(|t| t.type_name == "void"));
     }
 
     #[test]

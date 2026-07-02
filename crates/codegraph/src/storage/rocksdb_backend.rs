@@ -508,10 +508,7 @@ mod tests {
         // so the match can only succeed if the `while let Some(inner)` loop
         // appends the nested source's text before matching. This pins the
         // source-traversal path, distinct from a top-level-message match.
-        let nested = std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Resource temporarily unavailable",
-        );
+        let nested = std::io::Error::other("Resource temporarily unavailable");
         let wrapped = GraphError::storage("could not open database", Some(nested));
         assert!(is_lock_error(&wrapped));
     }

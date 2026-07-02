@@ -20,6 +20,9 @@ pub struct ProCommandContext {
     pub workspace_folders: Vec<std::path::PathBuf>,
 }
 
+/// Boxed future returned by pro command handlers.
+pub type ProCommandFuture = Pin<Box<dyn Future<Output = Result<Option<Value>, String>> + Send>>;
+
 /// Trait for injecting pro commands into the LSP workspace/executeCommand handler.
 pub trait ProCommandProvider: Send + Sync + 'static {
     /// List additional command names provided by this extension.
@@ -32,7 +35,7 @@ pub trait ProCommandProvider: Send + Sync + 'static {
         name: &str,
         args: Value,
         ctx: ProCommandContext,
-    ) -> Option<Pin<Box<dyn Future<Output = Result<Option<Value>, String>> + Send>>>;
+    ) -> Option<ProCommandFuture>;
 
     /// Return the edition name.
     fn edition(&self) -> &str {

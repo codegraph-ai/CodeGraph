@@ -815,8 +815,8 @@ Leaf content.
         assert!(ids.contains(&"authenticate"));
         assert!(ids.contains(&"cfg"));
         // Filtered out: single-char `1`, shell var `$HOME`, path-like `POST /payments`
-        assert!(!ids.iter().any(|i| *i == "1"));
-        assert!(!ids.iter().any(|i| *i == "$HOME"));
+        assert!(!ids.contains(&"1"));
+        assert!(!ids.contains(&"$HOME"));
     }
 
     #[test]

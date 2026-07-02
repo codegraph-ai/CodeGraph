@@ -256,6 +256,6 @@ mod tests {
         let r: Result<u32> = Err(ParseError::graph_error("boom"));
         assert!(r.is_err());
         let ok: Result<u32> = Ok(7);
-        assert_eq!(ok.unwrap(), 7);
+        assert!(matches!(ok, Ok(7)));
     }
 }

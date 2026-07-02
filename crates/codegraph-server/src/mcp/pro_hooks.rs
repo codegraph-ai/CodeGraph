@@ -18,6 +18,9 @@ pub struct ProToolInfo {
     pub schema: Value,
 }
 
+/// Boxed future returned by pro tool handlers.
+pub type ProToolFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>>;
+
 /// Trait for injecting pro tools into the MCP server.
 pub trait ProToolProvider: Send + Sync {
     /// List additional tools provided by this extension.
@@ -29,7 +32,7 @@ pub trait ProToolProvider: Send + Sync {
         name: &'a str,
         args: Value,
         backend: &'a super::server::McpBackend,
-    ) -> Option<Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>>>;
+    ) -> Option<ProToolFuture<'a>>;
 
     /// Return the edition name for capability reporting.
     fn edition(&self) -> &str {

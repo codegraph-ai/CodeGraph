@@ -468,7 +468,10 @@ fn detect_ts_http_decorator(attributes: &[String]) -> Option<(String, String)> {
 
         // NestJS: Get(), Get('/path'), Post(), etc.
         for method in HTTP_METHODS {
-            if lower.starts_with(method) && (lower.len() == method.len() || lower.as_bytes().get(method.len()) == Some(&b'(')) {
+            if lower.starts_with(method)
+                && (lower.len() == method.len()
+                    || lower.as_bytes().get(method.len()) == Some(&b'('))
+            {
                 let route = extract_first_string(attr).unwrap_or_else(|| "/".to_string());
                 return Some((method.to_uppercase(), route));
             }

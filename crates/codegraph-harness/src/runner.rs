@@ -138,11 +138,8 @@ fn run_inner(
     //    placeholders restored.
     let fixture_str = fixture_in_workspace.to_string_lossy().to_string();
     let workspace_str = workspace_path.to_string_lossy().to_string();
-    let args = crate::compare::substitute_placeholders(
-        &case.invoke.args,
-        &fixture_str,
-        &workspace_str,
-    );
+    let args =
+        crate::compare::substitute_placeholders(&case.invoke.args, &fixture_str, &workspace_str);
 
     // 4. Call tool. If `retry_on_warmup` is set, retry every 2s
     //    for up to 30s while the response shape indicates the
@@ -227,7 +224,11 @@ fn make_workspace(setup: &Setup, fixtures_root: &Path) -> Result<tempfile::TempD
                 .with_context(|| format!("copy {} -> {}", src.display(), dest.display()))?;
         }
         WorkspaceLayout::MultiFile => {
-            let dir = if src.is_dir() { src.clone() } else { src.parent().unwrap().to_path_buf() };
+            let dir = if src.is_dir() {
+                src.clone()
+            } else {
+                src.parent().unwrap().to_path_buf()
+            };
             copy_dir_recursive(&dir, workspace.path())?;
         }
     }
@@ -293,17 +294,28 @@ fn init_git_repo(workspace: &Path) -> Result<()> {
         }
         Ok(())
     }
-    run(std::process::Command::new("git").arg("init").arg("-q").current_dir(workspace))?;
-    run(std::process::Command::new("git").args(["add", "."]).current_dir(workspace))?;
+    run(std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(workspace))?;
+    run(std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(workspace))?;
     // Pin author + committer dates so the commit content (and the
     // SHA derived from it) is byte-stable across runs. Without these,
     // git uses wallclock and every run produces a different hash.
     run(std::process::Command::new("git")
         .args([
-            "-c", "user.email=harness@codegraph.test",
-            "-c", "user.name=Harness",
-            "-c", "commit.gpgsign=false",
-            "commit", "-q", "-m", "harness fixture",
+            "-c",
+            "user.email=harness@codegraph.test",
+            "-c",
+            "user.name=Harness",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "harness fixture",
         ])
         .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00+0000")
         .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00+0000")
@@ -443,8 +455,14 @@ mod tests {
         let s = setup("proj", WorkspaceLayout::MultiFile);
 
         let ws = make_workspace(&s, fixtures.path()).expect("make_workspace");
-        assert_eq!(std::fs::read_to_string(ws.path().join("a.rs")).unwrap(), "a");
-        assert_eq!(std::fs::read_to_string(ws.path().join("sub").join("b.rs")).unwrap(), "b");
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("a.rs")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("sub").join("b.rs")).unwrap(),
+            "b"
+        );
     }
 
     #[test]
@@ -493,7 +511,10 @@ mod tests {
         std::fs::write(src.path().join("deep/nest/leaf.txt"), "leaf").unwrap();
 
         copy_dir_recursive(src.path(), dst.path()).expect("copy");
-        assert_eq!(std::fs::read_to_string(dst.path().join("top.txt")).unwrap(), "top");
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("top.txt")).unwrap(),
+            "top"
+        );
         assert_eq!(
             std::fs::read_to_string(dst.path().join("deep/nest/leaf.txt")).unwrap(),
             "leaf"
