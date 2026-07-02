@@ -753,6 +753,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_symbol_weight_uses_complexity_and_line_span() {
+        use codegraph::{NodeType, PropertyMap, PropertyValue};
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().unwrap()));
+        let node_id = {
+            let mut g = graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert("complexity".to_string(), PropertyValue::Int(5));
+            props.insert("line_start".to_string(), PropertyValue::Int(10));
+            props.insert("line_end".to_string(), PropertyValue::Int(30));
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+        let g = graph.read().await;
+        // complexity (5) * 100 + span (30 - 10 + 1 = 21) = 521
+        assert_eq!(symbol_weight(&g, node_id), 521);
+    }
+
+    #[tokio::test]
+    async fn test_symbol_weight_missing_node_zero_and_defaults() {
+        use codegraph::{NodeType, PropertyMap};
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().unwrap()));
+        // A node id that was never added resolves to Err -> weight 0.
+        {
+            let g = graph.read().await;
+            assert_eq!(symbol_weight(&g, 999_999), 0);
+        }
+        // A node with no complexity/line props falls back to complexity 1 and a
+        // one-line span: 1 * 100 + (0 - 0 + 1) = 101.
+        let node_id = {
+            let mut g = graph.write().await;
+            g.add_node(NodeType::Function, PropertyMap::new()).unwrap()
+        };
+        let g = graph.read().await;
+        assert_eq!(symbol_weight(&g, node_id), 101);
+    }
+
+    #[tokio::test]
     async fn test_graph_updater_update_files_python() {
         let graph = Arc::new(RwLock::new(CodeGraph::in_memory().unwrap()));
         let parsers = Arc::new(ParserRegistry::new());
