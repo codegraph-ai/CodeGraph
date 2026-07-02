@@ -4180,4 +4180,73 @@ mod tests {
             ""
         );
     }
+
+    #[test]
+    fn build_embed_text_covers_all_base_string_arms() {
+        // The sole prior build_embed_text test only exercised the signature-only
+        // base arm. Pin the other three: signature+docstring, docstring-only, and
+        // the bare-name fallback when neither property is present.
+        let graph = CodeGraph::in_memory().unwrap();
+
+        // signature + docstring -> "name: signature — docstring"
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new()
+                .with("signature", "fn f()")
+                .with("doc", "does a thing"),
+        );
+        assert_eq!(
+            QueryEngine::build_embed_text(&node, 0, "f", false, false, &graph),
+            "f: fn f() — does a thing"
+        );
+
+        // docstring only (no signature) -> "name — docstring"
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new().with("doc", "just docs"),
+        );
+        assert_eq!(
+            QueryEngine::build_embed_text(&node, 0, "f", false, false, &graph),
+            "f — just docs"
+        );
+
+        // neither signature nor docstring -> bare name
+        let node = codegraph::Node::new(0, codegraph::NodeType::Function, PropertyMap::new());
+        assert_eq!(
+            QueryEngine::build_embed_text(&node, 0, "f", false, false, &graph),
+            "f"
+        );
+    }
+
+    #[test]
+    fn build_embed_text_full_body_appends_body_prefix_or_falls_back() {
+        let graph = CodeGraph::in_memory().unwrap();
+
+        // full_body=true with a body_prefix longer than the base+10 threshold:
+        // the truncated body is appended after the base on a fresh line.
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new()
+                .with("signature", "fn f()")
+                .with("body_prefix", "fn f() { let x = 42; return x; }"),
+        );
+        let text = QueryEngine::build_embed_text(&node, 0, "f", true, false, &graph);
+        assert!(text.starts_with("f: fn f()\n"), "got: {text}");
+        assert!(text.contains("let x = 42"), "got: {text}");
+
+        // full_body=true but no body_prefix and the node id is absent from the
+        // graph, so get_symbol_source yields None and we fall back to the base.
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new().with("signature", "fn f()"),
+        );
+        assert_eq!(
+            QueryEngine::build_embed_text(&node, 999, "f", true, false, &graph),
+            "f: fn f()"
+        );
+    }
 }
