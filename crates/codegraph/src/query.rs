@@ -505,6 +505,81 @@ mod tests {
     }
 
     #[test]
+    fn property_int_exact_match() {
+        // f1 has line_start=10, f2 has line_start=90 - the Int==Int arm.
+        let (g, _, f1) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("line_start", 10i64)
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![f1]);
+    }
+
+    #[test]
+    fn property_float_exact_match() {
+        // Exercises the Float==Float arm (epsilon comparison).
+        let mut g = CodeGraph::in_memory().unwrap();
+        let hit = g
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new().with("name", "a").with("score", 0.5f64),
+            )
+            .unwrap();
+        g.add_node(
+            NodeType::Function,
+            PropertyMap::new().with("name", "b").with("score", 0.75f64),
+        )
+        .unwrap();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("score", 0.5f64)
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![hit]);
+    }
+
+    #[test]
+    fn property_bool_exact_match() {
+        // Exercises the Bool==Bool arm.
+        let mut g = CodeGraph::in_memory().unwrap();
+        let hit = g
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new().with("name", "a").with("async", true),
+            )
+            .unwrap();
+        g.add_node(
+            NodeType::Function,
+            PropertyMap::new().with("name", "b").with("async", false),
+        )
+        .unwrap();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("async", true)
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![hit]);
+    }
+
+    #[test]
+    fn property_type_mismatch_returns_no_match() {
+        // Querying an Int-valued property with a String filter hits the
+        // catch-all `_ => false` arm - present key, incompatible type.
+        let (g, _, _) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("line_start", "10")
+            .execute()
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
     fn property_exists_ignores_value() {
         let (g, _, _) = build_graph();
         let results = g
