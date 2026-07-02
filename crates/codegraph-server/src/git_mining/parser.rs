@@ -454,6 +454,50 @@ mod tests {
         assert_eq!(extract_issue_reference("no issue"), None);
     }
 
+    #[test]
+    fn extract_issue_reference_gh_prefix_arm() {
+        // With no `#` in the text the first pattern misses, so resolution falls
+        // through to the `(?i)gh-(\d+)` arm - the only arm previously untested,
+        // since every prior case contained a `#` that the leading `#(\d+)`
+        // pattern matched first. The captured digits are re-emitted as `#N`.
+        assert_eq!(
+            extract_issue_reference("see GH-42 for details"),
+            Some("#42".to_string())
+        );
+        // The pattern is case-insensitive, so lowercase `gh-` resolves too.
+        assert_eq!(
+            extract_issue_reference("fixes gh-7"),
+            Some("#7".to_string())
+        );
+        // When both a bare `#` and a `gh-` token are present, the earlier
+        // `#(\d+)` pattern wins and the gh- arm is never reached.
+        assert_eq!(
+            extract_issue_reference("gh-1 tracked as #99"),
+            Some("#99".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_pattern_bugfix_carries_extracted_issue_ref() {
+        // detect_pattern's BugFix arms both call extract_issue_reference and
+        // thread the result into the pattern, but no prior test asserted the
+        // populated issue_ref field - only that the pattern was a BugFix.
+        // Conventional `fix:` prefix (0.9 tier).
+        let (pattern, _) = detect_pattern(&make_commit("fix: resolve crash, closes #321"));
+        match pattern {
+            CommitPattern::BugFix { issue_ref } => {
+                assert_eq!(issue_ref.as_deref(), Some("#321"));
+            }
+            other => panic!("expected BugFix, got {:?}", other),
+        }
+        // A conventional bug fix with no issue token leaves issue_ref None.
+        let (pattern, _) = detect_pattern(&make_commit("fix: tidy up logging"));
+        match pattern {
+            CommitPattern::BugFix { issue_ref } => assert!(issue_ref.is_none()),
+            other => panic!("expected BugFix, got {:?}", other),
+        }
+    }
+
     fn make_commit(subject: &str) -> CommitInfo {
         CommitInfo {
             hash: "abc123".to_string(),
