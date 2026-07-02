@@ -494,6 +494,40 @@ mod tests {
     }
 
     #[test]
+    fn test_is_lock_error_false_for_non_lock_error_and_walks_source_chain() {
+        // False arm: neither the message nor the (absent) source contains any
+        // lock needle, so `.any()` is false. The stale-lock recovery tests only
+        // ever drive this predicate through genuine rocksdb LOCK failures (the
+        // true arm); a clean non-lock storage error is never checked, so the
+        // false result — the branch that makes recovery surface the original
+        // error instead of stealing a lock — was untested.
+        let clean = GraphError::storage("disk full while flushing SST", None::<std::io::Error>);
+        assert!(!is_lock_error(&clean));
+
+        // True via the source-chain walk: the top-level message is needle-free,
+        // so the match can only succeed if the `while let Some(inner)` loop
+        // appends the nested source's text before matching. This pins the
+        // source-traversal path, distinct from a top-level-message match.
+        let nested = std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Resource temporarily unavailable",
+        );
+        let wrapped = GraphError::storage("could not open database", Some(nested));
+        assert!(is_lock_error(&wrapped));
+    }
+
+    #[test]
+    fn test_try_clear_stale_lock_returns_false_when_no_lock_file() {
+        // Early-return false arm: the directory exists but holds no LOCK file,
+        // so the probe reports "nothing to clear" without touching the
+        // filesystem. Every prior exercise of this helper went through a
+        // directory RocksDB had populated with a real LOCK, so the
+        // `!lock_path.exists()` guard's true branch was never taken.
+        let temp_dir = TempDir::new().unwrap();
+        assert!(!try_clear_stale_lock(temp_dir.path()));
+    }
+
+    #[test]
     fn test_persistence_across_reopens() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().to_path_buf();
