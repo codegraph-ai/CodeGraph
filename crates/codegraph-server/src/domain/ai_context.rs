@@ -1205,6 +1205,72 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_layer_covers_remaining_pattern_arms() {
+        // The prior detect_layer tests exercise only ~9 of the 20 ordered
+        // pattern arms; these pin the remaining classifications, each with a
+        // path whose earliest-matching pattern is the intended layer.
+        assert_eq!(
+            detect_layer("/src/views/home.ts"),
+            Some("presentation".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/handlers/event.ts"),
+            Some("handler".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/commands/create.ts"),
+            Some("command".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/queries/find.ts"),
+            Some("query".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/aggregates/cart.ts"),
+            Some("aggregate".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/value_objects/money.ts"),
+            Some("value_object".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/clients/http.ts"),
+            Some("client".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/providers/auth.ts"),
+            Some("provider".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/middleware/cors.ts"),
+            Some("middleware".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/config/app.ts"),
+            Some("configuration".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/types/index.ts"),
+            Some("contract".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/fixtures/data.ts"),
+            Some("test_support".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_layer_first_matching_pattern_wins() {
+        // Patterns are scanned in declaration order and the first hit wins:
+        // "controllers" (arm 1) precedes "services" (arm 4), so a path
+        // containing both resolves to the earlier "controller" layer.
+        assert_eq!(
+            detect_layer("/src/controllers/services/user.ts"),
+            Some("controller".to_string())
+        );
+    }
+
+    #[test]
     fn test_generate_usage_description_basic() {
         let desc =
             generate_usage_description("process_order", "validate_data", "validate_data(input)");
