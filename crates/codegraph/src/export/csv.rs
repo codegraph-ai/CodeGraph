@@ -349,6 +349,43 @@ mod tests {
     }
 
     #[test]
+    fn test_export_csv_nodes_create_failure_is_storage_error() {
+        // A path under a directory that does not exist makes File::create fail,
+        // exercising the map_err arm that wraps the io::Error into
+        // GraphError::Storage with the "Failed to create CSV file" message.
+        let graph = CodeGraph::in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bad_path = dir.path().join("missing_subdir").join("nodes.csv");
+
+        let err = export_csv_nodes(&graph, &bad_path).unwrap_err();
+        match err {
+            crate::GraphError::Storage { message, source } => {
+                assert!(message.starts_with("Failed to create CSV file:"));
+                // The originating io::Error is preserved as the source.
+                assert!(source.is_some());
+            }
+            other => panic!("expected Storage error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_export_csv_edges_create_failure_is_storage_error() {
+        // Same unwritable-path failure for the edge writer's File::create arm.
+        let graph = CodeGraph::in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bad_path = dir.path().join("missing_subdir").join("edges.csv");
+
+        let err = export_csv_edges(&graph, &bad_path).unwrap_err();
+        match err {
+            crate::GraphError::Storage { message, source } => {
+                assert!(message.starts_with("Failed to create CSV file:"));
+                assert!(source.is_some());
+            }
+            other => panic!("expected Storage error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_export_csv_writes_both_files() {
         let mut graph = CodeGraph::in_memory().unwrap();
         let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
