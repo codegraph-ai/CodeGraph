@@ -1475,6 +1475,30 @@ fun loops(n: Int) {
     }
 
     #[test]
+    fn test_complexity_elvis_expression() {
+        // The Elvis operator (?:) is a null-coalescing branch and should add a branch
+        let source = b"
+fun pick(a: Int?, b: Int): Int {
+    return a ?: b
+}
+";
+        let visitor = parse_and_visit(source);
+
+        assert!(!visitor.functions.is_empty());
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.branches >= 1,
+            "Expected at least 1 branch for the Elvis operator, got {}",
+            complexity.branches
+        );
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "Elvis operator should raise cyclomatic complexity above 1, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
     fn test_complexity_nesting_depth() {
         // Nested control structures should track max nesting depth
         let source = b"
