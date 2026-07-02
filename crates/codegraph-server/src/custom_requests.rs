@@ -739,4 +739,77 @@ mod tests {
             .expect("valid params should dispatch and serialize a response");
         assert_eq!(result, json!(null));
     }
+
+    // ---- Additional success-path dispatch arms (node-id / signature / file) ----
+    //
+    // These arms either resolve a directly-supplied node ID (which parses without
+    // touching the graph) or scan the whole graph; on an empty graph each returns
+    // an empty-but-Ok response, so the full arm (deserialize → handle → to_value)
+    // runs. Node-resolving arms that error on a miss (e.g. getDetailedSymbolInfo,
+    // whose handler maps a not-found symbol to InvalidParams) are excluded here.
+
+    #[tokio::test]
+    async fn traverse_graph_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        // A parseable NodeId resolves without a graph lookup, so traversal runs
+        // and simply finds no reachable nodes on the empty graph.
+        let result = backend
+            .handle_custom_request(
+                "codegraph/traverseGraph",
+                json!({ "startNodeId": "999999" }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["nodes"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_callers_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request("codegraph/getCallers", json!({ "nodeId": "999999" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["callers"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_callees_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        // getCallees shares GetCallersParams and returns its results under the
+        // same `callers` field; the empty graph yields none.
+        let result = backend
+            .handle_custom_request("codegraph/getCallees", json!({ "nodeId": "999999" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["callers"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn find_by_signature_dispatch_returns_no_results_on_empty_graph() {
+        let backend = test_backend();
+        // All fields are optional, so an empty object builds a wildcard pattern;
+        // the empty graph has no signatures to match.
+        let result = backend
+            .handle_custom_request("codegraph/findBySignature", json!({}))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["results"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn analyze_complexity_dispatch_returns_empty_summary_on_empty_graph() {
+        let backend = test_backend();
+        // A valid file URI resolves to zero file symbols on the empty graph, so
+        // complexity analysis reports no functions and a zero total.
+        let result = backend
+            .handle_custom_request(
+                "codegraph/analyzeComplexity",
+                json!({ "uri": "file:///tmp/nonexistent.rs" }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["functions"], json!([]));
+        assert_eq!(result["fileSummary"]["totalFunctions"], json!(0));
+    }
 }
