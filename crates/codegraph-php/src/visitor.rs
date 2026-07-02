@@ -1888,4 +1888,24 @@ function loadFile(string $path): string {
 
         assert_eq!(visitor.functions.len(), 0);
     }
+
+    #[test]
+    fn test_qualify_name_without_namespace_returns_verbatim() {
+        // With no current namespace set, qualify_name is an identity: the bare
+        // name is returned unchanged (no leading backslash is prepended).
+        let visitor = PhpVisitor::new(b"");
+        assert!(visitor.current_namespace.is_none());
+        assert_eq!(visitor.qualify_name("Widget"), "Widget");
+        assert_eq!(visitor.qualify_name("makeThing"), "makeThing");
+    }
+
+    #[test]
+    fn test_qualify_name_with_namespace_uses_backslash_separator() {
+        // A set namespace is joined to the name with PHP's backslash separator,
+        // preserving the namespace's own backslash-delimited segments.
+        let mut visitor = PhpVisitor::new(b"");
+        visitor.current_namespace = Some("App\\Models".to_string());
+        assert_eq!(visitor.qualify_name("User"), "App\\Models\\User");
+        assert_eq!(visitor.qualify_name("makeUser"), "App\\Models\\makeUser");
+    }
 }
