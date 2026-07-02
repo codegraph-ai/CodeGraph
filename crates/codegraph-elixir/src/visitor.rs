@@ -967,6 +967,23 @@ end
     }
 
     #[test]
+    fn test_symbolic_and_word_or_operators_counted() {
+        // The `&&` symbolic and `or` word operators are the two forms the
+        // existing logical-operator tests (which use `and` and `||`) never hit.
+        let source = br#"
+defmodule MyApp do
+  def mixed(x, y, z) do
+    x && y or z
+  end
+end
+"#;
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.logical_operators >= 2);
+        assert!(c.cyclomatic_complexity > 2);
+    }
+
+    #[test]
     fn test_or_operator_raises_complexity() {
         // The `||` symbolic operator (not just the word `or`) is counted.
         let source = br#"
