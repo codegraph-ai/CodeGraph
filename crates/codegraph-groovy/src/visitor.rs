@@ -804,6 +804,31 @@ class Svc {
     }
 
     #[test]
+    fn test_complexity_early_return_counted() {
+        // A `return` inside a method hits visit_for_complexity's return_statement
+        // arm (add_early_return), populating the early_returns metric without
+        // contributing to cyclomatic_complexity.
+        let source = br#"
+class Svc {
+    def guard(int x) {
+        if (x < 0) {
+            return -1
+        }
+        return x
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let method = &visitor.classes[0].methods[0];
+        let complexity = method.complexity.as_ref().unwrap();
+        assert!(
+            complexity.early_returns >= 1,
+            "expected return statements to be counted as early returns, got {}",
+            complexity.early_returns
+        );
+    }
+
+    #[test]
     fn test_body_prefix_truncation() {
         // An oversized method body is truncated to exactly BODY_PREFIX_MAX_CHARS chars.
         let big: String = std::iter::repeat_n('a', 2000).collect();
