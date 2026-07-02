@@ -255,6 +255,29 @@ async fn read_branch_state(workspace_root: &Path) -> Option<BranchState> {
     .ok()?
 }
 
+/// How a git diff status character maps onto branch-switch re-indexing.
+#[derive(Debug, PartialEq, Eq)]
+enum ChangeClass {
+    /// File was deleted on the new branch; its nodes must be removed.
+    Deleted,
+    /// File was added/modified/renamed/copied; re-parse if it exists and is parseable.
+    Modified,
+    /// Status we don't act on (e.g. type-change, unmerged, unknown).
+    Ignored,
+}
+
+/// Classify a git `--name-status` status character for re-indexing.
+///
+/// `git diff --name-status` emits `A` (added), `M` (modified), `D` (deleted),
+/// `R` (renamed), `C` (copied), plus rarer `T`/`U`/`X` we deliberately skip.
+fn classify_change_status(status: char) -> ChangeClass {
+    match status {
+        'D' => ChangeClass::Deleted,
+        'A' | 'M' | 'R' | 'C' => ChangeClass::Modified,
+        _ => ChangeClass::Ignored,
+    }
+}
+
 /// Handle a branch switch by diffing changed files and re-indexing them.
 ///
 /// Returns `(modified_count, deleted_count)` on success.
@@ -284,15 +307,15 @@ async fn handle_branch_switch(
 
     for (status, rel_path) in &changes {
         let abs_path = ctx.workspace_root.join(rel_path);
-        match status {
-            'D' => deleted_files.push(abs_path),
-            'A' | 'M' | 'R' | 'C' => {
+        match classify_change_status(*status) {
+            ChangeClass::Deleted => deleted_files.push(abs_path),
+            ChangeClass::Modified => {
                 // Only process files that exist on disk and are parseable
                 if abs_path.exists() && ctx.parsers.can_parse(&abs_path) {
                     modified_files.push(abs_path);
                 }
             }
-            _ => {} // Ignore unknown statuses
+            ChangeClass::Ignored => {} // Ignore unknown statuses
         }
     }
 
@@ -496,6 +519,35 @@ mod tests {
         // temp dir is outside any repo, so `git rev-parse --git-dir` fails.
         std::fs::write(dir.path().join(".git"), "gitdir: /nonexistent/path").unwrap();
         assert!(resolve_git_head(dir.path()).is_none());
+    }
+
+    #[test]
+    fn classify_change_status_deleted() {
+        assert_eq!(classify_change_status('D'), ChangeClass::Deleted);
+    }
+
+    #[test]
+    fn classify_change_status_modified_variants() {
+        // Added, modified, renamed, and copied all re-parse the same way.
+        for status in ['A', 'M', 'R', 'C'] {
+            assert_eq!(
+                classify_change_status(status),
+                ChangeClass::Modified,
+                "status {status} should classify as Modified"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_change_status_unknown_is_ignored() {
+        // Type-change (T), unmerged (U), unknown (X), and any stray char are skipped.
+        for status in ['T', 'U', 'X', ' ', 'z'] {
+            assert_eq!(
+                classify_change_status(status),
+                ChangeClass::Ignored,
+                "status {status:?} should classify as Ignored"
+            );
+        }
     }
 
     #[tokio::test]
