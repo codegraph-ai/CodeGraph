@@ -725,6 +725,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn symbol_token_budget_caps_included_symbols() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Two matching symbols, each with a source large enough that one alone
+        // exhausts the symbol budget. With max_tokens = 100, symbol_budget =
+        // 100 * 40 / 100 = 40 tokens; a 200-char source is 200/4 = 50 tokens,
+        // so after the first symbol symbols_tokens (50) >= symbol_budget (40)
+        // and the loop breaks before adding the second.
+        for name in ["handleAlpha", "handleBeta"] {
+            add_node(
+                &mut g,
+                NodeType::Function,
+                &[
+                    ("name", name),
+                    (
+                        "path",
+                        Box::leak(format!("/src/{name}.rs").into_boxed_str()),
+                    ),
+                    ("source", Box::leak("x".repeat(200).into_boxed_str())),
+                ],
+            );
+        }
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_curated_context(&graph, &engine, &mem, "handle", None, 100, 5)
+            .await
+            .expect("matches should produce a result");
+
+        // Only the first symbol fits within the token budget despite max_symbols = 5.
+        assert_eq!(result.symbols.len(), 1);
+        assert_eq!(result.metadata.symbols_included, 1);
+        // Both matches were still counted in the pre-budget search total.
+        assert!(result.metadata.symbols_found >= 2);
+    }
+
+    #[tokio::test]
     async fn anchor_path_sorts_anchor_file_first() {
         let mut g = CodeGraph::in_memory().expect("in_memory");
         add_node(
