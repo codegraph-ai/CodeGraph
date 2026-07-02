@@ -394,6 +394,43 @@ mod tests {
     }
 
     #[test]
+    fn element_matches_true_when_all_pattern_keys_equal() {
+        // All pattern keys present in the element with equal values -> true.
+        // Extra keys on the element are ignored (subset match).
+        let element = json!({"kind": "x", "name": "a", "extra": 1});
+        let pattern = json!({"kind": "x", "name": "a"});
+        assert!(element_matches(&element, &pattern));
+    }
+
+    #[test]
+    fn element_matches_false_when_value_differs() {
+        // Key present but the value differs -> the `Some(ev) => ev == pv` arm
+        // returns false for that key, so `all` short-circuits to false.
+        let element = json!({"kind": "x"});
+        let pattern = json!({"kind": "y"});
+        assert!(!element_matches(&element, &pattern));
+    }
+
+    #[test]
+    fn element_matches_false_when_pattern_key_absent() {
+        // Pattern references a key the element lacks -> the `None => false`
+        // arm. Distinct from a value mismatch and not exercised by the
+        // drop_where tests, whose patterns always name a present key.
+        let element = json!({"kind": "x"});
+        let pattern = json!({"missing": "z"});
+        assert!(!element_matches(&element, &pattern));
+    }
+
+    #[test]
+    fn element_matches_false_when_either_side_not_object() {
+        // The catch-all `_ => false` arm: any non-(Object, Object) pairing
+        // never matches, regardless of scalar equality.
+        assert!(!element_matches(&json!("x"), &json!({"k": 1})));
+        assert!(!element_matches(&json!({"k": 1}), &json!("x")));
+        assert!(!element_matches(&json!(5), &json!(5)));
+    }
+
+    #[test]
     fn full_pipeline_with_opts() {
         // `score` is in VOLATILE_FIELDS — use a non-volatile float
         // (`weight`) so we can observe rounding + sort interaction.
