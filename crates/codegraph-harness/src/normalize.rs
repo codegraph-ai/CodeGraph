@@ -420,4 +420,63 @@ mod tests {
             ]
         }));
     }
+
+    #[test]
+    fn normalize_expected_folds_and_drops_without_path_substitution() {
+        // normalize_expected is the expected-side entry point (zero prior
+        // tests): it strips volatile, folds backslashes, drops matching
+        // elements, rounds, and sorts — but must NOT substitute paths
+        // (expected JSON already carries ${workspace}/${fixture} verbatim,
+        // so a literal path like `C:\ws\basic.rs` survives, only folded).
+        let input = json!({
+            "path": "C:\\ws\\basic.rs",
+            "node_id": 7,
+            "results": [
+                {"name": "b", "weight": 0.126, "match_reason": "Semantic"},
+                {"name": "a", "weight": 0.111}
+            ]
+        });
+        let opts = NormalizeOpts {
+            sort_arrays: Some(true),
+            float_decimals: Some(2),
+            drop_where: vec![json!({"match_reason": "Semantic"})],
+            ..NormalizeOpts::default()
+        };
+        let out = normalize_expected(&input, &opts);
+        let expected = json!({
+            "path": "C:/ws/basic.rs",
+            "results": [
+                {"name": "a", "weight": 0.11}
+            ]
+        });
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn normalize_substitutes_paths_and_drops_via_full_pipeline() {
+        // Exercise normalize's substitute_paths branch (non-empty
+        // workspace/fixture) together with the drop_where branch — the
+        // full_pipeline_with_opts test passes empty paths and empty
+        // drop_where, so neither of those two arms of `normalize` fired.
+        let input = json!({
+            "file": "/tmp/ws/basic.rs",
+            "node_id": 3,
+            "results": [
+                {"name": "keep", "match_reason": "SymbolName"},
+                {"name": "drop", "match_reason": "Semantic"}
+            ]
+        });
+        let opts = NormalizeOpts {
+            drop_where: vec![json!({"match_reason": "Semantic"})],
+            ..NormalizeOpts::default()
+        };
+        let out = normalize(&input, "/tmp/ws", "/tmp/ws/basic.rs", &opts);
+        let expected = json!({
+            "file": "${fixture}",
+            "results": [
+                {"name": "keep", "match_reason": "SymbolName"}
+            ]
+        });
+        assert_eq!(out, expected);
+    }
 }
