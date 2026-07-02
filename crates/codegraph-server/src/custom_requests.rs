@@ -573,4 +573,77 @@ mod tests {
             .expect("dispatch should succeed via the paths alias");
         assert_eq!(result["indexed"], json!(1));
     }
+
+    // ---- Success-path dispatch arms ----
+    //
+    // The typed-handler arms (getDependencyGraph, symbolSearch, findByImports,
+    // findEntryPoints, getWorkspaceSymbols) were only exercised on their error
+    // path (`typed_handler_rejects_malformed_params` feeds a bad payload to
+    // getDependencyGraph). The success half of each arm — deserialize params,
+    // invoke the handler, and re-serialize the response with `serde_to_value`
+    // — stayed unexercised through `handle_custom_request`. These pin the
+    // happy path against an empty in-memory graph, where each handler returns
+    // an empty-but-Ok response so the full arm (including the final
+    // to_value) runs.
+
+    #[tokio::test]
+    async fn dependency_graph_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/getDependencyGraph",
+                json!({ "uri": "file:///tmp/nonexistent.rs" }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["nodes"], json!([]));
+        assert_eq!(result["edges"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn symbol_search_dispatch_returns_no_matches_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request("codegraph/symbolSearch", json!({ "query": "anything" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["results"], json!([]));
+        assert_eq!(result["totalMatches"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn find_by_imports_dispatch_returns_no_results_on_empty_graph() {
+        let backend = test_backend();
+        // An empty `libraries` list skips the per-library search loop entirely,
+        // still driving the arm's deserialize + handle + to_value path.
+        let result = backend
+            .handle_custom_request("codegraph/findByImports", json!({ "libraries": [] }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["results"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn find_entry_points_dispatch_returns_none_on_empty_graph() {
+        let backend = test_backend();
+        // All fields are optional, so an empty object deserializes cleanly.
+        let result = backend
+            .handle_custom_request("codegraph/findEntryPoints", json!({}))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["entryPoints"], json!([]));
+        assert_eq!(result["totalFound"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn workspace_symbols_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        // An empty query asks for top-level Module symbols; the empty symbol
+        // index yields none, exercising the arm's success path end to end.
+        let result = backend
+            .handle_custom_request("codegraph/getWorkspaceSymbols", json!({ "query": "" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["symbols"], json!([]));
+    }
 }
