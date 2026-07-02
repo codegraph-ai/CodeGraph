@@ -1269,4 +1269,34 @@ end
         assert_eq!(visitor.imports[0].imported, "json");
         assert_eq!(visitor.imports[0].importer, "main");
     }
+
+    #[test]
+    fn test_has_test_annotation_prefixes() {
+        let visitor = RubyVisitor::new(b"");
+        // Accepted prefixes (RSpec/minitest naming conventions)
+        assert!(visitor.has_test_annotation("test_login"));
+        assert!(visitor.has_test_annotation("it_returns_ok"));
+        assert!(visitor.has_test_annotation("should_validate"));
+        // Exact prefix boundary: the underscore is part of the required prefix
+        assert!(!visitor.has_test_annotation("test"));
+        assert!(!visitor.has_test_annotation("it"));
+        assert!(!visitor.has_test_annotation("should"));
+        // Non-matching / prefix-in-the-middle names are rejected
+        assert!(!visitor.has_test_annotation("run_test_case"));
+        assert!(!visitor.has_test_annotation("greet"));
+        assert!(!visitor.has_test_annotation(""));
+    }
+
+    #[test]
+    fn test_qualify_name_with_and_without_module() {
+        let mut visitor = RubyVisitor::new(b"");
+        // No enclosing module: name is returned verbatim
+        assert_eq!(visitor.qualify_name("greet"), "greet");
+        // Inside a module: name is prefixed with the module path using ::
+        visitor.current_module = Some("Loggable".to_string());
+        assert_eq!(visitor.qualify_name("log"), "Loggable::log");
+        // Nested module path is preserved as-is
+        visitor.current_module = Some("A::B".to_string());
+        assert_eq!(visitor.qualify_name("c"), "A::B::c");
+    }
 }
