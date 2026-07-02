@@ -167,6 +167,40 @@ mod tests {
     }
 
     #[test]
+    fn line_from_props_prefers_line_key_then_falls_back_then_zero() {
+        // line_start_from_props: line_start wins over start_line.
+        assert_eq!(
+            line_start_from_props(&props(&[("line_start", 5), ("start_line", 9)])),
+            5
+        );
+        // falls back to start_line when line_start absent.
+        assert_eq!(line_start_from_props(&props(&[("start_line", 9)])), 9);
+        // absent -> 0.
+        assert_eq!(line_start_from_props(&props(&[])), 0);
+
+        // line_end_from_props mirrors the same precedence.
+        assert_eq!(
+            line_end_from_props(&props(&[("line_end", 12), ("end_line", 20)])),
+            12
+        );
+        assert_eq!(line_end_from_props(&props(&[("end_line", 20)])), 20);
+        assert_eq!(line_end_from_props(&props(&[])), 0);
+    }
+
+    #[test]
+    fn line_opt_from_props_returns_none_when_absent() {
+        // Absent -> None (distinct from the u32 accessors that default to 0).
+        assert_eq!(line_start_opt_from_props(&props(&[])), None);
+        assert_eq!(line_end_opt_from_props(&props(&[])), None);
+        // Present via the *_line fallback keys still resolves to Some.
+        assert_eq!(
+            line_start_opt_from_props(&props(&[("start_line", 3)])),
+            Some(3)
+        );
+        assert_eq!(line_end_opt_from_props(&props(&[("line_end", 7)])), Some(7));
+    }
+
+    #[test]
     fn col_start_defaults_to_zero_col_end_defaults_to_ten_thousand() {
         assert_eq!(col_start_from_props(&props(&[("col_start", 4)])), 4);
         assert_eq!(col_start_from_props(&props(&[("start_col", 6)])), 6);
