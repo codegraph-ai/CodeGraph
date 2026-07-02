@@ -1013,6 +1013,26 @@ typedef struct { int x; } inline_struct;";
     }
 
     #[test]
+    fn test_is_type_expansion_accepts_type_names_rejects_constants_and_arrays() {
+        // Plain type names start with a letter or underscore -> accepted.
+        assert!(CPreprocessor::is_type_expansion("unsigned int"));
+        assert!(CPreprocessor::is_type_expansion("_Bool"));
+        assert!(CPreprocessor::is_type_expansion("void"));
+        // Parenthesised expressions (e.g. NULL's ((void*)0)) are rejected.
+        assert!(!CPreprocessor::is_type_expansion("((void*)0)"));
+        assert!(!CPreprocessor::is_type_expansion("(-1)"));
+        // Array types carry a `[` and are rejected.
+        assert!(!CPreprocessor::is_type_expansion("unsigned char[6]"));
+        // Pure numeric constants don't start with a letter/underscore -> rejected.
+        assert!(!CPreprocessor::is_type_expansion("1"));
+        assert!(!CPreprocessor::is_type_expansion("0"));
+        // A leading `*` (or any non-alphabetic, non-underscore char) is rejected.
+        assert!(!CPreprocessor::is_type_expansion("*ptr"));
+        // Empty expansion has no first char -> rejected.
+        assert!(!CPreprocessor::is_type_expansion(""));
+    }
+
+    #[test]
     fn test_analyze_macros_dedup_and_hint() {
         let pp = CPreprocessor::new();
         let macros = pp.analyze_macros("u32 a; u32 b; u32 c;");
