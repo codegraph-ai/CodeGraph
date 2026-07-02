@@ -820,6 +820,100 @@ Leaf content.
     }
 
     #[test]
+    fn extract_identifiers_dedups_across_chunks() {
+        // The same identifier appears in two chunks; extract_identifiers must
+        // emit it exactly once (the seen.insert false arm the single-chunk test
+        // never reaches) and retain the first-seen chunk's provenance.
+        let chunks = vec![
+            DocChunk {
+                id: "c1".into(),
+                source_file: "first.md".into(),
+                heading_path: vec!["First".into()],
+                title: "First".into(),
+                content: "The `SharedType` lives here alongside `OnlyFirst`.".into(),
+                indexed_at: 0,
+                suspicious: false,
+            },
+            DocChunk {
+                id: "c2".into(),
+                source_file: "second.md".into(),
+                heading_path: vec!["Second".into()],
+                title: "Second".into(),
+                content: "The `SharedType` is mentioned again with `OnlySecond`.".into(),
+                indexed_at: 0,
+                suspicious: false,
+            },
+        ];
+        let claims = extract_identifiers(&chunks);
+        let shared: Vec<&DocClaim> = claims
+            .iter()
+            .filter(|c| c.identifier == "SharedType")
+            .collect();
+        // Deduplicated to a single claim across the two chunks.
+        assert_eq!(shared.len(), 1);
+        // First-seen chunk wins provenance.
+        assert_eq!(shared[0].source_file, "first.md");
+        assert_eq!(shared[0].heading_path, vec!["First".to_string()]);
+        // Chunk-unique identifiers are still present once each.
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|c| c.identifier == "OnlyFirst")
+                .count(),
+            1
+        );
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|c| c.identifier == "OnlySecond")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn extract_identifiers_carries_per_chunk_provenance() {
+        // Distinct identifiers from distinct chunks each carry their own chunk's
+        // heading_path and source_file into the emitted DocClaim.
+        let chunks = vec![
+            DocChunk {
+                id: "a".into(),
+                source_file: "api.md".into(),
+                heading_path: vec!["API".into(), "Users".into()],
+                title: "Users".into(),
+                content: "Call `UserService` here.".into(),
+                indexed_at: 0,
+                suspicious: false,
+            },
+            DocChunk {
+                id: "b".into(),
+                source_file: "db.md".into(),
+                heading_path: vec!["DB".into()],
+                title: "DB".into(),
+                content: "Use `Repository` for storage.".into(),
+                indexed_at: 0,
+                suspicious: false,
+            },
+        ];
+        let claims = extract_identifiers(&chunks);
+        let user = claims
+            .iter()
+            .find(|c| c.identifier == "UserService")
+            .expect("UserService claim");
+        assert_eq!(user.source_file, "api.md");
+        assert_eq!(
+            user.heading_path,
+            vec!["API".to_string(), "Users".to_string()]
+        );
+        let repo = claims
+            .iter()
+            .find(|c| c.identifier == "Repository")
+            .expect("Repository claim");
+        assert_eq!(repo.source_file, "db.md");
+        assert_eq!(repo.heading_path, vec!["DB".to_string()]);
+    }
+
+    #[test]
     fn empty_heading_body_skipped() {
         let md = "\
 ## Section A
