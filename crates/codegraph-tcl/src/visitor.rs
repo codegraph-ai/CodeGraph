@@ -2510,4 +2510,55 @@ proc add {a b} {
             visitor.functions[0].parameters
         );
     }
+
+    // ── qualified_name / current_namespace pure helpers ─────────────────
+
+    #[test]
+    fn test_current_namespace_empty_stack_is_none() {
+        let visitor = TclVisitor::new(b"");
+        assert!(
+            visitor.current_namespace().is_none(),
+            "an empty namespace_stack must yield None"
+        );
+    }
+
+    #[test]
+    fn test_current_namespace_joins_stack_with_scope_resolution() {
+        let mut visitor = TclVisitor::new(b"");
+        visitor.namespace_stack.push("outer".to_string());
+        assert_eq!(visitor.current_namespace().as_deref(), Some("outer"));
+        visitor.namespace_stack.push("inner".to_string());
+        assert_eq!(
+            visitor.current_namespace().as_deref(),
+            Some("outer::inner"),
+            "nested namespaces must join with `::`"
+        );
+    }
+
+    #[test]
+    fn test_qualified_name_no_namespace_returns_verbatim() {
+        let visitor = TclVisitor::new(b"");
+        assert_eq!(
+            visitor.qualified_name("proc_name"),
+            "proc_name",
+            "with an empty namespace_stack the name is returned unchanged"
+        );
+    }
+
+    #[test]
+    fn test_qualified_name_prefixes_with_current_namespace() {
+        let mut visitor = TclVisitor::new(b"");
+        visitor.namespace_stack.push("app".to_string());
+        assert_eq!(
+            visitor.qualified_name("run"),
+            "app::run",
+            "a single namespace prefixes the name with `ns::`"
+        );
+        visitor.namespace_stack.push("util".to_string());
+        assert_eq!(
+            visitor.qualified_name("run"),
+            "app::util::run",
+            "nested namespaces prefix with the full `::`-joined path"
+        );
+    }
 }
