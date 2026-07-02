@@ -122,6 +122,19 @@ mod tests {
     }
 
     #[test]
+    fn success_rate_divides_when_attempts_present() {
+        // The non-zero-attempts divide arm (files_succeeded / files_attempted)
+        // was never exercised: the sole prior success_rate test hit only the
+        // files_attempted == 0 guard returning 0.0.
+        let m = ParserMetrics {
+            files_attempted: 4,
+            files_succeeded: 3,
+            ..Default::default()
+        };
+        assert_eq!(m.success_rate(), 0.75);
+    }
+
+    #[test]
     fn avg_parse_time_zero_when_no_success() {
         assert_eq!(ParserMetrics::default().avg_parse_time(), Duration::ZERO);
     }

@@ -438,6 +438,22 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_enter_scope_retains_peak_on_reentry() {
+        // Re-entering a scope after exiting drives enter_scope's
+        // `current_nesting > max_nesting_depth` FALSE arm: every prior test
+        // only ever entered strictly deeper, always taking the true arm that
+        // raises the peak. Here the second entry to depth 2 does not exceed
+        // the already-recorded peak of 2, so max_nesting_depth stays 2.
+        let mut builder = ComplexityBuilder::new();
+        builder.enter_scope(); // depth 1 > 0 -> peak becomes 1
+        builder.enter_scope(); // depth 2 > 1 -> peak becomes 2
+        builder.exit_scope(); // depth 1
+        builder.enter_scope(); // depth 2, 2 > 2 is false -> peak stays 2
+        assert_eq!(builder.current_depth(), 2);
+        assert_eq!(builder.build().max_nesting_depth, 2);
+    }
+
+    #[test]
     fn test_builder_current_depth_and_exit_saturates() {
         let mut builder = ComplexityBuilder::new();
         assert_eq!(builder.current_depth(), 0);
