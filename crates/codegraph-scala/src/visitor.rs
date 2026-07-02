@@ -884,6 +884,16 @@ mod tests {
     }
 
     #[test]
+    fn test_finally_clause_raises_exception_handlers() {
+        let source = b"def risky(): Int = {\n  try {\n    1\n  } finally {\n    println(1)\n  }\n}";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        // a finally_clause (no catch) is recorded as an exception handler, a branch
+        // the catch-only test never reaches
+        assert!(c.exception_handlers >= 1);
+    }
+
+    #[test]
     fn test_match_with_three_cases_accumulates_branches() {
         let source = b"def kind(x: Int): String = x match {\n  case 0 => \"a\"\n  case 1 => \"b\"\n  case _ => \"c\"\n}";
         let visitor = parse_and_visit(source);
