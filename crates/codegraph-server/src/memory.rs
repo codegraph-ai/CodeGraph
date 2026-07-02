@@ -705,6 +705,7 @@ mod tests {
     #[test]
     fn codegraph_home_dir_ends_with_dot_codegraph() {
         // HOME/USERPROFILE is always set in the test environment.
+        let _guard = crate::test_env::lock();
         let dir = codegraph_home_dir().unwrap();
         assert_eq!(dir.file_name().and_then(|n| n.to_str()), Some(".codegraph"));
     }
