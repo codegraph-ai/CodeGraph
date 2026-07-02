@@ -1086,6 +1086,22 @@ mod tests {
     }
 
     #[test]
+    fn test_qualify_name_no_namespace_returns_verbatim() {
+        let visitor = CSharpVisitor::new(b"");
+        // With current_namespace unset, the name is returned unchanged (no leading dot).
+        assert!(visitor.current_namespace.is_none());
+        assert_eq!(visitor.qualify_name("Widget"), "Widget");
+    }
+
+    #[test]
+    fn test_qualify_name_prefixes_dotted_namespace() {
+        let mut visitor = CSharpVisitor::new(b"");
+        // A set namespace is dot-joined to the name, preserving its own dotted segments.
+        visitor.current_namespace = Some("Acme.Billing".to_string());
+        assert_eq!(visitor.qualify_name("Invoice"), "Acme.Billing.Invoice");
+    }
+
+    #[test]
     fn test_visitor_class_extraction() {
         let source = b"public class Person { public string Name; }";
         let visitor = parse_and_visit(source);
