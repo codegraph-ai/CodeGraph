@@ -134,18 +134,8 @@ pub(crate) async fn analyze_impact(
                 if let Ok(edge_ids) = g.get_edges_between(source_id, start_node) {
                     for edge_id in edge_ids {
                         if let Ok(edge) = g.get_edge(edge_id) {
-                            let impact_type = match edge.edge_type {
-                                EdgeType::Calls => "caller",
-                                EdgeType::References => "reference",
-                                EdgeType::Extends => "subclass",
-                                EdgeType::Implements => "implementation",
-                                _ => "reference",
-                            };
-                            let severity = match change_type {
-                                "delete" | "rename" => "breaking",
-                                "modify" => "warning",
-                                _ => "info",
-                            };
+                            let impact_type = edge_impact_type(edge.edge_type);
+                            let severity = cross_project_severity(change_type);
                             if let Ok(ref_node) = g.get_node(source_id) {
                                 let name = node_props::name(ref_node).to_string();
                                 let path = node_props::path(ref_node).to_string();
@@ -225,15 +215,7 @@ pub(crate) async fn analyze_impact(
     // Use all_callers (depth 3) for risk_level to account for transitive call exposure
     // Cross-project consumers elevate risk (external breakage is harder to coordinate)
     let caller_count = all_callers.len();
-    let risk_level = match (change_type, caller_count) {
-        ("delete", n) if n > 10 => "critical",
-        ("delete", n) if n > 0 => "high",
-        ("rename", n) if n > 10 => "high",
-        ("rename", n) if n > 0 => "medium",
-        ("modify", n) if n > 20 => "medium",
-        ("modify", _) => "low",
-        _ => "low",
-    };
+    let risk_level = base_risk_level(change_type, caller_count);
 
     let (used_fallback_field, fallback_message) = if used_fallback {
         (
@@ -264,15 +246,7 @@ pub(crate) async fn analyze_impact(
 
     // Elevate risk when cross-project consumers exist — external breakage is
     // harder to coordinate than in-project changes
-    let risk_level = if !cross_project_impacts.is_empty() {
-        match risk_level {
-            "low" => "medium",
-            "medium" => "high",
-            _ => risk_level,
-        }
-    } else {
-        risk_level
-    };
+    let risk_level = escalate_risk_level(risk_level, !cross_project_impacts.is_empty());
 
     let total_impacted = direct_impacted + indirect_impacted.len() + cross_project_impacts.len();
 
@@ -302,6 +276,49 @@ fn cross_project_severity(change_type: &str) -> &'static str {
         "delete" | "rename" => "breaking",
         "modify" => "warning",
         _ => "info",
+    }
+}
+
+/// Classify an incoming edge into the `impact_type` label reported for a direct
+/// impact: callers via `Calls`, `subclass`/`implementation` for inheritance
+/// edges, and everything else (including `References`) as a plain `reference`.
+fn edge_impact_type(edge_type: EdgeType) -> &'static str {
+    match edge_type {
+        EdgeType::Calls => "caller",
+        EdgeType::References => "reference",
+        EdgeType::Extends => "subclass",
+        EdgeType::Implements => "implementation",
+        _ => "reference",
+    }
+}
+
+/// Compute the base risk level from the change type and the transitive caller
+/// count (depth-3 callers). Deletes are the most dangerous, renames next, and
+/// modifies least; a larger caller fan-out escalates within each change type.
+fn base_risk_level(change_type: &str, caller_count: usize) -> &'static str {
+    match (change_type, caller_count) {
+        ("delete", n) if n > 10 => "critical",
+        ("delete", n) if n > 0 => "high",
+        ("rename", n) if n > 10 => "high",
+        ("rename", n) if n > 0 => "medium",
+        ("modify", n) if n > 20 => "medium",
+        ("modify", _) => "low",
+        _ => "low",
+    }
+}
+
+/// Elevate the base risk one notch when cross-project consumers exist, since
+/// external breakage is harder to coordinate than in-project changes. Only
+/// `low`→`medium` and `medium`→`high` escalate; higher levels are unchanged.
+fn escalate_risk_level(base: &'static str, has_cross_project: bool) -> &'static str {
+    if has_cross_project {
+        match base {
+            "low" => "medium",
+            "medium" => "high",
+            _ => base,
+        }
+    } else {
+        base
     }
 }
 
@@ -1104,5 +1121,61 @@ mod tests {
         assert_eq!(cross_project_severity("used"), "info");
         assert_eq!(cross_project_severity(""), "info");
         assert_eq!(cross_project_severity("Delete"), "info"); // case-sensitive
+    }
+
+    #[test]
+    fn edge_impact_type_maps_each_edge_kind() {
+        assert_eq!(edge_impact_type(EdgeType::Calls), "caller");
+        assert_eq!(edge_impact_type(EdgeType::References), "reference");
+        assert_eq!(edge_impact_type(EdgeType::Extends), "subclass");
+        assert_eq!(edge_impact_type(EdgeType::Implements), "implementation");
+    }
+
+    #[test]
+    fn edge_impact_type_falls_back_to_reference_for_other_edges() {
+        // Any edge type outside the four classified kinds is a plain reference.
+        assert_eq!(edge_impact_type(EdgeType::Imports), "reference");
+        assert_eq!(edge_impact_type(EdgeType::Contains), "reference");
+    }
+
+    #[test]
+    fn base_risk_level_delete_scales_with_caller_count() {
+        assert_eq!(base_risk_level("delete", 11), "critical"); // n > 10
+        assert_eq!(base_risk_level("delete", 10), "high"); // 0 < n <= 10
+        assert_eq!(base_risk_level("delete", 1), "high");
+        assert_eq!(base_risk_level("delete", 0), "low"); // no callers -> catch-all
+    }
+
+    #[test]
+    fn base_risk_level_rename_scales_with_caller_count() {
+        assert_eq!(base_risk_level("rename", 11), "high"); // n > 10
+        assert_eq!(base_risk_level("rename", 10), "medium"); // 0 < n <= 10
+        assert_eq!(base_risk_level("rename", 1), "medium");
+        assert_eq!(base_risk_level("rename", 0), "low"); // no callers -> catch-all
+    }
+
+    #[test]
+    fn base_risk_level_modify_and_unknown() {
+        assert_eq!(base_risk_level("modify", 21), "medium"); // n > 20
+        assert_eq!(base_risk_level("modify", 20), "low"); // modify catch-all
+        assert_eq!(base_risk_level("modify", 0), "low");
+        assert_eq!(base_risk_level("used", 999), "low"); // unknown change type
+    }
+
+    #[test]
+    fn escalate_risk_level_bumps_one_notch_only_with_cross_project() {
+        // With cross-project consumers, low->medium and medium->high.
+        assert_eq!(escalate_risk_level("low", true), "medium");
+        assert_eq!(escalate_risk_level("medium", true), "high");
+        // High and critical are already the ceiling and stay put.
+        assert_eq!(escalate_risk_level("high", true), "high");
+        assert_eq!(escalate_risk_level("critical", true), "critical");
+    }
+
+    #[test]
+    fn escalate_risk_level_no_change_without_cross_project() {
+        assert_eq!(escalate_risk_level("low", false), "low");
+        assert_eq!(escalate_risk_level("medium", false), "medium");
+        assert_eq!(escalate_risk_level("critical", false), "critical");
     }
 }
