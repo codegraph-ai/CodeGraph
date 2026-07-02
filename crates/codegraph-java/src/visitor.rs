@@ -1791,4 +1791,53 @@ public class Holder {
         visitor.current_package = Some("com.example.app".to_string());
         assert_eq!(visitor.qualify_name("Widget"), "com.example.app.Widget");
     }
+
+    #[test]
+    fn test_extract_visibility_returns_access_modifier() {
+        // Each of the three Java access modifiers is returned verbatim
+        let visitor = JavaVisitor::new(b"");
+        assert_eq!(
+            visitor.extract_visibility(&["public".to_string()]),
+            "public"
+        );
+        assert_eq!(
+            visitor.extract_visibility(&["private".to_string()]),
+            "private"
+        );
+        assert_eq!(
+            visitor.extract_visibility(&["protected".to_string()]),
+            "protected"
+        );
+    }
+
+    #[test]
+    fn test_extract_visibility_skips_non_access_and_first_wins() {
+        // Non-access modifiers (static, final) are skipped; the first access
+        // modifier encountered in list order is the one returned
+        let visitor = JavaVisitor::new(b"");
+        assert_eq!(
+            visitor.extract_visibility(&[
+                "static".to_string(),
+                "final".to_string(),
+                "protected".to_string(),
+            ]),
+            "protected"
+        );
+        assert_eq!(
+            visitor.extract_visibility(&["public".to_string(), "private".to_string()]),
+            "public"
+        );
+    }
+
+    #[test]
+    fn test_extract_visibility_defaults_to_package() {
+        // Empty list and an access-modifier-free list both fall through to
+        // Java's default package-private visibility
+        let visitor = JavaVisitor::new(b"");
+        assert_eq!(visitor.extract_visibility(&[]), "package");
+        assert_eq!(
+            visitor.extract_visibility(&["static".to_string(), "abstract".to_string()]),
+            "package"
+        );
+    }
 }
