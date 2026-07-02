@@ -2069,4 +2069,112 @@ mod tests {
         // No node with this id exists → get_node fails → None.
         assert!(get_debug_hints(&g, 999_999).is_none());
     }
+
+    #[test]
+    fn ai_context_usage_examples_skip_test_callers_yield_none() {
+        // Only caller is test_-prefixed → skipped by the name filter → examples
+        // stays empty → get_usage_examples returns None.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let tester = add_fn(
+            &mut g,
+            "test_do_work",
+            "/src/t.rs",
+            1,
+            3,
+            "fn test_do_work() { do_work(); }",
+        );
+        edge(&mut g, tester, target, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert!(r.usage_examples.is_none());
+    }
+
+    #[test]
+    fn ai_context_usage_examples_include_references_edge_caller() {
+        // A References edge (not just Calls) is a valid usage source.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let reader = add_fn(
+            &mut g,
+            "reader",
+            "/src/r.rs",
+            1,
+            3,
+            "fn reader() { let _ = do_work; }",
+        );
+        edge(&mut g, reader, target, EdgeType::References);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        let examples = r.usage_examples.expect("usage examples");
+        assert_eq!(examples.len(), 1);
+        assert!(examples[0].code.contains("reader"));
+    }
+
+    #[test]
+    fn ai_context_architecture_incoming_relationships() {
+        // A neighbor that both Imports and Calls into the target yields the
+        // incoming-direction labels (imported_by / called_by), aggregated per module.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(
+            &mut g,
+            "doStuff",
+            "/src/services/auth.rs",
+            1,
+            5,
+            "fn doStuff() {}",
+        );
+        let neighbor = add_fn(
+            &mut g,
+            "handler",
+            "/src/api/http.rs",
+            1,
+            3,
+            "fn handler() {}",
+        );
+        edge(&mut g, neighbor, target, EdgeType::Calls);
+        edge(&mut g, neighbor, target, EdgeType::Imports);
+
+        let r =
+            get_ai_context(&g, "/src/services/auth.rs", 2, "explain", 100_000).expect("context");
+        let arch = r.architecture.expect("architecture");
+        let http = arch.neighbors.iter().find(|n| n.module == "http").unwrap();
+        assert!(http.relationship.contains("called_by"));
+        assert!(http.relationship.contains("imported_by"));
+    }
+
+    #[test]
+    fn ai_context_architecture_catch_all_depends_relationships() {
+        // A non-Calls/Imports edge (Extends) routes through the catch-all match
+        // arm: outgoing → depends_on, incoming → depended_on_by.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(
+            &mut g,
+            "doStuff",
+            "/src/services/auth.rs",
+            1,
+            5,
+            "fn doStuff() {}",
+        );
+        let base = add_fn(&mut g, "Base", "/src/core/base.rs", 1, 3, "struct Base;");
+        let child = add_fn(&mut g, "Child", "/src/ext/child.rs", 1, 3, "struct Child;");
+        edge(&mut g, target, base, EdgeType::Extends); // outgoing → depends_on
+        edge(&mut g, child, target, EdgeType::Extends); // incoming → depended_on_by
+
+        let r =
+            get_ai_context(&g, "/src/services/auth.rs", 2, "explain", 100_000).expect("context");
+        let arch = r.architecture.expect("architecture");
+        let base_n = arch.neighbors.iter().find(|n| n.module == "base").unwrap();
+        assert_eq!(base_n.relationship, "depends_on");
+        let child_n = arch.neighbors.iter().find(|n| n.module == "child").unwrap();
+        assert_eq!(child_n.relationship, "depended_on_by");
+    }
+
+    #[test]
+    fn architecture_info_none_for_empty_path_node() {
+        // A node with no path property → path_str is empty → None (guard branch).
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_node(&mut g, NodeType::Function, &[("name", str_prop("orphan"))]);
+        assert!(get_architecture_info(&g, id).is_none());
+    }
 }
