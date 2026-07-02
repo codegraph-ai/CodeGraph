@@ -648,4 +648,52 @@ mod tests {
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nodes[0].language, "");
     }
+
+    #[test]
+    fn build_call_graph_node_maps_all_fields_and_keeps_nonempty_language() {
+        let mut props = PropertyMap::new();
+        props.insert("name".to_string(), str_prop("do_work"));
+        props.insert("path".to_string(), str_prop("src/lib.rs"));
+        props.insert("signature".to_string(), str_prop("fn do_work() -> u32"));
+        props.insert("language".to_string(), str_prop("rust"));
+        props.insert("line_start".to_string(), PropertyValue::Int(10));
+        props.insert("line_end".to_string(), PropertyValue::Int(20));
+        props.insert("col_start".to_string(), PropertyValue::Int(4));
+        props.insert("col_end".to_string(), PropertyValue::Int(40));
+        let node = Node::new(7, NodeType::Function, props);
+
+        let cg = build_call_graph_node(7, &node, 3, Some("callees".to_string()));
+
+        assert_eq!(cg.id, "7");
+        assert_eq!(cg.name, "do_work");
+        assert_eq!(cg.path, "src/lib.rs");
+        assert_eq!(cg.signature, "fn do_work() -> u32");
+        assert_eq!(cg.language, "rust");
+        assert_eq!(cg.depth, 3);
+        assert_eq!(cg.direction, Some("callees".to_string()));
+        assert_eq!(cg.line_start, 10);
+        assert_eq!(cg.line_end, 20);
+        assert_eq!(cg.col_start, 4);
+        assert_eq!(cg.col_end, 40);
+    }
+
+    #[test]
+    fn build_call_graph_node_uses_defaults_for_absent_props() {
+        // A node with no properties exercises every fallback: empty strings for
+        // name/path/signature/language, zero line span, and the column defaults.
+        let node = Node::new(0, NodeType::Function, PropertyMap::new());
+
+        let cg = build_call_graph_node(0, &node, 0, None);
+
+        assert_eq!(cg.id, "0");
+        assert_eq!(cg.name, "");
+        assert_eq!(cg.path, "");
+        assert_eq!(cg.signature, "");
+        assert_eq!(cg.language, String::new());
+        assert_eq!(cg.direction, None);
+        assert_eq!(cg.line_start, 0);
+        assert_eq!(cg.line_end, 0);
+        assert_eq!(cg.col_start, 0);
+        assert_eq!(cg.col_end, 10000);
+    }
 }
