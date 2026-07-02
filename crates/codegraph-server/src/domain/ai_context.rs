@@ -1814,6 +1814,88 @@ mod tests {
     }
 
     // ============================================================
+    // make_related_symbol / make_related_symbol_for
+    // ============================================================
+
+    #[test]
+    fn make_related_symbol_maps_fields_and_consumes_budget() {
+        // A short function (<= MAX_RELATED_LINES) is emitted verbatim; the
+        // wrapper delegates to make_related_symbol_for with target None.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "helper", "/src/lib.rs", 5, 7, "fn helper() {}");
+        let mut budget = TokenBudget::new(1000);
+
+        let sym = make_related_symbol(&g, id, "callee", 0.75, &mut budget).expect("symbol");
+        assert_eq!(sym.name, "helper");
+        assert_eq!(sym.relationship, "callee");
+        assert_eq!(sym.code, "fn helper() {}");
+        assert_eq!(sym.relevance_score, 0.75);
+        assert_eq!(sym.location.uri, "file:///src/lib.rs");
+        assert_eq!(sym.location.range.start.line, 5);
+        assert_eq!(sym.location.range.end.line, 7);
+        // "fn helper() {}" is 14 bytes => 3 estimated tokens were charged.
+        assert_eq!(budget.used, estimate_tokens("fn helper() {}"));
+    }
+
+    #[test]
+    fn make_related_symbol_for_large_code_with_target_truncates_to_call_site() {
+        // 41 lines (> MAX_RELATED_LINES) with a known call site at index 20 =>
+        // the Some(target) arm routes through truncate_to_call_site.
+        let mut lines: Vec<String> = (0..41).map(|i| format!("stmt_{i}();")).collect();
+        lines[20] = "call_target();".to_string();
+        let source = lines.join("\n");
+
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "big", "/src/big.rs", 1, 41, &source);
+        let mut budget = TokenBudget::new(100_000);
+
+        let sym = make_related_symbol_for(&g, id, "caller", 1.0, &mut budget, Some("call_target"))
+            .expect("symbol");
+        assert!(sym.code.contains("call_target();"));
+        assert!(sym.code.contains("lines omitted"));
+        assert!(sym.code.lines().count() < 41);
+    }
+
+    #[test]
+    fn make_related_symbol_for_large_code_without_target_keeps_full_source() {
+        // Same oversized body, but target None => no truncation, full source kept.
+        let lines: Vec<String> = (0..41).map(|i| format!("stmt_{i}();")).collect();
+        let source = lines.join("\n");
+
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "big", "/src/big.rs", 1, 41, &source);
+        let mut budget = TokenBudget::new(100_000);
+
+        let sym =
+            make_related_symbol_for(&g, id, "caller", 0.5, &mut budget, None).expect("symbol");
+        assert_eq!(sym.code, source);
+        assert!(!sym.code.contains("lines omitted"));
+    }
+
+    #[test]
+    fn make_related_symbol_returns_none_when_budget_exhausted() {
+        // A zero budget can't cover the estimated tokens of a non-empty body.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "helper", "/src/lib.rs", 1, 1, "fn helper() {}");
+        let mut budget = TokenBudget::new(0);
+
+        assert!(make_related_symbol(&g, id, "callee", 0.5, &mut budget).is_none());
+        assert_eq!(budget.used, 0);
+    }
+
+    #[test]
+    fn make_related_symbol_for_end_line_zero_falls_back_to_start_line() {
+        // line_end == 0 => the emitted range end collapses onto start_line.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "helper", "/src/lib.rs", 12, 0, "fn helper() {}");
+        let mut budget = TokenBudget::new(1000);
+
+        let sym = make_related_symbol(&g, id, "callee", 0.5, &mut budget).expect("symbol");
+        assert_eq!(sym.location.range.start.line, 12);
+        assert_eq!(sym.location.range.end.line, 12);
+    }
+
+    // ============================================================
     // get_file_imports / get_dependencies (Imports-edge collectors)
     // ============================================================
 
