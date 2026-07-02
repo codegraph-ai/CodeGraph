@@ -327,6 +327,35 @@ mod tests {
     }
 
     #[test]
+    fn with_static_model_errors_on_missing_model_dir() {
+        // An empty directory has no config.json, so StaticEmbedding::from_pretrained
+        // fails and with_static_model propagates the error rather than constructing
+        // a half-built engine. Every other engine test builds via the struct literal
+        // with a MockEmbedder, so this real constructor's failure arm was unexercised.
+        let dir = tempfile::tempdir().unwrap();
+        let result = VectorEngine::with_static_model(dir.path());
+        assert!(
+            result.is_err(),
+            "with_static_model should fail when the model dir has no config.json"
+        );
+    }
+
+    #[test]
+    fn from_backend_static_dispatches_to_static_model_and_propagates_error() {
+        // from_backend's Static arm routes to with_static_model; pointing it at an
+        // empty dir exercises that dispatch branch and confirms the load error
+        // surfaces through from_backend. The Fastembed arm can't be tested without
+        // downloading an ONNX model, so the Static error path is the model-free frontier.
+        let dir = tempfile::tempdir().unwrap();
+        let backend = EmbeddingBackend::Static(dir.path().to_path_buf());
+        let result = VectorEngine::from_backend(PathBuf::from("unused-cache"), &backend);
+        assert!(
+            result.is_err(),
+            "from_backend(Static) should surface the static-model load failure"
+        );
+    }
+
+    #[test]
     fn default_cache_dir_ends_with_codegraph_fastembed_cache() {
         // The default cache dir always resolves under a `.codegraph/fastembed_cache`
         // suffix regardless of which home var (HOME/USERPROFILE) or fallback (".")
