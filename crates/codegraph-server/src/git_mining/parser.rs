@@ -612,6 +612,81 @@ mod tests {
         assert!(confidence < 0.7);
     }
 
+    #[test]
+    fn detect_pattern_breaking_change_subject_keyword_tier() {
+        // Prior breaking tests all seed the body with "BREAKING CHANGE", hitting
+        // the Tier-1 body arm (0.95). The Tier-2 subject-keyword arm (0.8) that
+        // matches a bare "breaking"/"incompatible" token stayed unexercised.
+        let (pattern, confidence) =
+            detect_pattern(&make_commit("Made an incompatible schema adjustment"));
+        assert!(matches!(pattern, CommitPattern::BreakingChange));
+        assert!((confidence - 0.8).abs() < f32::EPSILON);
+
+        // The "breaking" keyword alone (no "breaking change" phrase, no prefix)
+        // resolves through the same 0.8 keyword arm.
+        let (pattern, confidence) = detect_pattern(&make_commit("A breaking rework of the API"));
+        assert!(matches!(pattern, CommitPattern::BreakingChange));
+        assert!((confidence - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn detect_pattern_deprecation_body_keyword_arm() {
+        // The keyword deprecation test puts "deprecated" in the subject; the
+        // body_lower.contains("deprecat") half of that arm had no coverage.
+        let mut commit = make_commit("update the client wrapper");
+        commit.body = "This quietly deprecates the legacy connection path.".to_string();
+        let (pattern, confidence) = detect_pattern(&commit);
+        assert!(matches!(pattern, CommitPattern::Deprecation));
+        assert!((confidence - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn detect_pattern_test_keyword_coverage_and_spec_arms() {
+        // lazy_test uses the "tests" token; the "coverage" and "spec " arms of
+        // the same keyword tier were never reached.
+        let (pattern, confidence) = detect_pattern(&make_commit("Improve coverage of the parser"));
+        assert!(matches!(pattern, CommitPattern::Test));
+        assert!((confidence - 0.7).abs() < f32::EPSILON);
+
+        let (pattern, _) = detect_pattern(&make_commit("Add spec for the widget renderer"));
+        assert!(matches!(pattern, CommitPattern::Test));
+    }
+
+    #[test]
+    fn detect_pattern_refactor_alternate_keywords() {
+        // lazy_refactor only covers "refactored" and "rename"; the reorganiz /
+        // simplif / extract keyword arms stayed unexercised.
+        for subject in [
+            "Reorganized the module layout",
+            "Simplify the config loader",
+            "Extract helper from the parser",
+        ] {
+            let (pattern, _) = detect_pattern(&make_commit(subject));
+            assert!(
+                matches!(pattern, CommitPattern::Refactor),
+                "{subject:?} should be a refactor"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_pattern_feature_alternate_keywords() {
+        // lazy_feature covers "added" and "implement"; introduce / support for /
+        // enable were untested feature keyword arms.
+        for subject in [
+            "Introduce a plugin registry",
+            "Support for streaming responses",
+            "Enable background indexing",
+        ] {
+            let (pattern, confidence) = detect_pattern(&make_commit(subject));
+            assert!(
+                matches!(pattern, CommitPattern::Feature),
+                "{subject:?} should be a feature"
+            );
+            assert!((confidence - 0.7).abs() < f32::EPSILON);
+        }
+    }
+
     // --- parse_log_output ---
 
     /// Build a single formatted git-log record from its six fields.
