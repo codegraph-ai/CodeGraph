@@ -907,4 +907,47 @@ mod tests {
         let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
         assert!(bp.starts_with("{}"), "unexpected body_prefix {:?}", bp);
     }
+    #[test]
+    fn test_complexity_symbolic_or_operator_increases() {
+        // The `||` spelling in a binary_expression raises complexity like `&&`.
+        let source = b"sub pick {\n    my $c = $a || $b;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.logical_operators >= 1);
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_word_and_operator_gap() {
+        // tree-sitter-perl parses `$c = $a and $b` as a unary_expression wrapping
+        // the assignment, so no binary_expression contains " and " and complexity
+        // stays at baseline - a grammar-shape gap pinned as a regression test.
+        let source = b"sub combine {\n    $c = $a and $b;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_complexity_word_and_operator_via_mixed_expression() {
+        // In `my $c = $a or $b and $d` the outer binary_expression spans the whole
+        // statement, so its text hits the " and " check (evaluated before " or ").
+        let source = b"sub mixed {\n    my $c = $a or $b and $d;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.logical_operators >= 1);
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_c_style_for_gap() {
+        // tree-sitter-perl emits `for_statement_1` for the C-style
+        // `for (init; cond; incr)` form, which the complexity visitor does not
+        // match (it only handles for_statement/foreach_statement), so complexity
+        // stays at baseline 1.
+        let source = b"sub loopy {\n    for (my $i = 0; $i < 10; $i++) {\n        print $i;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
 }
