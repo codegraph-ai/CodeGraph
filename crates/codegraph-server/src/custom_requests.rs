@@ -646,4 +646,97 @@ mod tests {
             .expect("valid params should dispatch and serialize a response");
         assert_eq!(result["symbols"], json!([]));
     }
+
+    // ---- Additional success-path dispatch arms (position/URI handlers) ----
+    //
+    // These arms resolve a node at a file position first; on an empty graph the
+    // position lookup misses and each handler returns an empty-but-Ok response,
+    // so the full arm (deserialize params → handle → to_value) still runs.
+
+    #[tokio::test]
+    async fn call_graph_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/getCallGraph",
+                json!({
+                    "uri": "file:///tmp/nonexistent.rs",
+                    "position": { "line": 0, "character": 0 }
+                }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["root"], json!(null));
+        assert_eq!(result["nodes"], json!([]));
+        assert_eq!(result["edges"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn analyze_impact_dispatch_returns_empty_summary_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/analyzeImpact",
+                json!({
+                    "uri": "file:///tmp/nonexistent.rs",
+                    "position": { "line": 0, "character": 0 },
+                    "analysisType": "modify"
+                }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["directImpact"], json!([]));
+        assert_eq!(result["affectedTests"], json!([]));
+        assert_eq!(result["summary"]["filesAffected"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn parser_metrics_dispatch_returns_zeroed_totals_on_fresh_backend() {
+        let backend = test_backend();
+        // No parses have run, so every registered language reports zeroed
+        // counters and the totals collapse to zeros with a 0.0 success rate
+        // (the `attempted == 0` else arm).
+        let result = backend
+            .handle_custom_request("codegraph/getParserMetrics", json!({}))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        let metrics = result["metrics"].as_array().expect("metrics is an array");
+        assert!(!metrics.is_empty(), "registered languages should be listed");
+        assert!(metrics
+            .iter()
+            .all(|m| m["filesAttempted"] == json!(0) && m["filesSucceeded"] == json!(0)));
+        assert_eq!(result["totals"]["filesAttempted"], json!(0));
+        assert_eq!(result["totals"]["successRate"], json!(0.0));
+    }
+
+    #[tokio::test]
+    async fn find_related_tests_dispatch_returns_no_tests_on_empty_graph() {
+        let backend = test_backend();
+        // The position lookup misses on the empty graph, so the domain query
+        // yields no tests and `truncated` is omitted (serialized as null).
+        let result = backend
+            .handle_custom_request(
+                "codegraph/findRelatedTests",
+                json!({
+                    "uri": "file:///tmp/nonexistent.rs",
+                    "position": { "line": 0, "character": 0 }
+                }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["tests"], json!([]));
+        assert_eq!(result["truncated"], json!(null));
+    }
+
+    #[tokio::test]
+    async fn node_location_dispatch_returns_null_for_missing_node() {
+        let backend = test_backend();
+        // A parseable-but-absent NodeId (u64) makes get_node error, so the
+        // handler returns Ok(None), which serializes to JSON null.
+        let result = backend
+            .handle_custom_request("codegraph/getNodeLocation", json!({ "nodeId": "999999" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result, json!(null));
+    }
 }
