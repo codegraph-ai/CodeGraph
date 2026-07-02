@@ -510,6 +510,51 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_deprecation_conventional_and_keyword() {
+        // Conventional `deprecate:` prefix — high confidence. No prior test
+        // ever produced a Deprecation pattern, so both arms were unexercised.
+        let (pattern, confidence) = detect_pattern(&make_commit("deprecate: old config format"));
+        assert!(matches!(pattern, CommitPattern::Deprecation));
+        assert!((confidence - 0.9).abs() < f32::EPSILON);
+
+        // The `deprecated:` spelling is the other half of the conventional arm.
+        let (pattern, _) = detect_pattern(&make_commit("deprecated: legacy auth flow"));
+        assert!(matches!(pattern, CommitPattern::Deprecation));
+
+        // Keyword anywhere in a lazy subject drops to the moderate tier (0.75).
+        let (pattern, confidence) =
+            detect_pattern(&make_commit("Marked the legacy API as deprecated"));
+        assert!(matches!(pattern, CommitPattern::Deprecation));
+        assert!((confidence - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_detect_architectural_decision() {
+        // All three conventional prefixes map to ArchitecturalDecision at 0.85;
+        // detect_pattern's arch tier had no prior coverage (only the
+        // to_memory_kind path constructed the pattern directly).
+        for subject in [
+            "arch: adopt hexagonal layering",
+            "adr: use RocksDB",
+            "decision: split API",
+        ] {
+            let (pattern, confidence) = detect_pattern(&make_commit(subject));
+            assert!(
+                matches!(pattern, CommitPattern::ArchitecturalDecision),
+                "{subject:?} should be an architectural decision"
+            );
+            assert!((confidence - 0.85).abs() < f32::EPSILON);
+        }
+
+        // A body mention triggers it even when the subject is neutral (the
+        // body_lower.contains("architectural decision") arm).
+        let mut commit = make_commit("update storage layer");
+        commit.body = "This records an architectural decision to use append-only logs.".to_string();
+        let (pattern, _) = detect_pattern(&commit);
+        assert!(matches!(pattern, CommitPattern::ArchitecturalDecision));
+    }
+
+    #[test]
     fn test_conventional_higher_confidence_than_keyword() {
         let (_, conv_confidence) = detect_pattern(&make_commit("fix: null pointer"));
         let (_, kw_confidence) = detect_pattern(&make_commit("Fixed null pointer"));
