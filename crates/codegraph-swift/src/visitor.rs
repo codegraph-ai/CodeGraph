@@ -1328,6 +1328,33 @@ func countDown() {
     }
 
     #[test]
+    fn test_complexity_plain_while() {
+        // A plain while loop adds a loop
+        let source = br#"
+func drain() {
+    var x = 10
+    while x > 0 {
+        x -= 1
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.loops >= 1,
+            "Expected >= 1 loop from while, got {}",
+            complexity.loops
+        );
+        assert!(
+            complexity.cyclomatic_complexity > 1,
+            "Expected cyclomatic > 1 from while, got {}",
+            complexity.cyclomatic_complexity
+        );
+    }
+
+    #[test]
     fn test_complexity_nesting_depth() {
         // Nested if inside for inside if => depth >= 3
         let source = br#"
