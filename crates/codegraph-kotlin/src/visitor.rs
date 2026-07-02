@@ -1776,4 +1776,18 @@ class C {
             .iter()
             .any(|c| c.caller == "run" && c.callee == "doWork"));
     }
+
+    #[test]
+    fn test_qualify_name_no_package_returns_verbatim() {
+        let visitor = KotlinVisitor::new(b"");
+        assert!(visitor.current_package.is_none());
+        assert_eq!(visitor.qualify_name("Foo"), "Foo");
+    }
+
+    #[test]
+    fn test_qualify_name_prefixes_with_dotted_package() {
+        let mut visitor = KotlinVisitor::new(b"");
+        visitor.current_package = Some("com.example.app".to_string());
+        assert_eq!(visitor.qualify_name("Bar"), "com.example.app.Bar");
+    }
 }
