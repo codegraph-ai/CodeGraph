@@ -279,12 +279,80 @@ fn canonical_cycle(cycle: &[NodeId]) -> Vec<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph::{PropertyMap, PropertyValue};
 
     fn adjacency(edges: &[(NodeId, &[NodeId])]) -> HashMap<NodeId, Vec<NodeId>> {
         edges
             .iter()
             .map(|(id, neighbors)| (*id, neighbors.to_vec()))
             .collect()
+    }
+
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, name: &str, path: &str) -> NodeId {
+        let mut props = PropertyMap::new();
+        props.insert("name".to_string(), PropertyValue::String(name.to_string()));
+        props.insert("path".to_string(), PropertyValue::String(path.to_string()));
+        graph.add_node(ty, props).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    #[test]
+    fn build_import_adjacency_links_files_over_import_edge() {
+        // A imports B; both are files in the restriction set.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let b = add_node(&mut g, NodeType::CodeFile, "b.rs", "/src/b.rs");
+        edge(&mut g, a, b, EdgeType::Imports);
+        let set: HashSet<NodeId> = [a, b].into_iter().collect();
+
+        let adj = build_import_adjacency(&g, &set);
+        // Every file in the set gets an entry; A points at B, B has none.
+        assert_eq!(adj.get(&a), Some(&vec![b]));
+        assert_eq!(adj.get(&b), Some(&Vec::<NodeId>::new()));
+    }
+
+    #[test]
+    fn build_import_adjacency_counts_imports_from_edge() {
+        // ImportsFrom is treated the same as Imports.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let b = add_node(&mut g, NodeType::CodeFile, "b.rs", "/src/b.rs");
+        edge(&mut g, a, b, EdgeType::ImportsFrom);
+        let set: HashSet<NodeId> = [a, b].into_iter().collect();
+
+        let adj = build_import_adjacency(&g, &set);
+        assert_eq!(adj.get(&a), Some(&vec![b]));
+    }
+
+    #[test]
+    fn build_import_adjacency_skips_neighbor_outside_file_set() {
+        // A imports module M, but M is not in the restriction set.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let m = add_node(&mut g, NodeType::Module, "serde", "");
+        edge(&mut g, a, m, EdgeType::Imports);
+        let set: HashSet<NodeId> = [a].into_iter().collect();
+
+        let adj = build_import_adjacency(&g, &set);
+        assert_eq!(adj.get(&a), Some(&Vec::<NodeId>::new()));
+    }
+
+    #[test]
+    fn build_import_adjacency_ignores_non_import_edges() {
+        // A calls B (both files in set) but there is no import edge.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let b = add_node(&mut g, NodeType::CodeFile, "b.rs", "/src/b.rs");
+        edge(&mut g, a, b, EdgeType::Calls);
+        let set: HashSet<NodeId> = [a, b].into_iter().collect();
+
+        let adj = build_import_adjacency(&g, &set);
+        assert_eq!(adj.get(&a), Some(&Vec::<NodeId>::new()));
     }
 
     #[test]
