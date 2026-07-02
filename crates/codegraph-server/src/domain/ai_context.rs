@@ -1778,6 +1778,29 @@ mod tests {
     }
 
     #[test]
+    fn truncate_to_call_site_start_one_prepends_signature_without_leading_omission() {
+        // Target on line index 6 (CALL_SITE_CONTEXT=5) => start=1, exercising the
+        // `start > 0` (prepend signature) branch WITHOUT the nested `start > 1`
+        // leading-omission marker. With 20 lines, end=12 (<20) so exactly one
+        // trailing "lines omitted" marker is emitted - never a leading one.
+        let mut lines: Vec<String> = vec!["fn signature() {".to_string()];
+        for i in 1..20 {
+            if i == 6 {
+                lines.push("    target_call();".to_string());
+            } else {
+                lines.push(format!("    line_{i}();"));
+            }
+        }
+        let code = lines.join("\n");
+        let out = truncate_to_call_site(&code, "target_call");
+        assert!(out.contains("fn signature() {"));
+        assert!(out.contains("target_call();"));
+        // start=1 skips the leading marker, leaving only the trailing one.
+        assert_eq!(out.matches("lines omitted").count(), 1);
+        assert!(out.contains("// ... (8 lines omitted)"));
+    }
+
+    #[test]
     fn truncate_to_call_site_not_found_falls_back_to_max_related_lines() {
         // 40 lines, none containing the target => fallback takes the first
         // MAX_RELATED_LINES (30) and reports the remaining 10 as omitted.
