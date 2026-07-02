@@ -796,4 +796,84 @@ mod tests {
         assert_eq!(extract_cics_program_name("PROGRAM('')"), None);
         assert_eq!(extract_cics_program_name("PROGRAM(   )"), None);
     }
+
+    #[test]
+    fn extract_goto_and_cics_covers_goto_variants_and_caller_fallback() {
+        // MAIN spans lines 1-2, HELPER spans lines 4-5. Line 3 sits between
+        // them and belongs to no paragraph, exercising the "file" fallback.
+        let paragraphs = vec![
+            FunctionEntity::new("MAIN", 1, 2),
+            FunctionEntity::new("HELPER", 4, 5),
+        ];
+        let source = concat!(
+            "GO TO TARGET-A.\n", // line 1: standard prefix, trailing dot stripped
+            "GO  TO TARGET-B\n", // line 2: double-space "GO  TO " variant
+            "go to target-c\n",  // line 3: lowercase variant, no enclosing paragraph
+            "GO TO A B\n",       // line 4: target with a space -> rejected
+            "GO TO .\n",         // line 5: empty target after dot strip -> rejected
+        );
+        let mut calls = Vec::new();
+        extract_goto_and_cics(source, &paragraphs, &mut calls);
+
+        // Only the three well-formed GO TO lines produce calls.
+        assert_eq!(calls.len(), 3);
+        // Caller resolution + trailing-dot strip on the standard prefix.
+        assert_eq!(calls[0].caller, "MAIN");
+        assert_eq!(calls[0].callee, "TARGET-A");
+        assert_eq!(calls[0].call_site_line, 1);
+        // Double-space prefix still resolves the caller and target.
+        assert_eq!(calls[1].caller, "MAIN");
+        assert_eq!(calls[1].callee, "TARGET-B");
+        // Lowercase prefix on a line outside every paragraph -> "file" caller.
+        assert_eq!(calls[2].caller, "file");
+        assert_eq!(calls[2].callee, "target-c");
+        assert_eq!(calls[2].call_site_line, 3);
+    }
+
+    #[test]
+    fn extract_goto_and_cics_covers_cics_xctl_link_and_next_line_program() {
+        let paragraphs = vec![FunctionEntity::new("DRIVER", 1, 4)];
+        let source = concat!(
+            "EXEC CICS XCTL PROGRAM('PROGA') END-EXEC\n", // line 1: XCTL, quoted name
+            "EXEC CICS LINK PROGRAM(WS-PROGB) END-EXEC\n", // line 2: LINK, bare name
+            "EXEC CICS XCTL\n",                           // line 3: no PROGRAM clause here
+            "PROGRAM(PROGC)\n",                           // line 4: PROGRAM on its own line
+        );
+        let mut calls = Vec::new();
+        extract_goto_and_cics(source, &paragraphs, &mut calls);
+
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        // XCTL and LINK inline forms plus the standalone PROGRAM line all resolve.
+        assert!(callees.contains(&"PROGA"), "got {callees:?}");
+        assert!(callees.contains(&"WS-PROGB"), "got {callees:?}");
+        assert!(callees.contains(&"PROGC"), "got {callees:?}");
+        // The bare "EXEC CICS XCTL" line without a PROGRAM clause adds nothing.
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|c| c.caller == "DRIVER"));
+    }
+
+    #[test]
+    fn extract_exec_sql_covers_caller_fallback_and_unterminated_block() {
+        // QUERY-PARA covers lines 1-3; the EXEC SQL at line 5 sits outside it,
+        // and the block never closes with END-EXEC so the accumulation loop
+        // must run to the final source line without panicking.
+        let paragraphs = vec![FunctionEntity::new("QUERY-PARA", 1, 3)];
+        let source = concat!(
+            "QUERY-PARA.\n",                      // line 1
+            "    display 'start'.\n",             // line 2
+            "    stop run.\n",                    // line 3
+            "\n",                                 // line 4
+            "EXEC SQL SELECT * FROM CUSTOMERS\n", // line 5: no terminator follows
+            "    WHERE ID = 1\n",                 // line 6
+        );
+        let mut calls = Vec::new();
+        extract_exec_sql(source, &paragraphs, &mut calls);
+
+        assert_eq!(calls.len(), 1);
+        // Line 5 is outside QUERY-PARA (1-3), so the caller falls back to "file".
+        assert_eq!(calls[0].caller, "file");
+        assert_eq!(calls[0].callee, "SQL:CUSTOMERS");
+        // The recorded site is the 1-indexed EXEC SQL start line.
+        assert_eq!(calls[0].call_site_line, 5);
+    }
 }
