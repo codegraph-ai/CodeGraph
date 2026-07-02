@@ -1189,4 +1189,87 @@ mod tests {
 
         assert!(result.tests.is_empty());
     }
+
+    #[tokio::test]
+    async fn recent_git_changes_populated_from_workspace_repo() {
+        use std::path::Path;
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        /// Run a git command in `dir`, panicking on failure.
+        fn git(dir: &Path, args: &[&str]) {
+            let output = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git command should run");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // A committed file inside a real git repo drives the section-5 Some(ws)
+        // arm: every other test passes an empty workspace list, so the git
+        // executor + log parsing path was never exercised.
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.name", "Test User"]);
+        git(repo, &["config", "user.email", "test@example.com"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("src.rs"), "fn target() {}\n").unwrap();
+        git(repo, &["add", "src.rs"]);
+        git(repo, &["commit", "-q", "-m", "feat: initial commit"]);
+        let full_hash = {
+            let out = Command::new("git")
+                .current_dir(repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        // The node's `path` is the repo-relative file — it feeds both symbol
+        // resolution (file_path arg) and the git log path filter (sym_path).
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("src.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(1)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[repo.to_path_buf()],
+            "src.rs",
+            "file:///src.rs",
+            1,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.recent_changes.len(), 1, "one commit touched src.rs");
+        let change = &result.recent_changes[0];
+        // Hash is truncated to the first 8 chars of the full SHA.
+        assert_eq!(change.hash.len(), 8);
+        assert!(full_hash.starts_with(&change.hash));
+        assert_eq!(change.subject, "feat: initial commit");
+        assert_eq!(change.author, "Test User");
+        assert!(!change.date.is_empty());
+        assert!(result.metadata.sections.recent_changes);
+    }
 }
