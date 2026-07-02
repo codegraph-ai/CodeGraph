@@ -940,4 +940,84 @@ class Greeter:
             "Relative import ..models should be internal"
         );
     }
+
+    #[test]
+    fn test_extract_first_string_arg_branches() {
+        // Double-quoted argument extracted verbatim (path braces preserved).
+        assert_eq!(
+            extract_first_string_arg("app.get(\"/users/{id}\")").as_deref(),
+            Some("/users/{id}")
+        );
+        // Single-quoted argument is equally accepted.
+        assert_eq!(
+            extract_first_string_arg("app.get('/home')").as_deref(),
+            Some("/home")
+        );
+        // First quoted string wins when several are present.
+        assert_eq!(
+            extract_first_string_arg("route(\"a\", \"b\")").as_deref(),
+            Some("a")
+        );
+        // The opening quote fixes the delimiter: an inner double quote inside a
+        // single-quoted string is treated as content, not a terminator.
+        assert_eq!(
+            extract_first_string_arg("x('a\"b')").as_deref(),
+            Some("a\"b")
+        );
+        // Empty quoted string is accepted and yields an empty String.
+        assert_eq!(extract_first_string_arg("x(\"\")").as_deref(), Some(""));
+        // No quote at all -> None.
+        assert_eq!(extract_first_string_arg("app.route(path)"), None);
+        // Unterminated quote (no matching closer before end) -> None.
+        assert_eq!(extract_first_string_arg("app.get(\"/oops"), None);
+    }
+
+    #[test]
+    fn test_detect_http_decorator_arms() {
+        // `.METHOD(` pattern (FastAPI/Flask/Starlette): method uppercased, route
+        // pulled from the first string arg.
+        assert_eq!(
+            detect_http_decorator(&["app.get(\"/users\")".to_string()]),
+            Some(("GET".to_string(), "/users".to_string()))
+        );
+        // The method loop is ordered but each pattern is distinct; `.post(`
+        // resolves to POST.
+        assert_eq!(
+            detect_http_decorator(&["router.post(\"/items\")".to_string()]),
+            Some(("POST".to_string(), "/items".to_string()))
+        );
+        // `.route(` without a methods= list defaults to GET.
+        assert_eq!(
+            detect_http_decorator(&["app.route(\"/home\")".to_string()]),
+            Some(("GET".to_string(), "/home".to_string()))
+        );
+        // `.route(` with methods= picks the listed verb via the lowercase probe.
+        assert_eq!(
+            detect_http_decorator(&["app.route(\"/submit\", methods=[\"POST\"])".to_string()]),
+            Some(("POST".to_string(), "/submit".to_string()))
+        );
+        // A `.METHOD(` decorator with no string arg falls back to "/" route.
+        assert_eq!(
+            detect_http_decorator(&["app.delete()".to_string()]),
+            Some(("DELETE".to_string(), "/".to_string()))
+        );
+        // Django REST `api_view(...)`: the method probe compares an uppercase
+        // needle against the lowercased attr, so it never matches and the arm
+        // always yields ("GET", "/") regardless of the listed verbs.
+        assert_eq!(
+            detect_http_decorator(&["api_view([\"POST\"])".to_string()]),
+            Some(("GET".to_string(), "/".to_string()))
+        );
+        // First matching attribute wins across the list; a non-HTTP decorator is
+        // skipped before the route decorator is reached.
+        assert_eq!(
+            detect_http_decorator(&["staticmethod".to_string(), "app.put(\"/p\")".to_string()]),
+            Some(("PUT".to_string(), "/p".to_string()))
+        );
+        // No HTTP decorator present -> None.
+        assert_eq!(
+            detect_http_decorator(&["staticmethod".to_string(), "cached".to_string()]),
+            None
+        );
+    }
 }
