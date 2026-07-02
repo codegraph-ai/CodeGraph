@@ -998,4 +998,59 @@ mod tests {
         link_to_file(&mut g, file, func).unwrap();
         assert_eq!(get_functions_in_file(&g, file).unwrap(), vec![func]);
     }
+
+    #[test]
+    fn circular_deps_ignores_cycle_without_file_nodes() {
+        // A Calls cycle between two Function nodes forms a genuine 2-node SCC, but
+        // it contains no CodeFile nodes, so file_nodes stays empty and the
+        // `file_nodes.len() > 1` guard rejects it via its len==0 arm. Every prior
+        // circular_deps test either builds a real file cycle (len 2) or produces
+        // only single-file singleton SCCs (len 1), so the empty-file_nodes false
+        // arm - together with the inner CodeFile type filter being false for both
+        // members of a cyclic SCC - was never reached.
+        let mut g = graph();
+        let a = g
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "a"))
+            .unwrap();
+        let b = g
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "b"))
+            .unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(b, a, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        // The cycle exists at the graph level...
+        let sccs = g.find_strongly_connected_components().unwrap();
+        assert!(sccs
+            .iter()
+            .any(|s| s.len() == 2 && s.contains(&a) && s.contains(&b)));
+        // ...but circular_deps reports nothing because neither node is a file.
+        assert!(circular_deps(&g).unwrap().is_empty());
+    }
+
+    #[test]
+    fn circular_deps_ignores_multi_node_scc_with_single_file() {
+        // A cycle through exactly one CodeFile and one non-file node (a Module)
+        // yields a multi-node SCC whose file_nodes has length 1, so the `> 1`
+        // guard still rejects it. This drives the inner CodeFile type filter both
+        // ways within one cyclic SCC (true for the file, false for the module) and
+        // hits the len==1 false arm from a genuine multi-node cycle - existing
+        // len==1 coverage comes only from lone-file singleton SCCs, never a cycle.
+        let mut g = graph();
+        let file = add_file(&mut g, "a.rs", "rust").unwrap();
+        let m = add_module(&mut g, "m", "m.rs").unwrap();
+        g.add_edge(file, m, EdgeType::Contains, PropertyMap::new())
+            .unwrap();
+        g.add_edge(m, file, EdgeType::References, PropertyMap::new())
+            .unwrap();
+
+        // The file and module form a real 2-node SCC...
+        let sccs = g.find_strongly_connected_components().unwrap();
+        assert!(sccs
+            .iter()
+            .any(|s| s.len() == 2 && s.contains(&file) && s.contains(&m)));
+        // ...but only one file participates, so no circular file dependency is reported.
+        assert!(circular_deps(&g).unwrap().is_empty());
+    }
 }
