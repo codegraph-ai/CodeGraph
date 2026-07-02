@@ -385,4 +385,47 @@ mod tests {
         assert_eq!(Renamed.suggested_action(), SuggestedAction::Update);
         assert_eq!(Moved.suggested_action(), SuggestedAction::Update);
     }
+
+    #[test]
+    fn test_new_with_valid_at() {
+        // new_with_valid_at was untested: unlike new_current (valid_at == created_at
+        // == now), it lets valid_at predate creation while created_at stays "now".
+        let backdated = Utc::now() - Duration::hours(5);
+        let meta = TemporalMetadata::new_with_valid_at(backdated);
+
+        assert_eq!(meta.valid_at, backdated);
+        // created_at is stamped at construction time, strictly after the backdated
+        // valid_at — so the two fields genuinely diverge (the new_current invariant
+        // that they're equal does not hold here).
+        assert!(meta.created_at > backdated);
+        assert!(meta.invalid_at.is_none());
+        assert!(meta.superseded_at.is_none());
+        assert!(meta.is_current());
+
+        // Valid from the supplied instant onward, not before it.
+        assert!(meta.was_valid_at(backdated + Duration::hours(1)));
+        assert!(!meta.was_valid_at(backdated - Duration::hours(1)));
+    }
+
+    #[test]
+    fn test_invalidate_at() {
+        // invalidate_at pins invalid_at to a caller-supplied timestamp, unlike
+        // invalidate() which always uses Utc::now().
+        let mut meta = TemporalMetadata::new_current();
+        meta.valid_at = Utc::now() - Duration::hours(3);
+
+        // A past cutoff makes the record no longer current.
+        let cutoff = Utc::now() - Duration::hours(1);
+        meta.invalidate_at(cutoff);
+        assert_eq!(meta.invalid_at, Some(cutoff));
+        assert!(!meta.is_current());
+        // was_valid_at gates on invalid_at > time: true strictly before the cutoff.
+        assert!(meta.was_valid_at(cutoff - Duration::minutes(30)));
+        assert!(!meta.was_valid_at(cutoff + Duration::minutes(30)));
+
+        // A future cutoff leaves the record current (invalid_at > now).
+        let mut future_meta = TemporalMetadata::new_current();
+        future_meta.invalidate_at(Utc::now() + Duration::hours(1));
+        assert!(future_meta.is_current());
+    }
 }
