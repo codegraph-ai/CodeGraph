@@ -543,6 +543,64 @@ mod tests {
         assert!(config.current_only);
     }
 
+    fn search_engine() -> MemorySearch {
+        use crate::embedding::VectorEngine;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = Arc::new(MemoryStore::new(temp_dir.path(), engine).expect("create store"));
+        // Keep the temp dir alive for the store's lifetime by leaking it: the
+        // store holds an open handle and we only need the engine for scoring.
+        std::mem::forget(temp_dir);
+        MemorySearch::new(store).expect("create search")
+    }
+
+    fn mem_with_link(node_id: &str, relevance: f32) -> MemoryNode {
+        use crate::node::{CodeLink, LinkedNodeType};
+        let mut m = mem("linked", "content", &[]);
+        m.code_links =
+            vec![CodeLink::new(node_id, LinkedNodeType::Function).with_relevance(relevance)];
+        m
+    }
+
+    #[test]
+    fn test_graph_score_zero_when_context_or_links_empty() {
+        let search = search_engine();
+
+        // Empty code_context short-circuits to 0.0 even with links present.
+        let linked = mem_with_link("node_a", 0.9);
+        assert_eq!(search.calculate_graph_score(&linked, &[]), 0.0);
+
+        // Non-empty context but a memory with no code_links also yields 0.0.
+        let unlinked = mem("no links", "content", &[]);
+        assert!(unlinked.code_links.is_empty());
+        assert_eq!(
+            search.calculate_graph_score(&unlinked, &["node_a".to_string()]),
+            0.0
+        );
+    }
+
+    #[test]
+    fn test_graph_score_matches_max_relevance_or_zero() {
+        use crate::node::{CodeLink, LinkedNodeType};
+        let search = search_engine();
+
+        // Two links; context overlaps both, so the higher relevance wins.
+        let mut multi = mem("multi", "content", &[]);
+        multi.code_links = vec![
+            CodeLink::new("node_a", LinkedNodeType::Function).with_relevance(0.4),
+            CodeLink::new("node_b", LinkedNodeType::Class).with_relevance(0.8),
+        ];
+        let ctx = vec!["node_a".to_string(), "node_b".to_string()];
+        assert!((search.calculate_graph_score(&multi, &ctx) - 0.8).abs() < 1e-6);
+
+        // Non-empty context and links that never overlap fall through to 0.0.
+        let disjoint = mem_with_link("node_x", 1.0);
+        let other_ctx = vec!["node_y".to_string()];
+        assert_eq!(search.calculate_graph_score(&disjoint, &other_ctx), 0.0);
+    }
+
     #[test]
     fn test_memory_kind_filter_matches() {
         let kind = MemoryKind::DebugContext {
