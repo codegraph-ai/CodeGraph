@@ -626,6 +626,7 @@ mod tests {
     use super::*;
     use crate::ai_query::QueryEngine;
     use crate::backend::CodeGraphBackend;
+    use crate::domain::call_graph::CallGraphNode;
     use codegraph::{CodeGraph, EdgeType, NodeId, NodeType, PropertyMap, PropertyValue};
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -865,6 +866,58 @@ mod tests {
         // Line 20 -> 19 (0-indexed)
         assert_eq!(range.end.line, 19);
         assert_eq!(range.end.character, 50);
+    }
+
+    /// Build a `CallGraphNode` with the given 1-indexed line/col span.
+    fn call_graph_node(
+        line_start: u32,
+        line_end: u32,
+        col_start: u32,
+        col_end: u32,
+    ) -> CallGraphNode {
+        CallGraphNode {
+            id: "42".to_string(),
+            name: "do_thing".to_string(),
+            depth: 3,
+            direction: Some("callee".to_string()),
+            path: "/src/thing.rs".to_string(),
+            signature: "fn do_thing() -> i32".to_string(),
+            line_start,
+            line_end,
+            col_start,
+            col_end,
+            language: "rust".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_domain_node_to_function_node_maps_fields_and_zero_indexes_lines() {
+        let node = call_graph_node(10, 20, 4, 50);
+        let fnode = domain_node_to_function_node(&node, "file:///src/thing.rs".to_string());
+
+        // Passthrough fields (uri comes from the argument, not the node).
+        assert_eq!(fnode.id, "42");
+        assert_eq!(fnode.name, "do_thing");
+        assert_eq!(fnode.signature, "fn do_thing() -> i32");
+        assert_eq!(fnode.language, "rust");
+        assert_eq!(fnode.uri, "file:///src/thing.rs");
+        // 1-indexed lines are converted to 0-indexed; columns pass through as-is.
+        assert_eq!(fnode.range.start.line, 9);
+        assert_eq!(fnode.range.start.character, 4);
+        assert_eq!(fnode.range.end.line, 19);
+        assert_eq!(fnode.range.end.character, 50);
+    }
+
+    #[test]
+    fn test_domain_node_to_function_node_saturates_zero_line_without_underflow() {
+        // line_start/line_end of 0 must not underflow when converted to 0-indexed;
+        // saturating_sub keeps them at 0 rather than wrapping to u32::MAX.
+        let node = call_graph_node(0, 0, 0, 0);
+        let fnode = domain_node_to_function_node(&node, "file:///a.rs".to_string());
+        assert_eq!(fnode.range.start.line, 0);
+        assert_eq!(fnode.range.end.line, 0);
+        assert_eq!(fnode.range.start.character, 0);
+        assert_eq!(fnode.range.end.character, 0);
     }
 
     // ==========================================
