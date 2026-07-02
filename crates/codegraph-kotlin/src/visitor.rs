@@ -1790,4 +1790,51 @@ class C {
         visitor.current_package = Some("com.example.app".to_string());
         assert_eq!(visitor.qualify_name("Bar"), "com.example.app.Bar");
     }
+
+    #[test]
+    fn test_extract_visibility_recognizes_access_modifiers_lowercased() {
+        let visitor = KotlinVisitor::new(b"");
+        for m in ["public", "private", "protected", "internal"] {
+            assert_eq!(
+                visitor.extract_visibility(&[m.to_string()]),
+                m,
+                "bare {m} modifier should be returned verbatim"
+            );
+        }
+        // Case is normalised to lowercase on return.
+        assert_eq!(
+            visitor.extract_visibility(&["PROTECTED".to_string()]),
+            "protected"
+        );
+    }
+
+    #[test]
+    fn test_extract_visibility_skips_non_access_and_first_match_wins() {
+        let visitor = KotlinVisitor::new(b"");
+        // Non-access modifiers (open/final/abstract) are skipped.
+        assert_eq!(
+            visitor.extract_visibility(&[
+                "open".to_string(),
+                "final".to_string(),
+                "internal".to_string(),
+            ]),
+            "internal"
+        );
+        // First access modifier in list order wins over later ones.
+        assert_eq!(
+            visitor.extract_visibility(&["private".to_string(), "public".to_string()]),
+            "private"
+        );
+    }
+
+    #[test]
+    fn test_extract_visibility_defaults_to_public() {
+        let visitor = KotlinVisitor::new(b"");
+        // Empty list and access-modifier-free list both default to Kotlin's public.
+        assert_eq!(visitor.extract_visibility(&[]), "public");
+        assert_eq!(
+            visitor.extract_visibility(&["open".to_string(), "inline".to_string()]),
+            "public"
+        );
+    }
 }
