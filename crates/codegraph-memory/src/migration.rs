@@ -643,6 +643,33 @@ mod tests {
     }
 
     #[test]
+    fn test_v4_only_runs_v4_to_v5_step() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
+        {
+            let db = open_db(db_path);
+            // Start at v4: the `from_version < 4` guard is false so migrate_v3_to_v4
+            // is skipped, while `from_version < 5` is true so only migrate_v4_to_v5
+            // runs - a distinct path from the v3 start that runs both steps.
+            db.put(DB_VERSION_KEY, 4u32.to_le_bytes()).unwrap();
+            db.put(b"vec:only", b"stale-384d-vector").unwrap();
+            let json = serde_json::to_vec(&make_memory(Some(vec![0.1, 0.2, 0.3]))).unwrap();
+            db.put(b"mem:only", json).unwrap();
+            db.flush().unwrap();
+        }
+
+        migrate_if_needed(db_path).unwrap();
+
+        let db = DB::open_default(db_path).unwrap();
+        assert_eq!(read_version(&db), Some(CURRENT_VERSION));
+        // The single v4→v5 step still deletes vec: keys and clears embeddings.
+        assert!(db.get(b"vec:only").unwrap().is_none());
+        assert!(db.get(b"mem:only").unwrap().is_some(), "memory preserved");
+        assert!(read_memory(&db, b"mem:only").embedding.is_none());
+    }
+
+    #[test]
     fn test_v2_migration_skips_corrupt_entry() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path();
