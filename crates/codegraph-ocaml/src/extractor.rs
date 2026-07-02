@@ -204,4 +204,27 @@ let c () = 3
         let ir = extract_ok(source, "test.ml");
         assert_eq!(ir.functions.len(), 3);
     }
+
+    #[test]
+    fn test_select_language_implementation() {
+        // A .ml source file selects the implementation grammar (the else branch).
+        let lang = select_language(Path::new("foo.ml"));
+        assert_eq!(lang, tree_sitter_ocaml::LANGUAGE_OCAML.into());
+        assert_ne!(lang, tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE.into());
+    }
+
+    #[test]
+    fn test_select_language_interface() {
+        // A .mli interface file selects the OCaml interface grammar.
+        let lang = select_language(Path::new("foo.mli"));
+        assert_eq!(lang, tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE.into());
+        assert_ne!(lang, tree_sitter_ocaml::LANGUAGE_OCAML.into());
+    }
+
+    #[test]
+    fn test_select_language_no_extension_defaults_to_implementation() {
+        // A path with no extension falls through unwrap_or(false) to the implementation grammar.
+        let lang = select_language(Path::new("Makefile"));
+        assert_eq!(lang, tree_sitter_ocaml::LANGUAGE_OCAML.into());
+    }
 }
