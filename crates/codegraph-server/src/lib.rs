@@ -51,3 +51,17 @@ pub use error::LspError;
 pub use git_mining::{GitMiner, MiningConfig, MiningResult};
 pub use memory::MemoryManager;
 pub use parser_registry::ParserRegistry;
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, MutexGuard};
+
+    // Environment variables are process-global, so every test in this binary
+    // that mutates them must serialize through this one lock; per-module
+    // locks cannot serialize against each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}

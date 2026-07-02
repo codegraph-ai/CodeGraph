@@ -454,6 +454,50 @@ mod tests {
         assert_eq!(extract_issue_reference("no issue"), None);
     }
 
+    #[test]
+    fn extract_issue_reference_gh_prefix_arm() {
+        // With no `#` in the text the first pattern misses, so resolution falls
+        // through to the `(?i)gh-(\d+)` arm - the only arm previously untested,
+        // since every prior case contained a `#` that the leading `#(\d+)`
+        // pattern matched first. The captured digits are re-emitted as `#N`.
+        assert_eq!(
+            extract_issue_reference("see GH-42 for details"),
+            Some("#42".to_string())
+        );
+        // The pattern is case-insensitive, so lowercase `gh-` resolves too.
+        assert_eq!(
+            extract_issue_reference("fixes gh-7"),
+            Some("#7".to_string())
+        );
+        // When both a bare `#` and a `gh-` token are present, the earlier
+        // `#(\d+)` pattern wins and the gh- arm is never reached.
+        assert_eq!(
+            extract_issue_reference("gh-1 tracked as #99"),
+            Some("#99".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_pattern_bugfix_carries_extracted_issue_ref() {
+        // detect_pattern's BugFix arms both call extract_issue_reference and
+        // thread the result into the pattern, but no prior test asserted the
+        // populated issue_ref field - only that the pattern was a BugFix.
+        // Conventional `fix:` prefix (0.9 tier).
+        let (pattern, _) = detect_pattern(&make_commit("fix: resolve crash, closes #321"));
+        match pattern {
+            CommitPattern::BugFix { issue_ref } => {
+                assert_eq!(issue_ref.as_deref(), Some("#321"));
+            }
+            other => panic!("expected BugFix, got {:?}", other),
+        }
+        // A conventional bug fix with no issue token leaves issue_ref None.
+        let (pattern, _) = detect_pattern(&make_commit("fix: tidy up logging"));
+        match pattern {
+            CommitPattern::BugFix { issue_ref } => assert!(issue_ref.is_none()),
+            other => panic!("expected BugFix, got {:?}", other),
+        }
+    }
+
     fn make_commit(subject: &str) -> CommitInfo {
         CommitInfo {
             hash: "abc123".to_string(),
@@ -510,6 +554,51 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_deprecation_conventional_and_keyword() {
+        // Conventional `deprecate:` prefix — high confidence. No prior test
+        // ever produced a Deprecation pattern, so both arms were unexercised.
+        let (pattern, confidence) = detect_pattern(&make_commit("deprecate: old config format"));
+        assert!(matches!(pattern, CommitPattern::Deprecation));
+        assert!((confidence - 0.9).abs() < f32::EPSILON);
+
+        // The `deprecated:` spelling is the other half of the conventional arm.
+        let (pattern, _) = detect_pattern(&make_commit("deprecated: legacy auth flow"));
+        assert!(matches!(pattern, CommitPattern::Deprecation));
+
+        // Keyword anywhere in a lazy subject drops to the moderate tier (0.75).
+        let (pattern, confidence) =
+            detect_pattern(&make_commit("Marked the legacy API as deprecated"));
+        assert!(matches!(pattern, CommitPattern::Deprecation));
+        assert!((confidence - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_detect_architectural_decision() {
+        // All three conventional prefixes map to ArchitecturalDecision at 0.85;
+        // detect_pattern's arch tier had no prior coverage (only the
+        // to_memory_kind path constructed the pattern directly).
+        for subject in [
+            "arch: adopt hexagonal layering",
+            "adr: use RocksDB",
+            "decision: split API",
+        ] {
+            let (pattern, confidence) = detect_pattern(&make_commit(subject));
+            assert!(
+                matches!(pattern, CommitPattern::ArchitecturalDecision),
+                "{subject:?} should be an architectural decision"
+            );
+            assert!((confidence - 0.85).abs() < f32::EPSILON);
+        }
+
+        // A body mention triggers it even when the subject is neutral (the
+        // body_lower.contains("architectural decision") arm).
+        let mut commit = make_commit("update storage layer");
+        commit.body = "This records an architectural decision to use append-only logs.".to_string();
+        let (pattern, _) = detect_pattern(&commit);
+        assert!(matches!(pattern, CommitPattern::ArchitecturalDecision));
+    }
+
+    #[test]
     fn test_conventional_higher_confidence_than_keyword() {
         let (_, conv_confidence) = detect_pattern(&make_commit("fix: null pointer"));
         let (_, kw_confidence) = detect_pattern(&make_commit("Fixed null pointer"));
@@ -521,5 +610,312 @@ mod tests {
         let (pattern, confidence) = detect_pattern(&make_commit("wip"));
         assert!(matches!(pattern, CommitPattern::Other));
         assert!(confidence < 0.7);
+    }
+
+    #[test]
+    fn detect_pattern_breaking_change_subject_keyword_tier() {
+        // Prior breaking tests all seed the body with "BREAKING CHANGE", hitting
+        // the Tier-1 body arm (0.95). The Tier-2 subject-keyword arm (0.8) that
+        // matches a bare "breaking"/"incompatible" token stayed unexercised.
+        let (pattern, confidence) =
+            detect_pattern(&make_commit("Made an incompatible schema adjustment"));
+        assert!(matches!(pattern, CommitPattern::BreakingChange));
+        assert!((confidence - 0.8).abs() < f32::EPSILON);
+
+        // The "breaking" keyword alone (no "breaking change" phrase, no prefix)
+        // resolves through the same 0.8 keyword arm.
+        let (pattern, confidence) = detect_pattern(&make_commit("A breaking rework of the API"));
+        assert!(matches!(pattern, CommitPattern::BreakingChange));
+        assert!((confidence - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn detect_pattern_deprecation_body_keyword_arm() {
+        // The keyword deprecation test puts "deprecated" in the subject; the
+        // body_lower.contains("deprecat") half of that arm had no coverage.
+        let mut commit = make_commit("update the client wrapper");
+        commit.body = "This quietly deprecates the legacy connection path.".to_string();
+        let (pattern, confidence) = detect_pattern(&commit);
+        assert!(matches!(pattern, CommitPattern::Deprecation));
+        assert!((confidence - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn detect_pattern_test_keyword_coverage_and_spec_arms() {
+        // lazy_test uses the "tests" token; the "coverage" and "spec " arms of
+        // the same keyword tier were never reached.
+        let (pattern, confidence) = detect_pattern(&make_commit("Improve coverage of the parser"));
+        assert!(matches!(pattern, CommitPattern::Test));
+        assert!((confidence - 0.7).abs() < f32::EPSILON);
+
+        let (pattern, _) = detect_pattern(&make_commit("Add spec for the widget renderer"));
+        assert!(matches!(pattern, CommitPattern::Test));
+    }
+
+    #[test]
+    fn detect_pattern_refactor_alternate_keywords() {
+        // lazy_refactor only covers "refactored" and "rename"; the reorganiz /
+        // simplif / extract keyword arms stayed unexercised.
+        for subject in [
+            "Reorganized the module layout",
+            "Simplify the config loader",
+            "Extract helper from the parser",
+        ] {
+            let (pattern, _) = detect_pattern(&make_commit(subject));
+            assert!(
+                matches!(pattern, CommitPattern::Refactor),
+                "{subject:?} should be a refactor"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_pattern_feature_alternate_keywords() {
+        // lazy_feature covers "added" and "implement"; introduce / support for /
+        // enable were untested feature keyword arms.
+        for subject in [
+            "Introduce a plugin registry",
+            "Support for streaming responses",
+            "Enable background indexing",
+        ] {
+            let (pattern, confidence) = detect_pattern(&make_commit(subject));
+            assert!(
+                matches!(pattern, CommitPattern::Feature),
+                "{subject:?} should be a feature"
+            );
+            assert!((confidence - 0.7).abs() < f32::EPSILON);
+        }
+    }
+
+    // --- parse_log_output ---
+
+    /// Build a single formatted git-log record from its six fields.
+    fn record(fields: &[&str]) -> String {
+        let mut s = fields.join(FIELD_SEPARATOR);
+        s.push_str(COMMIT_SEPARATOR);
+        s
+    }
+
+    #[test]
+    fn parse_log_output_empty_input_yields_no_commits() {
+        assert!(parse_log_output("").unwrap().is_empty());
+        assert!(parse_log_output("   \n  ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_log_output_parses_fields_and_trims_body_and_date() {
+        let out = record(&[
+            "deadbeef",
+            "fix: thing",
+            "  body text  ",
+            "Jane",
+            "jane@example.com",
+            "  2024-01-01 12:00:00 +0000  ",
+        ]);
+        let commits = parse_log_output(&out).unwrap();
+        assert_eq!(commits.len(), 1);
+        let c = &commits[0];
+        assert_eq!(c.hash, "deadbeef");
+        assert_eq!(c.subject, "fix: thing");
+        // body and author_date are trimmed; subject is not
+        assert_eq!(c.body, "body text");
+        assert_eq!(c.author_name, "Jane");
+        assert_eq!(c.author_email, "jane@example.com");
+        assert_eq!(c.author_date, "2024-01-01 12:00:00 +0000");
+    }
+
+    #[test]
+    fn parse_log_output_skips_malformed_records_with_too_few_fields() {
+        // First record has only 3 fields (< 6) and must be dropped; second is valid.
+        let mut out = ["h", "s", "b"].join(FIELD_SEPARATOR);
+        out.push_str(COMMIT_SEPARATOR);
+        out.push_str(&record(&["h2", "s2", "b2", "an", "ae", "ad"]));
+        let commits = parse_log_output(&out).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].hash, "h2");
+    }
+
+    #[test]
+    fn parse_log_output_parses_multiple_commits() {
+        let mut out = record(&["h1", "s1", "b1", "a1", "e1", "d1"]);
+        out.push_str(&record(&["h2", "s2", "b2", "a2", "e2", "d2"]));
+        let commits = parse_log_output(&out).unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].hash, "h1");
+        assert_eq!(commits[1].subject, "s2");
+    }
+
+    // --- extract_revert_hash (via detect_pattern) ---
+
+    #[test]
+    fn revert_extracts_hash_when_present() {
+        let (pattern, _) = detect_pattern(&make_commit("Revert 1a2b3c4d5e"));
+        match pattern {
+            CommitPattern::Revert { reverted_hash } => {
+                assert_eq!(reverted_hash.as_deref(), Some("1a2b3c4d5e"));
+            }
+            other => panic!("expected Revert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn revert_without_hash_leaves_none() {
+        let (pattern, _) = detect_pattern(&make_commit("Revert \"feat: add login\""));
+        match pattern {
+            CommitPattern::Revert { reverted_hash } => assert!(reverted_hash.is_none()),
+            other => panic!("expected Revert, got {:?}", other),
+        }
+    }
+
+    // --- to_memory_kind ---
+
+    /// Build a ParsedCommit from a subject/body, deriving the pattern via
+    /// detect_pattern so the memory-kind mapping exercises real detection.
+    fn parsed(subject: &str, body: &str) -> ParsedCommit {
+        let info = CommitInfo {
+            hash: "abc123".to_string(),
+            subject: subject.to_string(),
+            body: body.to_string(),
+            author_name: "Jane".to_string(),
+            author_email: "jane@example.com".to_string(),
+            author_date: "2024-01-01".to_string(),
+        };
+        let (pattern, confidence) = detect_pattern(&info);
+        ParsedCommit {
+            info,
+            pattern,
+            files_changed: vec![],
+            confidence,
+        }
+    }
+
+    #[test]
+    fn bug_fix_maps_to_debug_context_with_extracted_problem_and_cause() {
+        let pc = parsed(
+            "fix: null pointer",
+            "Problem: crash on empty input\nRoot cause: missing guard\nunrelated line",
+        );
+        match pc.to_memory_kind() {
+            Some(MemoryKind::DebugContext {
+                problem_description,
+                root_cause,
+                solution,
+                ..
+            }) => {
+                assert_eq!(problem_description, "crash on empty input");
+                assert_eq!(root_cause.as_deref(), Some("missing guard"));
+                assert_eq!(solution, "fix: null pointer");
+            }
+            other => panic!("expected DebugContext, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bug_fix_without_markers_falls_back_to_subject_problem() {
+        let pc = parsed("fix: broken thing", "just some free-form notes");
+        match pc.to_memory_kind() {
+            Some(MemoryKind::DebugContext {
+                problem_description,
+                root_cause,
+                ..
+            }) => {
+                assert_eq!(problem_description, "fix: broken thing");
+                assert!(root_cause.is_none());
+            }
+            other => panic!("expected DebugContext, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn architectural_decision_maps_to_arch_kind() {
+        let pc = parsed("arch: adopt event sourcing", "because it scales");
+        match pc.to_memory_kind() {
+            Some(MemoryKind::ArchitecturalDecision {
+                decision,
+                rationale,
+                stakeholders,
+                ..
+            }) => {
+                assert_eq!(decision, "arch: adopt event sourcing");
+                assert_eq!(rationale, "because it scales");
+                assert_eq!(stakeholders, vec!["Jane".to_string()]);
+            }
+            other => panic!("expected ArchitecturalDecision, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn feature_with_substantial_body_becomes_architectural_decision() {
+        let body = "This adds a full plugin system so third parties can extend behavior.";
+        assert!(body.len() > 50);
+        let pc = parsed("feat: plugin system", body);
+        assert!(matches!(
+            pc.to_memory_kind(),
+            Some(MemoryKind::ArchitecturalDecision { .. })
+        ));
+    }
+
+    #[test]
+    fn feature_without_substantial_body_creates_no_memory() {
+        let pc = parsed("feat: small tweak", "short");
+        assert!(pc.to_memory_kind().is_none());
+    }
+
+    #[test]
+    fn breaking_change_maps_to_high_severity_known_issue_with_workaround() {
+        let pc = parsed("breaking: drop v1 API", "Migration: switch to v2 endpoints");
+        match pc.to_memory_kind() {
+            Some(MemoryKind::KnownIssue {
+                severity,
+                workaround,
+                ..
+            }) => {
+                assert_eq!(severity, codegraph_memory::IssueSeverity::High);
+                assert_eq!(workaround.as_deref(), Some("switch to v2 endpoints"));
+            }
+            other => panic!("expected KnownIssue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn deprecation_maps_to_medium_known_issue_prefixed_description() {
+        let pc = parsed("deprecate: legacy client", "");
+        match pc.to_memory_kind() {
+            Some(MemoryKind::KnownIssue {
+                description,
+                severity,
+                ..
+            }) => {
+                assert!(description.starts_with("Deprecated: "));
+                assert_eq!(severity, codegraph_memory::IssueSeverity::Medium);
+            }
+            other => panic!("expected KnownIssue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn revert_maps_to_medium_known_issue_without_workaround() {
+        let pc = parsed("Revert 1a2b3c4d", "");
+        match pc.to_memory_kind() {
+            Some(MemoryKind::KnownIssue {
+                description,
+                severity,
+                workaround,
+                ..
+            }) => {
+                assert!(description.starts_with("Reverted: "));
+                assert_eq!(severity, codegraph_memory::IssueSeverity::Medium);
+                assert!(workaround.is_none());
+            }
+            other => panic!("expected KnownIssue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn refactor_docs_test_and_other_produce_no_memory() {
+        assert!(parsed("refactor: tidy up", "").to_memory_kind().is_none());
+        assert!(parsed("docs: update readme", "").to_memory_kind().is_none());
+        assert!(parsed("test: add coverage", "").to_memory_kind().is_none());
+        assert!(parsed("wip", "").to_memory_kind().is_none());
     }
 }

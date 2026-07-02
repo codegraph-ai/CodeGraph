@@ -4,10 +4,9 @@
 //! AST visitor for extracting Ruby entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, TraitEntity,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    TraitEntity,
 };
 use tree_sitter::Node;
 
@@ -112,9 +111,7 @@ impl<'a> RubyVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -181,9 +178,7 @@ impl<'a> RubyVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -255,9 +250,7 @@ impl<'a> RubyVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -682,12 +675,15 @@ impl<'a> RubyVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> RubyVisitor<'_> {
         use tree_sitter::Parser;
 
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_ruby::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = RubyVisitor::new(source);
@@ -945,5 +941,377 @@ end
             complexity.exception_handlers
         );
         assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_visitor_singleton_method_attributes() {
+        // def self.foo carries a "singleton" attribute in addition to is_static
+        let source = b"class Helper\n  def self.build\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0].is_static);
+        assert!(visitor.functions[0]
+            .attributes
+            .iter()
+            .any(|a| a == "singleton"));
+        assert_eq!(
+            visitor.functions[0].parent_class,
+            Some("Helper".to_string())
+        );
+    }
+
+    #[test]
+    fn test_visitor_singleton_class_block() {
+        // class << self promotes contained methods to static class methods
+        let source = b"class Widget\n  class << self\n    def create\n    end\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "create");
+        assert!(visitor.functions[0].is_static);
+        assert!(visitor.functions[0]
+            .attributes
+            .iter()
+            .any(|a| a == "singleton"));
+    }
+
+    #[test]
+    fn test_visitor_class_qualified_in_module() {
+        // A class nested in a module gets a module-qualified name
+        let source = b"module Outer\n  class Inner\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.traits.len(), 1);
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].name, "Outer::Inner");
+    }
+
+    #[test]
+    fn test_visitor_method_line_numbers() {
+        // line_start/line_end are 1-indexed and span the whole method
+        let source = b"def greet\n  puts 1\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].line_start, 1);
+        assert_eq!(visitor.functions[0].line_end, 3);
+    }
+
+    #[test]
+    fn test_visitor_method_signature_first_line() {
+        // signature keeps only the first physical line of the definition
+        let source = b"def greet(name)\n  puts name\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].signature, "def greet(name)");
+    }
+
+    #[test]
+    fn test_visitor_is_test_detection() {
+        // Methods named test_/it_/should_ are flagged as tests
+        let source = b"def test_addition\nend\ndef helper\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        let test_fn = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "test_addition")
+            .unwrap();
+        let helper_fn = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "helper")
+            .unwrap();
+        assert!(test_fn.is_test);
+        assert!(!helper_fn.is_test);
+    }
+
+    #[test]
+    fn test_visitor_splat_parameter_variadic() {
+        // *args is captured as a single variadic parameter
+        let source = b"def collect(*args)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].parameters.len(), 1);
+        assert_eq!(visitor.functions[0].parameters[0].name, "args");
+        assert!(visitor.functions[0].parameters[0].is_variadic);
+    }
+
+    #[test]
+    fn test_visitor_keyword_parameters() {
+        // Keyword parameters (name:) are extracted like ordinary params
+        let source = b"def configure(host:, port: 80)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].parameters.len(), 2);
+        assert_eq!(visitor.functions[0].parameters[0].name, "host");
+        assert_eq!(visitor.functions[0].parameters[1].name, "port");
+    }
+
+    #[test]
+    fn test_visitor_doc_comment_extraction() {
+        // A comment immediately preceding a method becomes its doc_comment
+        let source = b"# Greets the user\ndef greet\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(visitor.functions[0]
+            .doc_comment
+            .as_deref()
+            .unwrap_or("")
+            .contains("Greets the user"));
+    }
+
+    #[test]
+    fn test_visitor_scope_resolution_superclass() {
+        // A namespaced superclass (Animals::Base) is recorded as inheritance
+        let source = b"class Dog < Animals::Base\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.inheritance.len(), 1);
+        assert_eq!(visitor.inheritance[0].child, "Dog");
+        assert_eq!(visitor.inheritance[0].parent, "Animals::Base");
+        assert_eq!(visitor.classes[0].base_classes, vec!["Animals::Base"]);
+    }
+
+    #[test]
+    fn test_visitor_extend_inclusion() {
+        // extend is treated the same as include for implementation relations
+        let source = b"module Helpers\nend\nclass Service\n  extend Helpers\nend";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|i| i.implementor == "Service" && i.trait_name == "Helpers"));
+    }
+
+    #[test]
+    fn test_visitor_require_importer_is_module() {
+        // A require inside a module records that module as the importer
+        let source = b"module App\n  require 'json'\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "json");
+        assert_eq!(visitor.imports[0].importer, "App");
+    }
+
+    #[test]
+    fn test_complexity_while_loop() {
+        let source = b"def countdown(n)\n  while n > 0\n    n -= 1\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.loops >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_case_when() {
+        let source = b"def label(n)\n  case n\n  when 1 then :one\n  when 2 then :two\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.branches >= 2, "expected two when branches");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_logical_operators() {
+        let source = b"def valid?(a, b)\n  a && b || false\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.logical_operators >= 2,
+            "expected && and || counted, got {}",
+            complexity.logical_operators
+        );
+    }
+
+    #[test]
+    fn test_complexity_word_logical_operators() {
+        // Ruby's word forms `and`/`or` count as logical operators like &&/||
+        let source = b"def valid?(a, b)\n  a and b or false\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.logical_operators >= 2,
+            "expected `and` and `or` counted, got {}",
+            complexity.logical_operators
+        );
+    }
+
+    #[test]
+    fn test_visitor_body_prefix_truncated() {
+        // An oversized method body is truncated to exactly BODY_PREFIX_MAX_CHARS
+        let filler = "a".repeat(BODY_PREFIX_MAX_CHARS + 100);
+        let src = format!("def big\n  x = \"{}\"\nend", filler);
+        let visitor = parse_and_visit(src.as_bytes());
+
+        assert_eq!(visitor.functions.len(), 1);
+        let body_prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(body_prefix.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_visitor_method_body_prefix_content() {
+        // A short method body is captured verbatim as body_prefix
+        let source = b"def greet\n  puts 1\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let body_prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(body_prefix.contains("puts 1"));
+    }
+
+    #[test]
+    fn test_visitor_hash_splat_parameter_variadic() {
+        // **kwargs is captured as a single variadic parameter
+        let source = b"def opts(**kwargs)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].parameters.len(), 1);
+        assert_eq!(visitor.functions[0].parameters[0].name, "kwargs");
+        assert!(visitor.functions[0].parameters[0].is_variadic);
+    }
+
+    #[test]
+    fn test_visitor_block_parameter() {
+        // &block is captured as an ordinary (non-variadic) parameter
+        let source = b"def each_item(&block)\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].parameters.len(), 1);
+        assert_eq!(visitor.functions[0].parameters[0].name, "block");
+        assert!(!visitor.functions[0].parameters[0].is_variadic);
+    }
+
+    #[test]
+    fn test_complexity_until_loop() {
+        // until is counted as a loop like while
+        let source = b"def wait(n)\n  until n == 0\n    n -= 1\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.loops >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_unless_branch() {
+        // unless adds a branch like if
+        let source = b"def check(x)\n  unless x\n    puts 1\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.branches >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_ternary_conditional() {
+        // A ternary (cond ? a : b) parses as a conditional node and adds a branch
+        let source = b"def pick(x)\n  x ? 1 : 2\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.branches >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_for_loop() {
+        // A `for x in coll` loop is counted as a loop
+        let source = b"def loop_it(items)\n  for i in items\n    puts i\n  end\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(complexity.loops >= 1);
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_visitor_prepend_inclusion() {
+        // prepend is treated like include/extend for implementation relations
+        let source = b"module M\nend\nclass C\n  prepend M\nend";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|i| i.implementor == "C" && i.trait_name == "M"));
+    }
+
+    #[test]
+    fn test_visitor_scope_resolution_module_inclusion() {
+        // A namespaced module (Foo::Bar) included in a class is recorded verbatim
+        let source = b"class C\n  include Foo::Bar\nend";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|i| i.implementor == "C" && i.trait_name == "Foo::Bar"));
+    }
+
+    #[test]
+    fn test_visitor_require_in_class_importer_main() {
+        // A require inside a class (not a module) defaults importer to "main"
+        let source = b"class App\n  require 'json'\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "json");
+        assert_eq!(visitor.imports[0].importer, "main");
+    }
+
+    #[test]
+    fn test_has_test_annotation_prefixes() {
+        let visitor = RubyVisitor::new(b"");
+        // Accepted prefixes (RSpec/minitest naming conventions)
+        assert!(visitor.has_test_annotation("test_login"));
+        assert!(visitor.has_test_annotation("it_returns_ok"));
+        assert!(visitor.has_test_annotation("should_validate"));
+        // Exact prefix boundary: the underscore is part of the required prefix
+        assert!(!visitor.has_test_annotation("test"));
+        assert!(!visitor.has_test_annotation("it"));
+        assert!(!visitor.has_test_annotation("should"));
+        // Non-matching / prefix-in-the-middle names are rejected
+        assert!(!visitor.has_test_annotation("run_test_case"));
+        assert!(!visitor.has_test_annotation("greet"));
+        assert!(!visitor.has_test_annotation(""));
+    }
+
+    #[test]
+    fn test_qualify_name_with_and_without_module() {
+        let mut visitor = RubyVisitor::new(b"");
+        // No enclosing module: name is returned verbatim
+        assert_eq!(visitor.qualify_name("greet"), "greet");
+        // Inside a module: name is prefixed with the module path using ::
+        visitor.current_module = Some("Loggable".to_string());
+        assert_eq!(visitor.qualify_name("log"), "Loggable::log");
+        // Nested module path is preserved as-is
+        visitor.current_module = Some("A::B".to_string());
+        assert_eq!(visitor.qualify_name("c"), "A::B::c");
     }
 }

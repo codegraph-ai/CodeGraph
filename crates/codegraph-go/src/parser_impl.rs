@@ -273,4 +273,234 @@ mod tests {
         assert!(parser.can_parse(Path::new("main.go")));
         assert!(!parser.can_parse(Path::new("main.rs")));
     }
+
+    use std::io::Write;
+
+    /// A small but syntactically complete Go source touching every extracted
+    /// entity kind: one import, one struct (class), one interface (trait), one
+    /// free function. The interface method is not a top-level function, and no
+    /// receiver methods are present, so the function count stays exactly one.
+    const SAMPLE: &str = "package main\n\nimport \"fmt\"\n\ntype Shape interface {\n\tArea() float64\n}\n\ntype Point struct {\n\tX int\n}\n\nfunc add(a int, b int) int {\n\treturn a + b\n}\n";
+
+    fn graph() -> CodeGraph {
+        CodeGraph::in_memory().expect("in-memory graph")
+    }
+
+    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).expect("create temp file");
+        f.write_all(content.as_bytes()).expect("write temp file");
+        path
+    }
+
+    #[test]
+    fn test_default_matches_new_metrics() {
+        let default = GoParser::default().metrics();
+        let new = GoParser::new().metrics();
+        assert_eq!(default.files_attempted, new.files_attempted);
+        assert_eq!(default.files_attempted, 0);
+        assert_eq!(default.total_entities, 0);
+    }
+
+    #[test]
+    fn test_with_config_and_accessor() {
+        let cfg = ParserConfig::default().with_max_file_size(4242);
+        let parser = GoParser::with_config(cfg);
+        assert_eq!(parser.config().max_file_size, 4242);
+    }
+
+    #[test]
+    fn test_parse_source_extracts_each_entity_kind() {
+        let parser = GoParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("lib.go"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.functions.len(), 1, "one free function");
+        assert_eq!(info.classes.len(), 1, "struct maps to a class");
+        assert_eq!(info.traits.len(), 1, "interface maps to a trait");
+        assert_eq!(info.imports.len(), 1, "one import");
+        assert_eq!(info.entity_count(), 3, "functions + classes + traits");
+    }
+
+    #[test]
+    fn test_parse_source_records_line_and_byte_counts() {
+        let parser = GoParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("lib.go"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.line_count, SAMPLE.lines().count());
+        assert_eq!(info.byte_count, SAMPLE.len());
+    }
+
+    #[test]
+    fn test_parse_source_minimal_yields_no_entities() {
+        let parser = GoParser::new();
+        let mut g = graph();
+        let src = "package main\n";
+        let info = parser
+            .parse_source(src, Path::new("empty.go"), &mut g)
+            .expect("package-only source still parses");
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.traits.len(), 0);
+        assert_eq!(info.imports.len(), 0);
+        assert_eq!(info.line_count, 1);
+        assert_eq!(info.byte_count, src.len());
+    }
+
+    #[test]
+    fn test_parse_source_does_not_touch_metrics() {
+        // Only parse_file updates metrics; parse_source is metric-free.
+        let parser = GoParser::new();
+        let mut g = graph();
+        parser
+            .parse_source(SAMPLE, Path::new("lib.go"), &mut g)
+            .expect("parse ok");
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.files_succeeded, 0);
+    }
+
+    #[test]
+    fn test_parse_source_broken_source_errors() {
+        let parser = GoParser::new();
+        let mut g = graph();
+        let result = parser.parse_source(
+            "package main\n\nfunc broken( {\n",
+            Path::new("bad.go"),
+            &mut g,
+        );
+        assert!(result.is_err(), "unbalanced source should fail to parse");
+    }
+
+    #[test]
+    fn test_parse_file_success_updates_metrics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "lib.go", SAMPLE);
+        let parser = GoParser::new();
+        let mut g = graph();
+        let info = parser.parse_file(&path, &mut g).expect("parse ok");
+        assert_eq!(info.functions.len(), 1);
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_succeeded, 1);
+        assert_eq!(m.files_failed, 0);
+        assert_eq!(m.total_entities, info.entity_count());
+    }
+
+    #[test]
+    fn test_parse_file_missing_file_is_io_error() {
+        let parser = GoParser::new();
+        let mut g = graph();
+        let err = parser
+            .parse_file(Path::new("/no/such/file.go"), &mut g)
+            .expect_err("missing file should error");
+        assert!(matches!(err, ParserError::IoError(..)));
+        // A pre-read failure never reaches update_metrics.
+        assert_eq!(parser.metrics().files_attempted, 0);
+    }
+
+    #[test]
+    fn test_parse_file_too_large() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "big.go", SAMPLE);
+        let parser = GoParser::with_config(ParserConfig::default().with_max_file_size(4));
+        let mut g = graph();
+        let err = parser
+            .parse_file(&path, &mut g)
+            .expect_err("oversized file should error");
+        assert!(matches!(err, ParserError::FileTooLarge(..)));
+        // The size guard also short-circuits before metrics are touched.
+        assert_eq!(parser.metrics().files_attempted, 0);
+    }
+
+    #[test]
+    fn test_reset_metrics_zeroes_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "lib.go", SAMPLE);
+        let mut parser = GoParser::new();
+        let mut g = graph();
+        parser.parse_file(&path, &mut g).expect("parse ok");
+        assert_eq!(parser.metrics().files_attempted, 1);
+        parser.reset_metrics();
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.files_succeeded, 0);
+        assert_eq!(m.total_entities, 0);
+    }
+
+    #[test]
+    fn test_metrics_accumulate_across_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.go", SAMPLE);
+        let b = write_file(dir.path(), "b.go", SAMPLE);
+        let parser = GoParser::new();
+        let mut g = graph();
+        parser.parse_file(&a, &mut g).expect("parse a");
+        parser.parse_file(&b, &mut g).expect("parse b");
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 2);
+        assert_eq!(m.files_succeeded, 2);
+    }
+
+    #[test]
+    fn test_parse_files_sequential_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.go", SAMPLE);
+        let b = write_file(dir.path(), "b.go", SAMPLE);
+        let parser = GoParser::new(); // parallel = false by default
+        let mut g = graph();
+        let project = parser.parse_files(&[a, b], &mut g).expect("parse ok");
+        assert_eq!(project.files.len(), 2);
+        assert!(project.failed_files.is_empty());
+        assert_eq!(project.total_functions, 2);
+        assert_eq!(project.total_classes, 2);
+    }
+
+    #[test]
+    fn test_parse_files_partitions_failures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = write_file(dir.path(), "good.go", SAMPLE);
+        let missing = dir.path().join("missing.go");
+        let parser = GoParser::new();
+        let mut g = graph();
+        let project = parser
+            .parse_files(&[good, missing.clone()], &mut g)
+            .expect("parse ok");
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.failed_files.len(), 1);
+        assert_eq!(project.failed_files[0].0, missing);
+    }
+
+    #[test]
+    fn test_parse_files_parallel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.go", SAMPLE);
+        let b = write_file(dir.path(), "b.go", SAMPLE);
+        let cfg = ParserConfig::default().with_parallel(true);
+        let parser = GoParser::with_config(cfg);
+        let mut g = graph();
+        let project = parser.parse_files(&[a, b], &mut g).expect("parse ok");
+        assert_eq!(project.files.len(), 2);
+        assert!(project.failed_files.is_empty());
+        assert_eq!(project.total_functions, 2);
+    }
+
+    #[test]
+    fn test_parse_files_parallel_with_worker_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.go", SAMPLE);
+        let cfg = ParserConfig {
+            parallel: true,
+            parallel_workers: Some(2),
+            ..ParserConfig::default()
+        };
+        let parser = GoParser::with_config(cfg);
+        let mut g = graph();
+        let project = parser.parse_files(&[a], &mut g).expect("parse ok");
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.total_functions, 1);
+    }
 }

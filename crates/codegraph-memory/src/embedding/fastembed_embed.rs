@@ -15,8 +15,8 @@
 
 use crate::error::{MemoryError, Result};
 use fastembed::{
-    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding,
-    TokenizerFiles, UserDefinedEmbeddingModel,
+    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
+    UserDefinedEmbeddingModel,
 };
 use std::path::PathBuf;
 
@@ -157,9 +157,7 @@ impl FastembedEmbedding {
         model_type: CodeGraphEmbeddingModel,
     ) -> Result<TextEmbedding> {
         let (repo, pooling) = match model_type {
-            CodeGraphEmbeddingModel::Granite97mMultilingualR2 => {
-                (GRANITE_97M_REPO, Pooling::Cls)
-            }
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2 => (GRANITE_97M_REPO, Pooling::Cls),
             other => {
                 return Err(MemoryError::model(format!(
                     "load_user_defined called for non-user-defined model: {other:?}"
@@ -299,9 +297,7 @@ fn download_user_defined_model(
         _ => GRANITE_97M_ONNX_PATH,
     };
     let onnx_local = model_repo.get(onnx_path).map_err(|e| {
-        MemoryError::model(format!(
-            "Failed to download {onnx_path} from {repo}: {e}"
-        ))
+        MemoryError::model(format!("Failed to download {onnx_path} from {repo}: {e}"))
     })?;
     let onnx_bytes = std::fs::read(&onnx_local).map_err(|e| {
         MemoryError::model(format!(
@@ -310,15 +306,13 @@ fn download_user_defined_model(
         ))
     })?;
 
-    let read_required =
-        |name: &str, repo: &hf_hub::api::sync::ApiRepo| -> Result<Vec<u8>> {
-            let local = repo.get(name).map_err(|e| {
-                MemoryError::model(format!("Failed to download {name}: {e}"))
-            })?;
-            std::fs::read(&local).map_err(|e| {
-                MemoryError::model(format!("Failed to read {}: {e}", local.display()))
-            })
-        };
+    let read_required = |name: &str, repo: &hf_hub::api::sync::ApiRepo| -> Result<Vec<u8>> {
+        let local = repo
+            .get(name)
+            .map_err(|e| MemoryError::model(format!("Failed to download {name}: {e}")))?;
+        std::fs::read(&local)
+            .map_err(|e| MemoryError::model(format!("Failed to read {}: {e}", local.display())))
+    };
 
     Ok(UserDefinedModelBundle {
         onnx_bytes,
@@ -344,7 +338,10 @@ fn ensure_ort_dll(cache_dir: &std::path::Path) -> Result<()> {
         if let Some(exe_dir) = exe_path.parent() {
             let bundled_dll = exe_dir.join("onnxruntime.dll");
             if bundled_dll.exists() {
-                log::info!("ONNX Runtime DLL found alongside binary: {}", bundled_dll.display());
+                log::info!(
+                    "ONNX Runtime DLL found alongside binary: {}",
+                    bundled_dll.display()
+                );
                 std::env::set_var("ORT_DYLIB_PATH", &bundled_dll);
                 return Ok(());
             }
@@ -449,8 +446,12 @@ mod tests {
         assert!(CodeGraphEmbeddingModel::Granite97mMultilingualR2
             .to_fastembed_builtin()
             .is_none());
-        assert!(CodeGraphEmbeddingModel::BgeSmall.to_fastembed_builtin().is_some());
-        assert!(CodeGraphEmbeddingModel::JinaCodeV2.to_fastembed_builtin().is_some());
+        assert!(CodeGraphEmbeddingModel::BgeSmall
+            .to_fastembed_builtin()
+            .is_some());
+        assert!(CodeGraphEmbeddingModel::JinaCodeV2
+            .to_fastembed_builtin()
+            .is_some());
     }
 
     #[test]
@@ -467,5 +468,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn default_is_bge_small() {
+        // The #[default] attribute sits on BgeSmall — the fast, storage-stable
+        // 384d model that existing databases were embedded with.
+        assert_eq!(
+            CodeGraphEmbeddingModel::default(),
+            CodeGraphEmbeddingModel::BgeSmall
+        );
+    }
+
+    #[test]
+    fn display_names_are_distinct_and_nonempty() {
+        let names = [
+            CodeGraphEmbeddingModel::BgeSmall.display_name(),
+            CodeGraphEmbeddingModel::JinaCodeV2.display_name(),
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2.display_name(),
+        ];
+        for (i, a) in names.iter().enumerate() {
+            assert!(!a.is_empty(), "display_name must not be empty");
+            for (j, b) in names.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "display_name must be unique across variants");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_mapping_targets_expected_fastembed_models() {
+        // The exact fastembed enum mapping is load-bearing: swapping it would
+        // silently change which weights get downloaded for a stored model tag.
+        assert_eq!(
+            CodeGraphEmbeddingModel::BgeSmall.to_fastembed_builtin(),
+            Some(EmbeddingModel::BGESmallENV15)
+        );
+        assert_eq!(
+            CodeGraphEmbeddingModel::JinaCodeV2.to_fastembed_builtin(),
+            Some(EmbeddingModel::JinaEmbeddingsV2BaseCode)
+        );
+        assert_eq!(
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2.to_fastembed_builtin(),
+            None
+        );
+    }
+
+    #[test]
+    fn serde_uses_kebab_case_names() {
+        // The persisted form must stay kebab-case: config files and stored
+        // model tags key off these exact strings.
+        assert_eq!(
+            serde_json::to_string(&CodeGraphEmbeddingModel::BgeSmall).unwrap(),
+            "\"bge-small\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CodeGraphEmbeddingModel::JinaCodeV2).unwrap(),
+            "\"jina-code-v2\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CodeGraphEmbeddingModel::Granite97mMultilingualR2).unwrap(),
+            "\"granite97m-multilingual-r2\""
+        );
+    }
+
+    #[test]
+    fn serde_round_trips_every_variant() {
+        for model in [
+            CodeGraphEmbeddingModel::BgeSmall,
+            CodeGraphEmbeddingModel::JinaCodeV2,
+            CodeGraphEmbeddingModel::Granite97mMultilingualR2,
+        ] {
+            let json = serde_json::to_string(&model).unwrap();
+            let back: CodeGraphEmbeddingModel = serde_json::from_str(&json).unwrap();
+            assert_eq!(model, back, "serde round-trip must preserve the variant");
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_model_name() {
+        // An unrecognised model string is an error, not a silent fallback to
+        // the default — a typo in config should surface loudly.
+        let err = serde_json::from_str::<CodeGraphEmbeddingModel>("\"bge-large\"");
+        assert!(err.is_err());
     }
 }

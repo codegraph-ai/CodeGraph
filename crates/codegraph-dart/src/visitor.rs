@@ -196,7 +196,10 @@ impl<'a> DartVisitor<'a> {
 
         let complexity = body_node.map(|body| self.calculate_complexity(body));
 
-        let is_static = signature.contains("static ");
+        // The `static` keyword is a sibling of function_signature inside
+        // method_signature, so it is absent from the inner signature text;
+        // read the full method_signature node to detect it.
+        let is_static = self.node_text(node).contains("static ") || signature.contains("static ");
         let is_abstract = body_node.is_none();
 
         let is_async = body_node
@@ -658,6 +661,7 @@ impl<'a> DartVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> DartVisitor<'_> {
         use tree_sitter::Parser;
@@ -697,4 +701,544 @@ mod tests {
         assert!(!visitor.imports.is_empty());
     }
 
+    #[test]
+    fn top_level_function_records_public_visibility_and_body() {
+        let source = b"int add(int a, int b) {\n  return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert_eq!(f.name, "add");
+        assert_eq!(f.visibility, "public");
+        // Has a body, so not abstract.
+        assert!(!f.is_abstract);
+        assert!(!f.is_async);
+        assert_eq!(f.parent_class, None);
+    }
+
+    #[test]
+    fn underscore_prefixed_function_is_private() {
+        let source = b"void _secret() {\n  return;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn async_function_sets_is_async() {
+        let source = b"Future<void> load() async {\n  await fetch();\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "load")
+            .expect("load function extracted");
+        assert!(f.is_async);
+    }
+
+    #[test]
+    fn class_extends_records_inheritance_relation() {
+        let source = b"class Dog extends Animal {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.inheritance.len(), 1);
+        let rel = &visitor.inheritance[0];
+        assert_eq!(rel.child, "Dog");
+        assert_eq!(rel.parent, "Animal");
+        assert!(visitor.classes[0]
+            .base_classes
+            .contains(&"Animal".to_string()));
+    }
+
+    #[test]
+    fn class_implements_records_implementation_relation() {
+        let source = b"class Service implements Runnable {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.implementations.len(), 1);
+        let rel = &visitor.implementations[0];
+        assert_eq!(rel.implementor, "Service");
+        assert_eq!(rel.trait_name, "Runnable");
+    }
+
+    #[test]
+    fn abstract_class_sets_is_abstract() {
+        let source = b"abstract class Shape {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert!(visitor.classes[0].is_abstract);
+    }
+
+    #[test]
+    fn method_inside_class_gets_parent_class() {
+        let source = b"class Counter {\n  void increment() {\n    count += 1;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "increment")
+            .expect("method extracted");
+        assert_eq!(m.parent_class.as_deref(), Some("Counter"));
+    }
+
+    #[test]
+    fn static_method_sets_is_static() {
+        let source = b"class Util {\n  static int zero() {\n    return 0;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "zero")
+            .expect("static method extracted");
+        assert!(m.is_static);
+    }
+
+    #[test]
+    fn enum_becomes_class_with_enum_attribute() {
+        let source = b"enum Color {\n  red,\n  green,\n  blue\n}";
+        let visitor = parse_and_visit(source);
+
+        let e = visitor
+            .classes
+            .iter()
+            .find(|c| c.name == "Color")
+            .expect("enum extracted as class");
+        assert!(e.attributes.contains(&"enum".to_string()));
+    }
+
+    #[test]
+    fn mixin_becomes_trait_with_mixin_attribute() {
+        let source = b"mixin Logger {\n  void log() {}\n}";
+        let visitor = parse_and_visit(source);
+
+        let t = visitor
+            .traits
+            .iter()
+            .find(|t| t.name == "Logger")
+            .expect("mixin extracted as trait");
+        assert!(t.attributes.contains(&"mixin".to_string()));
+    }
+
+    #[test]
+    fn import_uri_value_is_extracted() {
+        let source = b"import 'package:flutter/material.dart';";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor
+            .imports
+            .iter()
+            .any(|i| i.imported == "package:flutter/material.dart"));
+    }
+
+    #[test]
+    fn branching_function_has_nonzero_complexity() {
+        let source =
+            b"int classify(int n) {\n  if (n > 0) {\n    return 1;\n  } else {\n    return -1;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "classify")
+            .expect("function extracted");
+        let complexity = f.complexity.as_ref().expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn parameters_are_extracted_by_name() {
+        let source = b"void greet(String name) {\n  print(name);\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert!(
+            f.parameters.iter().any(|p| p.name == "name"),
+            "expected a parameter named 'name', got {:?}",
+            f.parameters
+        );
+    }
+
+    #[test]
+    fn return_type_is_extracted() {
+        let source = b"int answer() {\n  return 42;\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert_eq!(f.return_type.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn doc_comment_attached_to_function() {
+        let source = b"/// Adds one.\nint inc(int n) {\n  return n + 1;\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert!(
+            f.doc_comment
+                .as_deref()
+                .is_some_and(|d| d.contains("Adds one")),
+            "expected doc comment, got {:?}",
+            f.doc_comment
+        );
+    }
+
+    #[test]
+    fn getter_extracted_with_getter_attribute() {
+        let source = b"class Box {\n  int get size => 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let g = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "size")
+            .expect("getter extracted");
+        assert!(g.attributes.contains(&"getter".to_string()));
+        assert_eq!(g.parent_class.as_deref(), Some("Box"));
+    }
+
+    #[test]
+    fn underscore_prefixed_class_is_private() {
+        let source = b"class _Hidden {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].visibility, "private");
+    }
+
+    #[test]
+    fn export_statement_produces_no_import() {
+        let source = b"export 'src/util.dart';";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn multiple_imports_are_all_recorded() {
+        let source = b"import 'dart:io';\nimport 'dart:async';";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 2);
+        assert!(visitor.imports.iter().any(|i| i.imported == "dart:io"));
+        assert!(visitor.imports.iter().any(|i| i.imported == "dart:async"));
+    }
+
+    #[test]
+    fn class_implements_multiple_interfaces() {
+        let source = b"class Service implements Runnable, Closeable {\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.implementations.len(), 2);
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|r| r.trait_name == "Runnable"));
+        assert!(visitor
+            .implementations
+            .iter()
+            .any(|r| r.trait_name == "Closeable"));
+    }
+
+    #[test]
+    fn top_level_function_without_body_is_abstract() {
+        // A bodyless top-level function signature (rare, but the grammar allows
+        // a trailing declaration) has no function_body sibling, so is_abstract.
+        let source = b"int compute();";
+        let visitor = parse_and_visit(source);
+
+        let f = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "compute")
+            .expect("function signature extracted");
+        assert!(f.is_abstract);
+        assert!(f.complexity.is_none());
+    }
+
+    #[test]
+    fn empty_source_yields_nothing() {
+        let visitor = parse_and_visit(b"");
+
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn ternary_conditional_raises_complexity() {
+        // The grammar emits `conditional_expression` for `a ? b : c`, which the
+        // complexity visitor counts as a branch.
+        let source = b"int f(int a) {\n  return a > 0 ? 1 : -1;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn for_loop_raises_complexity() {
+        let source =
+            b"int f() {\n  for (var i = 0; i < 3; i++) {\n    use(i);\n  }\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn multiple_parameters_preserve_source_order() {
+        let source = b"void f(int a, int b, int c) {\n  return;\n}";
+        let visitor = parse_and_visit(source);
+
+        let names: Vec<&str> = visitor.functions[0]
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn oversized_body_prefix_is_truncated_to_max() {
+        // A body longer than BODY_PREFIX_MAX_CHARS bytes must be clipped.
+        let filler = "  x();\n".repeat(400); // ~2800 bytes, well over 1024
+        let src = format!("void big() {{\n{filler}}}");
+        let visitor = parse_and_visit(src.as_bytes());
+
+        let f = &visitor.functions[0];
+        let prefix = f.body_prefix.as_ref().expect("body prefix present");
+        assert_eq!(prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn while_loop_raises_complexity() {
+        let source = b"int f() {\n  while (true) {\n    break;\n  }\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn catch_clause_raises_complexity() {
+        let source =
+            b"int f() {\n  try {\n    risky();\n  } catch (e) {\n    return -1;\n  }\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn import_with_alias_still_records_uri() {
+        // The alias field is not populated, but the import is still recorded.
+        let source = b"import 'dart:io' as io;";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.imports.iter().any(|i| i.imported == "dart:io"));
+    }
+
+    #[test]
+    fn class_with_body_captures_body_prefix() {
+        let source = b"class Box {\n  int size = 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let prefix = visitor.classes[0]
+            .body_prefix
+            .as_ref()
+            .expect("class body prefix present");
+        assert!(prefix.contains("size"));
+    }
+
+    #[test]
+    fn getter_return_type_is_extracted() {
+        let source = b"class Box {\n  int get size => 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let g = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "size")
+            .expect("getter extracted");
+        assert_eq!(g.return_type.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn leading_blank_lines_offset_function_line_start() {
+        let source = b"\n\nint answer() {\n  return 42;\n}";
+        let visitor = parse_and_visit(source);
+
+        // The signature starts on the third physical line.
+        assert_eq!(visitor.functions[0].line_start, 3);
+    }
+
+    #[test]
+    fn simple_call_is_not_recorded() {
+        // GAP: `helper()` parses as identifier + a `selector` sibling, but
+        // visit_body_for_calls only matches selector_suffix/argument_part/arguments
+        // siblings, so no CallRelation is produced for a plain call.
+        let source = b"void run() {\n  helper();\n}";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn method_call_is_not_recorded() {
+        // GAP (same selector-sibling mismatch) inside a class method body.
+        let source = b"class Worker {\n  void go() {\n    helper();\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn logical_and_does_not_raise_complexity() {
+        // GAP: `a && b` parses as logical_and_expression, not binary_expression,
+        // so the &&/|| complexity arm never fires - it stays at baseline.
+        let source = b"bool f(bool a, bool b) {\n  return a && b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn logical_or_does_not_raise_complexity() {
+        // GAP: `a || b` parses as its own expression kind (not binary_expression).
+        let source = b"bool f(bool a, bool b) {\n  return a || b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn switch_case_does_not_raise_complexity() {
+        // GAP: cases parse as switch_statement_case/switch_statement_default, not the
+        // switch_case/default_case kinds the complexity walker matches, so a switch
+        // enters a scope but adds no branches - complexity stays at baseline.
+        let source = b"int f(int n) {\n  switch (n) {\n    case 1:\n      return 1;\n    default:\n      return 0;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn do_while_loop_raises_complexity() {
+        let source = b"int f() {\n  do {\n    step();\n  } while (true);\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn finally_clause_raises_complexity() {
+        // A finally clause is counted as an exception handler.
+        let source =
+            b"int f() {\n  try {\n    risky();\n  } finally {\n    cleanup();\n  }\n  return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn underscore_getter_is_private() {
+        let source = b"class Box {\n  int get _size => 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let g = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "_size")
+            .expect("getter extracted");
+        assert_eq!(g.visibility, "private");
+        assert!(g.attributes.contains(&"getter".to_string()));
+    }
+
+    #[test]
+    fn method_body_prefix_captured() {
+        let source = b"class Counter {\n  void inc() {\n    count += 1;\n  }\n}";
+        let visitor = parse_and_visit(source);
+
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "inc")
+            .expect("method extracted");
+        let prefix = m.body_prefix.as_ref().expect("body prefix present");
+        assert!(prefix.contains("count"));
+    }
+
+    #[test]
+    fn bodyless_method_is_not_extracted() {
+        // GAP: a bodyless method `double area();` parses as
+        // class_member > declaration > function_signature. Inside a class,
+        // visit_node's function_signature arm is guarded by current_class.is_none(),
+        // and there is no method_signature node, so the method is never extracted.
+        let source = b"abstract class Shape {\n  double area();\n}";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions.iter().all(|f| f.name != "area"));
+    }
+
+    #[test]
+    fn underscore_prefixed_mixin_is_private() {
+        let source = b"mixin _Secret {\n  void run() {}\n}";
+        let visitor = parse_and_visit(source);
+
+        let t = visitor
+            .traits
+            .iter()
+            .find(|t| t.name == "_Secret")
+            .expect("mixin extracted as trait");
+        assert_eq!(t.visibility, "private");
+    }
+
+    #[test]
+    fn multi_line_class_line_end_spans_body() {
+        // A class spanning several physical lines records the closing-brace line.
+        let source = b"class Big {\n  int a = 0;\n  int b = 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes[0].line_start, 1);
+        assert_eq!(visitor.classes[0].line_end, 4);
+    }
 }

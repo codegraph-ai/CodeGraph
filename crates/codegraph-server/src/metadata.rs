@@ -49,3 +49,74 @@ pub fn metadata_string() -> String {
         rustc = RUSTC_VERSION,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constants_have_expected_shape() {
+        assert_eq!(LICENSE, "Apache-2.0");
+        assert!(AUTHOR.contains("anvanster@gmail.com"));
+        assert!(REPOSITORY.starts_with("https://github.com/"));
+        assert!(!VERSION.is_empty(), "CARGO_PKG_VERSION is always set");
+        assert!(!NAME.is_empty(), "CARGO_PKG_NAME is always set");
+    }
+
+    #[test]
+    fn metadata_string_embeds_all_fields() {
+        let s = metadata_string();
+        assert!(s.contains(NAME));
+        assert!(s.contains(VERSION));
+        assert!(s.contains(GIT_HASH_SHORT));
+        assert!(s.contains(AUTHOR));
+        assert!(s.contains(LICENSE));
+        assert!(s.contains(REPOSITORY));
+        assert!(s.contains(BUILD_TIMESTAMP));
+        assert!(s.contains(RUSTC_VERSION));
+    }
+
+    #[test]
+    fn metadata_string_has_five_lines_in_order() {
+        let s = metadata_string();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 5, "name/author/license/repo/built");
+        assert!(lines[0].starts_with(&format!("{NAME} v{VERSION}")));
+        assert!(lines[1].starts_with("Author: "));
+        assert!(lines[2].starts_with("License: "));
+        assert!(lines[3].starts_with("Repository: "));
+        assert!(lines[4].starts_with("Built: "));
+    }
+
+    #[test]
+    fn metadata_string_first_line_pins_parenthesized_git_hash() {
+        // metadata_string_has_five_lines_in_order only asserts line[0] starts_with
+        // "{NAME} v{VERSION}", leaving the trailing " ({GIT_HASH_SHORT})" segment
+        // unpinned. Pin the full first-line format so a change to the git-hash
+        // placement or the surrounding parentheses is test-visible.
+        let line0 = metadata_string().lines().next().unwrap().to_string();
+        assert_eq!(line0, format!("{NAME} v{VERSION} ({GIT_HASH_SHORT})"));
+        assert!(
+            line0.ends_with(&format!("({GIT_HASH_SHORT})")),
+            "git hash is parenthesized at the end of line 0"
+        );
+    }
+
+    #[test]
+    fn metadata_string_built_line_pins_with_separator() {
+        // metadata_string_has_five_lines_in_order only asserts line[4] starts_with
+        // "Built: ", leaving the " with " separator and the timestamp/rustc order
+        // unpinned. Pin the exact "Built: {timestamp} with {rustc}" format.
+        let line4 = metadata_string().lines().nth(4).unwrap().to_string();
+        assert_eq!(
+            line4,
+            format!("Built: {BUILD_TIMESTAMP} with {RUSTC_VERSION}")
+        );
+    }
+
+    #[test]
+    fn print_metadata_does_not_panic() {
+        // Exercises the stdout path; output isn't captured, just must not panic.
+        print_metadata();
+    }
+}

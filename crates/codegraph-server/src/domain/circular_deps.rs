@@ -275,3 +275,169 @@ fn canonical_cycle(cycle: &[NodeId]) -> Vec<NodeId> {
     rotated.extend_from_slice(&body[..min_pos]);
     rotated
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{PropertyMap, PropertyValue};
+
+    fn adjacency(edges: &[(NodeId, &[NodeId])]) -> HashMap<NodeId, Vec<NodeId>> {
+        edges
+            .iter()
+            .map(|(id, neighbors)| (*id, neighbors.to_vec()))
+            .collect()
+    }
+
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, name: &str, path: &str) -> NodeId {
+        let mut props = PropertyMap::new();
+        props.insert("name".to_string(), PropertyValue::String(name.to_string()));
+        props.insert("path".to_string(), PropertyValue::String(path.to_string()));
+        graph.add_node(ty, props).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    #[test]
+    fn build_import_adjacency_links_files_over_import_edge() {
+        // A imports B; both are files in the restriction set.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let b = add_node(&mut g, NodeType::CodeFile, "b.rs", "/src/b.rs");
+        edge(&mut g, a, b, EdgeType::Imports);
+        let set: HashSet<NodeId> = [a, b].into_iter().collect();
+
+        let adj = build_import_adjacency(&g, &set);
+        // Every file in the set gets an entry; A points at B, B has none.
+        assert_eq!(adj.get(&a), Some(&vec![b]));
+        assert_eq!(adj.get(&b), Some(&Vec::<NodeId>::new()));
+    }
+
+    #[test]
+    fn build_import_adjacency_counts_imports_from_edge() {
+        // ImportsFrom is treated the same as Imports.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let b = add_node(&mut g, NodeType::CodeFile, "b.rs", "/src/b.rs");
+        edge(&mut g, a, b, EdgeType::ImportsFrom);
+        let set: HashSet<NodeId> = [a, b].into_iter().collect();
+
+        let adj = build_import_adjacency(&g, &set);
+        assert_eq!(adj.get(&a), Some(&vec![b]));
+    }
+
+    #[test]
+    fn build_import_adjacency_skips_neighbor_outside_file_set() {
+        // A imports module M, but M is not in the restriction set.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let m = add_node(&mut g, NodeType::Module, "serde", "");
+        edge(&mut g, a, m, EdgeType::Imports);
+        let set: HashSet<NodeId> = [a].into_iter().collect();
+
+        let adj = build_import_adjacency(&g, &set);
+        assert_eq!(adj.get(&a), Some(&Vec::<NodeId>::new()));
+    }
+
+    #[test]
+    fn build_import_adjacency_ignores_non_import_edges() {
+        // A calls B (both files in set) but there is no import edge.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_node(&mut g, NodeType::CodeFile, "a.rs", "/src/a.rs");
+        let b = add_node(&mut g, NodeType::CodeFile, "b.rs", "/src/b.rs");
+        edge(&mut g, a, b, EdgeType::Calls);
+        let set: HashSet<NodeId> = [a, b].into_iter().collect();
+
+        let adj = build_import_adjacency(&g, &set);
+        assert_eq!(adj.get(&a), Some(&Vec::<NodeId>::new()));
+    }
+
+    #[test]
+    fn empty_result_has_no_cycles() {
+        let result = CircularDepsResult::empty();
+        assert!(result.cycles.is_empty());
+        assert_eq!(result.total_cycles, 0);
+        assert!(!result.has_circular_deps);
+    }
+
+    #[test]
+    fn canonical_cycle_rotates_to_min_first() {
+        // [3, 1, 2, 3] -> body [3, 1, 2] -> min (1) at pos 1 -> [1, 2, 3].
+        assert_eq!(canonical_cycle(&[3, 1, 2, 3]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn canonical_cycle_already_min_first_is_unchanged() {
+        // [1, 2, 3, 1] -> body [1, 2, 3] already starts at min.
+        assert_eq!(canonical_cycle(&[1, 2, 3, 1]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn canonical_cycle_normalizes_rotations_to_same_form() {
+        // A→B→C and B→C→A canonicalize identically.
+        assert_eq!(
+            canonical_cycle(&[1, 2, 3, 1]),
+            canonical_cycle(&[2, 3, 1, 2])
+        );
+    }
+
+    #[test]
+    fn canonical_cycle_without_repeated_tail() {
+        // No repeated last element: whole slice is the body.
+        assert_eq!(canonical_cycle(&[2, 3, 1]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn canonical_cycle_empty_is_empty() {
+        assert_eq!(canonical_cycle(&[]), Vec::<NodeId>::new());
+    }
+
+    #[test]
+    fn dfs_finds_two_node_cycle() {
+        // 1 -> 2 -> 1
+        let adj = adjacency(&[(1, &[2]), (2, &[1])]);
+        let scc: HashSet<NodeId> = [1, 2].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 10);
+        assert_eq!(cycle, Some(vec![1, 2, 1]));
+    }
+
+    #[test]
+    fn dfs_finds_three_node_cycle() {
+        // 1 -> 2 -> 3 -> 1
+        let adj = adjacency(&[(1, &[2]), (2, &[3]), (3, &[1])]);
+        let scc: HashSet<NodeId> = [1, 2, 3].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 10);
+        assert_eq!(cycle, Some(vec![1, 2, 3, 1]));
+    }
+
+    #[test]
+    fn dfs_returns_none_without_cycle() {
+        // 1 -> 2, dead end.
+        let adj = adjacency(&[(1, &[2]), (2, &[])]);
+        let scc: HashSet<NodeId> = [1, 2].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 10);
+        assert_eq!(cycle, None);
+    }
+
+    #[test]
+    fn dfs_respects_max_cycle_length() {
+        // A 2-node cycle needs one intermediate hop; max length 1 forbids it.
+        let adj = adjacency(&[(1, &[2]), (2, &[1])]);
+        let scc: HashSet<NodeId> = [1, 2].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 1);
+        assert_eq!(cycle, None);
+    }
+
+    #[test]
+    fn dfs_ignores_neighbors_outside_scc() {
+        // 1 -> 2 (out of SCC) -> 1: the intermediate node isn't in the SCC set,
+        // so no cycle path is followed through it.
+        let adj = adjacency(&[(1, &[2]), (2, &[1])]);
+        let scc: HashSet<NodeId> = [1].into_iter().collect();
+        let cycle = dfs_find_cycle(1, 1, &adj, &scc, &mut Vec::new(), 10);
+        assert_eq!(cycle, None);
+    }
+}

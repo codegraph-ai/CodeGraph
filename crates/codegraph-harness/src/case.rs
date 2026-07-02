@@ -246,3 +246,195 @@ impl TestCase {
         Ok(case)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // --- NormalizeOpts::merge -------------------------------------------
+
+    #[test]
+    fn merge_option_fields_overlay_wins_else_base() {
+        let base = NormalizeOpts {
+            sort_arrays: Some(true),
+            float_decimals: Some(2),
+            embedding_model: Some("bge".to_string()),
+            ..Default::default()
+        };
+        let overlay = NormalizeOpts {
+            // overlay overrides sort_arrays, leaves float_decimals/model to base
+            sort_arrays: Some(false),
+            ..Default::default()
+        };
+        let merged = NormalizeOpts::merge(base, overlay);
+        assert_eq!(merged.sort_arrays, Some(false), "overlay Some wins");
+        assert_eq!(
+            merged.float_decimals,
+            Some(2),
+            "base fills when overlay None"
+        );
+        assert_eq!(merged.embedding_model, Some("bge".to_string()));
+    }
+
+    #[test]
+    fn merge_vecs_concatenate_profile_first_and_dedup() {
+        let base = NormalizeOpts {
+            extra_volatile: vec!["a".to_string(), "b".to_string()],
+            drop_where: vec![serde_json::json!({"k": 1})],
+            ..Default::default()
+        };
+        let overlay = NormalizeOpts {
+            // "b" is a duplicate and must not be pushed again
+            extra_volatile: vec!["b".to_string(), "c".to_string()],
+            drop_where: vec![serde_json::json!({"k": 1}), serde_json::json!({"k": 2})],
+            ..Default::default()
+        };
+        let merged = NormalizeOpts::merge(base, overlay);
+        assert_eq!(
+            merged.extra_volatile,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "profile entries first, overlay appended, duplicate 'b' skipped"
+        );
+        assert_eq!(
+            merged.drop_where,
+            vec![serde_json::json!({"k": 1}), serde_json::json!({"k": 2})],
+            "duplicate drop_where pattern deduped"
+        );
+    }
+
+    #[test]
+    fn merge_keep_volatile_dedup_then_case_strip_wins() {
+        let base = NormalizeOpts {
+            // profile keeps "score" and "id"
+            keep_volatile: vec!["score".to_string(), "id".to_string()],
+            ..Default::default()
+        };
+        let overlay = NormalizeOpts {
+            // overlay also keeps "id" (dedup) but strips "score" via extra_volatile
+            keep_volatile: vec!["id".to_string()],
+            extra_volatile: vec!["score".to_string()],
+            ..Default::default()
+        };
+        let merged = NormalizeOpts::merge(base, overlay);
+        // "score" removed from keep_volatile because a case-side strip beats
+        // a profile-side keep; "id" stays and is not duplicated.
+        assert_eq!(merged.keep_volatile, vec!["id".to_string()]);
+        assert_eq!(merged.extra_volatile, vec!["score".to_string()]);
+    }
+
+    #[test]
+    fn sort_arrays_on_defaults_off_and_reads_some() {
+        assert!(
+            !NormalizeOpts::default().sort_arrays_on(),
+            "None resolves to false"
+        );
+        let on = NormalizeOpts {
+            sort_arrays: Some(true),
+            ..Default::default()
+        };
+        assert!(on.sort_arrays_on());
+        let off = NormalizeOpts {
+            sort_arrays: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.sort_arrays_on());
+    }
+
+    // --- TestCase::from_path ---------------------------------------------
+
+    fn write_case(yaml: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(yaml.as_bytes()).expect("write yaml");
+        f.flush().expect("flush");
+        f
+    }
+
+    #[test]
+    fn from_path_applies_serde_defaults() {
+        let yaml = r#"
+id: get_symbol_info.basic.rust_fn
+setup:
+  fixture: fn.rs
+invoke:
+  tool: codegraph_get_symbol_info
+  args: { name: "foo" }
+expect:
+  data: { ok: true }
+"#;
+        let f = write_case(yaml);
+        let case = TestCase::from_path(f.path()).expect("parse");
+        assert_eq!(case.id, "get_symbol_info.basic.rust_fn");
+        assert_eq!(case.description, "", "description defaults to empty");
+        // Setup defaults
+        assert_eq!(case.setup.workspace_layout, WorkspaceLayout::SingleFile);
+        assert!(case.setup.pre_index, "pre_index defaults true");
+        assert!(!case.setup.init_git, "init_git defaults false");
+        // Invoke defaults
+        assert_eq!(case.invoke.timeout_ms, 10_000);
+        assert!(case.invoke.binary.is_none());
+        assert!(!case.invoke.retry_on_warmup);
+        // Expect defaults
+        assert_eq!(case.expect.r#match, MatchMode::Exact);
+        assert!(!case.expect.normalize.sort_arrays_on());
+        // source_path is filled from the file, not the YAML
+        assert_eq!(case.source_path, f.path());
+    }
+
+    #[test]
+    fn from_path_parses_explicit_overrides() {
+        let yaml = r#"
+id: t.override
+description: exercises non-default fields
+setup:
+  fixture: dir/main.rs
+  workspace_layout: multi_file
+  pre_index: false
+  init_git: true
+invoke:
+  tool: codegraph_find_similar
+  args: {}
+  timeout_ms: 30000
+  binary: /opt/codegraph-pro
+  retry_on_warmup: true
+expect:
+  match: structural
+  normalize:
+    sort_arrays: true
+    float_decimals: 3
+  data: {}
+"#;
+        let f = write_case(yaml);
+        let case = TestCase::from_path(f.path()).expect("parse");
+        assert_eq!(case.description, "exercises non-default fields");
+        assert_eq!(case.setup.workspace_layout, WorkspaceLayout::MultiFile);
+        assert!(!case.setup.pre_index);
+        assert!(case.setup.init_git);
+        assert_eq!(case.invoke.timeout_ms, 30_000);
+        assert_eq!(case.invoke.binary.as_deref(), Some("/opt/codegraph-pro"));
+        assert!(case.invoke.retry_on_warmup);
+        assert_eq!(case.expect.r#match, MatchMode::Structural);
+        assert!(case.expect.normalize.sort_arrays_on());
+        assert_eq!(case.expect.normalize.float_decimals, Some(3));
+    }
+
+    #[test]
+    fn from_path_missing_required_field_errors() {
+        // No `invoke` block — serde should reject it.
+        let yaml = r#"
+id: t.broken
+setup:
+  fixture: fn.rs
+expect:
+  data: {}
+"#;
+        let f = write_case(yaml);
+        assert!(TestCase::from_path(f.path()).is_err());
+    }
+
+    #[test]
+    fn from_path_nonexistent_file_errors() {
+        let missing = std::path::Path::new("/nonexistent/definitely/not/here.case.yml");
+        assert!(TestCase::from_path(missing).is_err());
+    }
+}

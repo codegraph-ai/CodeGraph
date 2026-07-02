@@ -407,4 +407,31 @@ fn test_something() {
         assert_eq!(ir.functions[1].name, "second");
         assert_eq!(ir.functions[1].line_start, 3);
     }
+
+    #[test]
+    fn test_extract_file_doc_collects_inner_comments() {
+        // Two leading `//!` inner doc comments are collected (prefix stripped,
+        // trimmed) and joined with a newline; a following `fn` stops the scan.
+        let source = "//! First line\n//! Second line\nfn hello() {}\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("test.rs"), &config).unwrap();
+
+        let module = ir.module.expect("module entity present");
+        assert_eq!(
+            module.doc_comment,
+            Some("First line\nSecond line".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_file_doc_absent_yields_none() {
+        // A leading regular `//` comment is a line_comment but lacks the `//!`
+        // prefix, so nothing is pushed and the empty-docs branch returns None.
+        let source = "// just a normal comment\nfn hello() {}\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("test.rs"), &config).unwrap();
+
+        let module = ir.module.expect("module entity present");
+        assert_eq!(module.doc_comment, None);
+    }
 }

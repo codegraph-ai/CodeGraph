@@ -1387,7 +1387,7 @@ impl McpServer {
     pub async fn run(&mut self) -> std::io::Result<()> {
         let mut transport = AsyncStdioTransport::new();
         let start_time = std::time::Instant::now();
-        let mut tool_call_count = 0u64;
+        let tool_call_count = 0u64;
 
         tracing::info!("MCP server starting...");
         emit_tel(serde_json::json!({
@@ -3076,7 +3076,7 @@ impl McpServer {
                     })
                     .unwrap_or_default();
 
-                let memory = self.build_memory_node(kind, title, content, &tags, &args)?;
+                let memory = Self::build_memory_node(kind, title, content, &tags, &args)?;
 
                 let id = self
                     .backend
@@ -4010,8 +4010,7 @@ impl McpServer {
                     let diff_text = String::from_utf8_lossy(&out.stdout);
                     let mut current_file: Option<String> = None;
                     for line in diff_text.lines() {
-                        if line.starts_with("+++ b/") {
-                            let rel = &line[6..];
+                        if let Some(rel) = line.strip_prefix("+++ b/") {
                             current_file = Some(
                                 std::path::Path::new(&workspace_root)
                                     .join(rel)
@@ -4058,9 +4057,7 @@ impl McpServer {
                         .iter_nodes()
                         .filter(|(_, n)| {
                             n.node_type == codegraph::NodeType::Function
-                                && n.properties
-                                    .get_string("path")
-                                    .map_or(false, |p| p == file.as_str())
+                                && (n.properties.get_string("path") == Some(file.as_str()))
                         })
                         .map(|(id, n)| {
                             let name = crate::domain::node_props::name(n).to_string();
@@ -4155,7 +4152,7 @@ impl McpServer {
                         let fn_is_test = graph
                             .get_node(*node_id)
                             .ok()
-                            .is_some_and(|n| crate::domain::node_props::is_test(n))
+                            .is_some_and(crate::domain::node_props::is_test)
                             || func_name.to_lowercase().starts_with("test_")
                             || func_name.to_lowercase().contains("_test")
                             || changed_rel[idx].contains("/tests/")
@@ -4744,7 +4741,6 @@ impl McpServer {
 
     /// Build a memory node from parameters
     fn build_memory_node(
-        &self,
         kind: &str,
         title: &str,
         content: &str,
@@ -5068,5 +5064,393 @@ mod quarantine_tests {
             "current generation must survive the sweep"
         );
         assert!(tmp.path().join("graph.db.notagen").exists());
+    }
+
+    #[test]
+    fn classify_tool_error_maps_each_category() {
+        use super::classify_tool_error;
+        // server_unavailable: any of the three phrases, case-insensitive.
+        assert_eq!(
+            classify_tool_error("Server NOT INITIALIZED"),
+            "server_unavailable"
+        );
+        assert_eq!(
+            classify_tool_error("daemon not running"),
+            "server_unavailable"
+        );
+        assert_eq!(
+            classify_tool_error("engine unavailable"),
+            "server_unavailable"
+        );
+        // not_indexed
+        assert_eq!(classify_tool_error("graph not indexed yet"), "not_indexed");
+        assert_eq!(classify_tool_error("index is empty"), "not_indexed");
+        // not_found
+        assert_eq!(classify_tool_error("no symbols found"), "not_found");
+        assert_eq!(classify_tool_error("symbol does not exist"), "not_found");
+        assert_eq!(classify_tool_error("no such node"), "not_found");
+        // invalid_params
+        assert_eq!(classify_tool_error("Invalid URI scheme"), "invalid_params");
+        assert_eq!(
+            classify_tool_error("missing required field"),
+            "invalid_params"
+        );
+        // timeout
+        assert_eq!(classify_tool_error("operation timed out"), "timeout");
+        // parse_error
+        assert_eq!(classify_tool_error("failed to parse source"), "parse_error");
+        // internal_error
+        assert_eq!(
+            classify_tool_error("an internal error occurred"),
+            "internal_error"
+        );
+        // fallthrough
+        assert_eq!(classify_tool_error("something unexpected"), "other");
+    }
+
+    #[test]
+    fn classify_tool_error_covers_every_or_branch_phrase() {
+        use super::classify_tool_error;
+        // Each category is an OR of several `contains` phrases; the sibling test
+        // only exercises one phrase per arm. Pin the remaining phrases so every
+        // short-circuit branch is covered.
+        // not_indexed: the "no index" phrase (distinct from "not indexed").
+        assert_eq!(classify_tool_error("there is no index here"), "not_indexed");
+        // not_found: the bare "not found" and "no results" phrases.
+        assert_eq!(classify_tool_error("symbol not found"), "not_found");
+        assert_eq!(
+            classify_tool_error("query returned no results"),
+            "not_found"
+        );
+        // invalid_params: the three phrases the sibling test skipped.
+        assert_eq!(
+            classify_tool_error("invalid file path given"),
+            "invalid_params"
+        );
+        assert_eq!(classify_tool_error("invalid param value"), "invalid_params");
+        assert_eq!(
+            classify_tool_error("invalid argument supplied"),
+            "invalid_params"
+        );
+        // timeout: the "timeout" spelling (sibling only used "timed out").
+        assert_eq!(classify_tool_error("request timeout"), "timeout");
+        // internal_error: the "panic" phrase (sibling only used "internal error").
+        assert_eq!(
+            classify_tool_error("thread panic in handler"),
+            "internal_error"
+        );
+    }
+
+    #[test]
+    fn safe_tool_name_passes_only_wellformed_codegraph_ids() {
+        use super::safe_tool_name;
+        assert_eq!(
+            safe_tool_name("codegraph_symbol_search"),
+            "codegraph_symbol_search"
+        );
+        // Wrong prefix, dash, space, and non-ascii are all rejected.
+        assert_eq!(safe_tool_name("not_codegraph_foo"), "other");
+        assert_eq!(safe_tool_name("codegraph_with-dash"), "other");
+        assert_eq!(safe_tool_name("codegraph_ evil"), "other");
+        // Over the 64-byte length cap.
+        let long = format!("codegraph_{}", "x".repeat(60));
+        assert_eq!(safe_tool_name(&long), "other");
+    }
+
+    #[test]
+    fn parse_node_id_accepts_u64_only() {
+        use super::parse_node_id;
+        assert_eq!(parse_node_id("12345"), Some(12345));
+        assert_eq!(parse_node_id("0"), Some(0));
+        assert_eq!(parse_node_id("notanumber"), None);
+        assert_eq!(parse_node_id("-1"), None);
+        assert_eq!(parse_node_id(""), None);
+    }
+
+    #[test]
+    fn parse_symbol_type_maps_aliases() {
+        use crate::ai_query::SymbolType;
+        let p = super::McpServer::parse_symbol_type;
+        assert_eq!(p("function"), Some(SymbolType::Function));
+        assert_eq!(p("method"), Some(SymbolType::Function));
+        assert_eq!(p("class"), Some(SymbolType::Class));
+        assert_eq!(p("struct"), Some(SymbolType::Class));
+        assert_eq!(p("variable"), Some(SymbolType::Variable));
+        assert_eq!(p("constant"), Some(SymbolType::Variable));
+        assert_eq!(p("MODULE"), Some(SymbolType::Module));
+        assert_eq!(p("namespace"), Some(SymbolType::Module));
+        assert_eq!(p("interface"), Some(SymbolType::Interface));
+        assert_eq!(p("trait"), Some(SymbolType::Interface));
+        assert_eq!(p("type"), Some(SymbolType::Type));
+        assert_eq!(p("enum"), Some(SymbolType::Type));
+        assert_eq!(p("bogus"), None);
+    }
+
+    #[test]
+    fn parse_kind_str_accepts_snake_and_pascal_case() {
+        use crate::memory::MemoryKindFilter;
+        let p = super::McpServer::parse_kind_str;
+        assert_eq!(p("debug_context"), Some(MemoryKindFilter::DebugContext));
+        assert_eq!(p("DebugContext"), Some(MemoryKindFilter::DebugContext));
+        assert_eq!(
+            p("architectural_decision"),
+            Some(MemoryKindFilter::ArchitecturalDecision)
+        );
+        assert_eq!(p("known_issue"), Some(MemoryKindFilter::KnownIssue));
+        assert_eq!(p("Convention"), Some(MemoryKindFilter::Convention));
+        assert_eq!(p("project_context"), Some(MemoryKindFilter::ProjectContext));
+        assert_eq!(p("nonexistent"), None);
+    }
+
+    #[test]
+    fn parse_kinds_filter_drops_unknowns_and_defaults_empty() {
+        use crate::memory::MemoryKindFilter;
+        let args = serde_json::json!({
+            "kinds": ["debug_context", "bogus", "convention", 42]
+        });
+        assert_eq!(
+            super::McpServer::parse_kinds_filter(&args),
+            vec![MemoryKindFilter::DebugContext, MemoryKindFilter::Convention]
+        );
+        // Missing key and non-array both yield an empty vec.
+        assert!(super::McpServer::parse_kinds_filter(&serde_json::json!({})).is_empty());
+        assert!(super::McpServer::parse_kinds_filter(
+            &serde_json::json!({"kinds": "debug_context"})
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn parse_tags_filter_keeps_strings_only() {
+        let args = serde_json::json!({"tags": ["a", "b", 3, true]});
+        assert_eq!(
+            super::McpServer::parse_tags_filter(&args),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(super::McpServer::parse_tags_filter(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn kind_matches_filter_pairs_variants() {
+        use crate::memory::{IssueSeverity, MemoryKind, MemoryKindFilter};
+        let debug = MemoryKind::DebugContext {
+            problem_description: "p".into(),
+            root_cause: None,
+            solution: "s".into(),
+            symptoms: vec![],
+            related_errors: vec![],
+        };
+        let issue = MemoryKind::KnownIssue {
+            description: "d".into(),
+            severity: IssueSeverity::High,
+            workaround: None,
+            tracking_id: None,
+        };
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::DebugContext,
+            &debug
+        ));
+        assert!(!super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::DebugContext,
+            &issue
+        ));
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::KnownIssue,
+            &issue
+        ));
+        // Convention, ArchitecturalDecision, and ProjectContext round out the
+        // variant pairs the earlier assertions skipped.
+        let conv = MemoryKind::Convention {
+            name: "n".into(),
+            description: "d".into(),
+            pattern: None,
+            anti_pattern: None,
+        };
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::Convention,
+            &conv
+        ));
+        assert!(!super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::ProjectContext,
+            &conv
+        ));
+        let arch = MemoryKind::ArchitecturalDecision {
+            decision: "de".into(),
+            rationale: "r".into(),
+            alternatives_considered: None,
+            stakeholders: vec![],
+        };
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::ArchitecturalDecision,
+            &arch
+        ));
+        let proj = MemoryKind::ProjectContext {
+            topic: "t".into(),
+            description: "d".into(),
+            tags: vec![],
+        };
+        assert!(super::McpServer::kind_matches_filter(
+            &MemoryKindFilter::ProjectContext,
+            &proj
+        ));
+    }
+
+    #[test]
+    fn build_memory_node_debug_context_reads_problem_and_solution() {
+        use crate::memory::MemoryKind;
+        let args = serde_json::json!({
+            "problem": "segfault on load",
+            "solution": "null-check the handle",
+        });
+        let node = super::McpServer::build_memory_node(
+            "debug_context",
+            "Crash on load",
+            "long form content",
+            &["crash".to_string(), "loader".to_string()],
+            &args,
+        )
+        .expect("debug_context should build");
+        assert_eq!(node.title, "Crash on load");
+        assert_eq!(node.content, "long form content");
+        assert_eq!(node.tags, vec!["crash".to_string(), "loader".to_string()]);
+        match node.kind {
+            MemoryKind::DebugContext {
+                problem_description,
+                solution,
+                ..
+            } => {
+                assert_eq!(problem_description, "segfault on load");
+                assert_eq!(solution, "null-check the handle");
+            }
+            other => panic!("expected DebugContext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_memory_node_debug_context_defaults_when_fields_missing() {
+        use crate::memory::MemoryKind;
+        // No problem/solution keys → the documented "Unknown ..." fallbacks.
+        let node = super::McpServer::build_memory_node(
+            "debug_context",
+            "t",
+            "c",
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect("build");
+        match node.kind {
+            MemoryKind::DebugContext {
+                problem_description,
+                solution,
+                ..
+            } => {
+                assert_eq!(problem_description, "Unknown problem");
+                assert_eq!(solution, "Unknown solution");
+            }
+            other => panic!("expected DebugContext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_memory_node_architectural_decision_falls_back_to_title_and_content() {
+        use crate::memory::MemoryKind;
+        // decision/rationale absent → fall back to title/content, not empty.
+        let node = super::McpServer::build_memory_node(
+            "architectural_decision",
+            "Use RocksDB",
+            "It is embedded and fast",
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect("build");
+        match node.kind {
+            MemoryKind::ArchitecturalDecision {
+                decision,
+                rationale,
+                ..
+            } => {
+                assert_eq!(decision, "Use RocksDB");
+                assert_eq!(rationale, "It is embedded and fast");
+            }
+            other => panic!("expected ArchitecturalDecision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_memory_node_known_issue_maps_severity_strings() {
+        use crate::memory::{IssueSeverity, MemoryKind};
+        let sev = |s: &str| {
+            let node = super::McpServer::build_memory_node(
+                "known_issue",
+                "t",
+                "c",
+                &[],
+                &serde_json::json!({ "description": "d", "severity": s }),
+            )
+            .expect("build");
+            match node.kind {
+                MemoryKind::KnownIssue { severity, .. } => severity,
+                other => panic!("expected KnownIssue, got {other:?}"),
+            }
+        };
+        assert_eq!(sev("critical"), IssueSeverity::Critical);
+        assert_eq!(sev("high"), IssueSeverity::High);
+        assert_eq!(sev("low"), IssueSeverity::Low);
+        assert_eq!(sev("medium"), IssueSeverity::Medium);
+        // Unrecognized and absent severity both default to Medium.
+        assert_eq!(sev("bogus"), IssueSeverity::Medium);
+    }
+
+    #[test]
+    fn build_memory_node_convention_and_project_context() {
+        use crate::memory::MemoryKind;
+        let conv = super::McpServer::build_memory_node(
+            "convention",
+            "TitleName",
+            "TitleDesc",
+            &[],
+            &serde_json::json!({ "name": "snake_case", "description": "use snake_case" }),
+        )
+        .expect("build");
+        match conv.kind {
+            MemoryKind::Convention {
+                name, description, ..
+            } => {
+                assert_eq!(name, "snake_case");
+                assert_eq!(description, "use snake_case");
+            }
+            other => panic!("expected Convention, got {other:?}"),
+        }
+        // project_context with missing topic/description falls back to title/content.
+        let proj = super::McpServer::build_memory_node(
+            "project_context",
+            "Overview",
+            "System overview",
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect("build");
+        match proj.kind {
+            MemoryKind::ProjectContext {
+                topic, description, ..
+            } => {
+                assert_eq!(topic, "Overview");
+                assert_eq!(description, "System overview");
+            }
+            other => panic!("expected ProjectContext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_memory_node_unknown_kind_errors() {
+        let err = super::McpServer::build_memory_node(
+            "not_a_kind",
+            "t",
+            "c",
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect_err("unknown kind must error");
+        assert!(err.contains("Unknown memory kind"), "got: {err}");
     }
 }

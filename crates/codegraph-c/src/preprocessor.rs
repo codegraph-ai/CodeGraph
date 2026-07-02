@@ -847,4 +847,255 @@ mod tests {
         assert!(processed.contains("#include <linux/module.h>"));
         assert!(processed.contains("#include \"myheader.h\""));
     }
+
+    #[test]
+    fn test_default_matches_new() {
+        // Default is derived from new(), so it must carry the same seeded macros.
+        let pp = CPreprocessor::default();
+        assert!(pp.is_type_macro("u32"));
+        assert!(pp.is_attribute_macro("__init"));
+        assert!(pp.is_module_macro("MODULE_LICENSE"));
+    }
+
+    #[test]
+    fn test_get_type_expansion() {
+        let pp = CPreprocessor::new();
+        assert_eq!(pp.get_type_expansion("u8"), Some("unsigned char"));
+        assert_eq!(pp.get_type_expansion("size_t"), Some("unsigned long"));
+        assert_eq!(pp.get_type_expansion("not_a_type"), None);
+    }
+
+    #[test]
+    fn test_function_wrapper_recognition() {
+        let pp = CPreprocessor::new();
+        assert!(pp.is_function_wrapper("SYSCALL_DEFINE0"));
+        assert!(pp.is_function_wrapper("module_param"));
+        assert!(!pp.is_function_wrapper("regular_call"));
+    }
+
+    #[test]
+    fn test_module_macro_recognition() {
+        let pp = CPreprocessor::new();
+        assert!(pp.is_module_macro("MODULE_LICENSE"));
+        assert!(pp.is_module_macro("module_init"));
+        assert!(!pp.is_module_macro("some_function"));
+    }
+
+    #[test]
+    fn test_classify_function_wrapper_and_memory_ops() {
+        let pp = CPreprocessor::new();
+        assert_eq!(
+            pp.classify_macro("SYSCALL_DEFINE0"),
+            MacroKind::FunctionWrapper
+        );
+        // Any name containing "alloc"/"free" is a memory operation.
+        assert_eq!(pp.classify_macro("kmalloc"), MacroKind::MemoryOperation);
+        assert_eq!(pp.classify_macro("kfree"), MacroKind::MemoryOperation);
+    }
+
+    #[test]
+    fn test_classify_locking_and_conditional_and_generic() {
+        let pp = CPreprocessor::new();
+        // DECLARE_ prefix (not a registered wrapper) falls to locking.
+        assert_eq!(
+            pp.classify_macro("DECLARE_WORK"),
+            MacroKind::LockingPrimitive
+        );
+        // "_LOCK"/"_MUTEX" substring also classifies as locking.
+        assert_eq!(pp.classify_macro("FOO_LOCK"), MacroKind::LockingPrimitive);
+        assert_eq!(
+            pp.classify_macro("IS_ENABLED_X"),
+            MacroKind::ConditionalMarker
+        );
+        assert_eq!(pp.classify_macro("random_thing"), MacroKind::Generic);
+    }
+
+    #[test]
+    fn test_add_type_registers_new_type_macro() {
+        let mut pp = CPreprocessor::new();
+        assert!(!pp.is_type_macro("my_handle_t"));
+        pp.add_type("my_handle_t", "void*");
+        assert!(pp.is_type_macro("my_handle_t"));
+        assert_eq!(pp.get_type_expansion("my_handle_t"), Some("void*"));
+        assert_eq!(pp.classify_macro("my_handle_t"), MacroKind::TypeAlias);
+    }
+
+    #[test]
+    fn test_extract_header_types_primitive_and_aggregate() {
+        let src = "\
+typedef unsigned int uint32_t;
+typedef struct foo my_foo;
+typedef enum e my_e;
+typedef union u my_u;";
+        let types = CPreprocessor::extract_header_types(src);
+        assert!(types.contains(&("uint32_t".to_string(), "unsigned int".to_string())));
+        assert!(types.contains(&("my_foo".to_string(), "struct foo".to_string())));
+        assert!(types.contains(&("my_e".to_string(), "enum e".to_string())));
+        assert!(types.contains(&("my_u".to_string(), "union u".to_string())));
+    }
+
+    #[test]
+    fn test_extract_header_types_skips_function_pointers_and_braces() {
+        let src = "\
+typedef int (*handler_fn)(void);
+typedef struct { int x; } inline_struct;";
+        let types = CPreprocessor::extract_header_types(src);
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn test_extract_header_types_skips_unsafe_expansion() {
+        // Expansion is neither a primitive nor struct/enum/union -> dropped.
+        let src = "typedef mytype_t othertype;";
+        let types = CPreprocessor::extract_header_types(src);
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn test_extract_header_types_pointer_name_trimmed() {
+        // The `*` binds to the name; the expansion keeps the trailing `*`.
+        let src = "typedef char *pchar;";
+        let types = CPreprocessor::extract_header_types(src);
+        assert_eq!(types, vec![("pchar".to_string(), "char *".to_string())]);
+    }
+
+    #[test]
+    fn test_preprocess_replaces_offsetof_with_zero() {
+        let pp = CPreprocessor::new();
+        let processed = pp.preprocess("int x = offsetof(struct s, field);");
+        assert!(!processed.contains("offsetof"));
+        assert!(processed.contains("int x = 0;"));
+    }
+
+    #[test]
+    fn test_preprocess_rewrites_container_of() {
+        let pp = CPreprocessor::new();
+        let processed = pp.preprocess("p = container_of(ptr, struct s, member);");
+        assert!(!processed.contains("container_of"));
+        assert!(processed.contains("((void*)ptr)"));
+    }
+
+    #[test]
+    fn test_preprocess_strips_non_include_directives() {
+        let pp = CPreprocessor::new();
+        let processed = pp.preprocess("#ifdef CONFIG_X\nint a;\n#endif");
+        assert!(!processed.contains("#ifdef"));
+        assert!(!processed.contains("#endif"));
+        assert!(processed.contains("/* preprocessor directive stripped */"));
+        assert!(processed.contains("int a;"));
+    }
+
+    #[test]
+    fn test_preprocess_preserves_line_comments() {
+        let pp = CPreprocessor::new();
+        let processed = pp.preprocess("// a comment with u32 inside");
+        assert!(processed.contains("// a comment with u32 inside"));
+    }
+
+    #[test]
+    fn test_preprocess_injects_type_preamble() {
+        let pp = CPreprocessor::new();
+        // A used type macro whose expansion is a real type gets a typedef preamble.
+        let processed = pp.preprocess("u32 counter;");
+        assert!(processed.contains("typedef unsigned int u32;"));
+        // Pointer expansions strip the trailing `*` into the typedef syntax.
+        let ptr = pp.preprocess("vmk_AddrCookie cookie;");
+        assert!(ptr.contains("typedef void *vmk_AddrCookie;"));
+    }
+
+    #[test]
+    fn test_preprocess_skips_non_type_expansions_in_preamble() {
+        let pp = CPreprocessor::new();
+        // NULL expands to ((void*)0) — a constant, not a type — so no typedef is emitted.
+        let processed = pp.preprocess("void *p = NULL;");
+        assert!(!processed.contains("typedef") || !processed.contains("NULL;"));
+        assert!(!processed.contains("typedef ((void*)0)"));
+    }
+
+    #[test]
+    fn test_is_type_expansion_accepts_type_names_rejects_constants_and_arrays() {
+        // Plain type names start with a letter or underscore -> accepted.
+        assert!(CPreprocessor::is_type_expansion("unsigned int"));
+        assert!(CPreprocessor::is_type_expansion("_Bool"));
+        assert!(CPreprocessor::is_type_expansion("void"));
+        // Parenthesised expressions (e.g. NULL's ((void*)0)) are rejected.
+        assert!(!CPreprocessor::is_type_expansion("((void*)0)"));
+        assert!(!CPreprocessor::is_type_expansion("(-1)"));
+        // Array types carry a `[` and are rejected.
+        assert!(!CPreprocessor::is_type_expansion("unsigned char[6]"));
+        // Pure numeric constants don't start with a letter/underscore -> rejected.
+        assert!(!CPreprocessor::is_type_expansion("1"));
+        assert!(!CPreprocessor::is_type_expansion("0"));
+        // A leading `*` (or any non-alphabetic, non-underscore char) is rejected.
+        assert!(!CPreprocessor::is_type_expansion("*ptr"));
+        // Empty expansion has no first char -> rejected.
+        assert!(!CPreprocessor::is_type_expansion(""));
+    }
+
+    #[test]
+    fn test_analyze_macros_dedup_and_hint() {
+        let pp = CPreprocessor::new();
+        let macros = pp.analyze_macros("u32 a; u32 b; u32 c;");
+        let u32_entries: Vec<_> = macros.iter().filter(|m| m.name == "u32").collect();
+        assert_eq!(u32_entries.len(), 1, "duplicate macros should be collapsed");
+        assert_eq!(u32_entries[0].kind, MacroKind::TypeAlias);
+        assert_eq!(
+            u32_entries[0].expansion_hint.as_deref(),
+            Some("unsigned int")
+        );
+    }
+
+    #[test]
+    fn test_analyze_macros_sorted_and_excludes_generic() {
+        let pp = CPreprocessor::new();
+        let macros = pp.analyze_macros("size_t n; __init foo; plain_ident bar;");
+        let names: Vec<_> = macros.iter().map(|m| m.name.clone()).collect();
+        // Generic (unclassified) identifiers are not reported.
+        assert!(!names.contains(&"plain_ident".to_string()));
+        assert!(!names.contains(&"bar".to_string()));
+        // Output is sorted ascending by name.
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn test_process_line_returns_blank_line_verbatim() {
+        let pp = CPreprocessor::new();
+        // The empty/whitespace-only guard returns the original line untouched,
+        // preserving its leading whitespace (no trimming applied to the output).
+        assert_eq!(pp.process_line("    "), "    ");
+        assert_eq!(pp.process_line(""), "");
+    }
+
+    #[test]
+    fn test_process_line_strips_function_like_attribute_macro() {
+        let pp = CPreprocessor::new();
+        // __section is a registered attribute macro; the function-like `__section(...)`
+        // form is removed via paren matching (the pattern-ends-with-'(' arm), unlike
+        // the plain `__init` form which is a simple substring replace.
+        let out = pp.process_line("int foo __section(\".text\") bar;");
+        assert!(!out.contains("__section"));
+        assert!(out.contains("int foo"));
+        assert!(out.contains("bar;"));
+    }
+
+    #[test]
+    fn test_process_line_leaves_unbalanced_offsetof_unchanged() {
+        let pp = CPreprocessor::new();
+        // An offsetof with no matching close paren hits the end_paren==0 break arm,
+        // leaving the line unchanged rather than rewriting to 0.
+        let line = "int x = offsetof(struct s";
+        assert_eq!(pp.process_line(line), line);
+    }
+
+    #[test]
+    fn test_process_line_container_of_without_comma_defaults_ptr() {
+        let pp = CPreprocessor::new();
+        // With no first comma, container_of's ptr argument defaults to the literal
+        // "ptr" rather than the (absent) first argument text.
+        let out = pp.process_line("x = container_of(single);");
+        assert!(!out.contains("container_of"));
+        assert!(out.contains("((void*)ptr)"));
+    }
 }

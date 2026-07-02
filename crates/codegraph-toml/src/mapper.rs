@@ -135,46 +135,219 @@ pub fn ir_to_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{ClassEntity, FunctionEntity};
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{ClassEntity, FunctionEntity, ModuleEntity};
     use std::path::PathBuf;
 
-    #[test]
-    fn test_ir_to_graph_empty() {
-        let ir = CodeIR::new(PathBuf::from("test.toml"));
+    fn map(ir: &CodeIR, path: &str) -> (CodeGraph, FileInfo) {
         let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, &PathBuf::from("test.toml"));
-        assert!(result.is_ok());
-        let info = result.unwrap();
+        let info = ir_to_graph(ir, &mut graph, &PathBuf::from(path)).unwrap();
+        (graph, info)
+    }
+
+    /// Return the single edge between two nodes (fails if not exactly one).
+    fn edge_between(graph: &CodeGraph, src: NodeId, dst: NodeId) -> &codegraph::Edge {
+        let ids = graph.get_edges_between(src, dst).unwrap();
+        assert_eq!(ids.len(), 1, "expected exactly one edge {src}->{dst}");
+        graph.get_edge(ids[0]).unwrap()
+    }
+
+    #[test]
+    fn test_ir_to_graph_empty_uses_path_stem() {
+        let ir = CodeIR::new(PathBuf::from("test.toml"));
+        let (graph, info) = map(&ir, "test.toml");
         assert_eq!(info.classes.len(), 0);
         assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.traits.len(), 0);
+        assert_eq!(info.imports.len(), 0);
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.node_type, NodeType::CodeFile);
+        assert_eq!(file.properties.get_string("name"), Some("test"));
+        assert_eq!(file.properties.get_string("path"), Some("test.toml"));
+        assert_eq!(file.properties.get_string("language"), Some("toml"));
     }
 
     #[test]
-    fn test_ir_to_graph_with_section() {
+    fn test_empty_path_stem_falls_back_to_unknown() {
+        let ir = CodeIR::new(PathBuf::from(".."));
+        let (graph, info) = map(&ir, "..");
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("unknown"));
+    }
+
+    #[test]
+    fn test_module_drives_file_metadata() {
         let mut ir = CodeIR::new(PathBuf::from("Cargo.toml"));
-        ir.add_class(ClassEntity::new("package", 1, 5));
+        ir.set_module(ModuleEntity::new("Cargo", "/proj/Cargo.toml", "toml").with_line_count(42));
+        let (graph, info) = map(&ir, "Cargo.toml");
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, &PathBuf::from("Cargo.toml"));
-        assert!(result.is_ok());
-        let info = result.unwrap();
-        assert_eq!(info.classes.len(), 1);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("Cargo"));
+        assert_eq!(file.properties.get_string("path"), Some("/proj/Cargo.toml"));
+        assert_eq!(file.properties.get_string("language"), Some("toml"));
+        assert!(matches!(
+            file.properties.get("line_count"),
+            Some(PropertyValue::Int(42))
+        ));
+        assert_eq!(info.line_count, 42);
     }
 
     #[test]
-    fn test_ir_to_graph_with_keypair() {
+    fn test_class_node_props_and_contains_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("Cargo.toml"));
+        ir.add_class(ClassEntity::new("package", 1, 5).with_visibility("public"));
+        let (graph, info) = map(&ir, "Cargo.toml");
+
+        assert_eq!(info.classes.len(), 1);
+        let class = graph.get_node(info.classes[0]).unwrap();
+        assert_eq!(class.node_type, NodeType::Class);
+        assert_eq!(class.properties.get_string("name"), Some("package"));
+        assert_eq!(class.properties.get_string("path"), Some("Cargo.toml"));
+        assert_eq!(class.properties.get_string("visibility"), Some("public"));
+        assert_eq!(class.properties.get_string("language"), Some("toml"));
+        assert!(matches!(
+            class.properties.get("line_start"),
+            Some(PropertyValue::Int(1))
+        ));
+        assert!(matches!(
+            class.properties.get("line_end"),
+            Some(PropertyValue::Int(5))
+        ));
+
+        let edge = edge_between(&graph, info.file_id, info.classes[0]);
+        assert_eq!(edge.edge_type, EdgeType::Contains);
+    }
+
+    #[test]
+    fn test_keypair_function_props_and_flags() {
+        let mut ir = CodeIR::new(PathBuf::from("config.toml"));
+        let mut f = FunctionEntity::new("name", 2, 2);
+        f.signature = r#"name = "codegraph""#.to_string();
+        f.visibility = "public".to_string();
+        ir.add_function(f);
+        let (graph, info) = map(&ir, "config.toml");
+
+        assert_eq!(info.functions.len(), 1);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.node_type, NodeType::Function);
+        assert_eq!(func.properties.get_string("name"), Some("name"));
+        assert_eq!(
+            func.properties.get_string("signature"),
+            Some(r#"name = "codegraph""#)
+        );
+        assert_eq!(func.properties.get_string("visibility"), Some("public"));
+        assert_eq!(func.properties.get_string("language"), Some("toml"));
+        assert_eq!(func.properties.get_bool("is_async"), Some(false));
+        assert_eq!(func.properties.get_bool("is_static"), Some(false));
+        assert_eq!(func.properties.get_bool("is_abstract"), Some(false));
+        assert_eq!(func.properties.get_bool("is_test"), Some(false));
+        assert!(matches!(
+            func.properties.get("line_start"),
+            Some(PropertyValue::Int(2))
+        ));
+        // No parent_class -> file Contains edge and no parent_class prop.
+        assert!(func.properties.get("parent_class").is_none());
+        let edge = edge_between(&graph, info.file_id, info.functions[0]);
+        assert_eq!(edge.edge_type, EdgeType::Contains);
+    }
+
+    #[test]
+    fn test_function_contained_by_known_section() {
         let mut ir = CodeIR::new(PathBuf::from("config.toml"));
         ir.add_class(ClassEntity::new("package", 1, 3));
         let mut f = FunctionEntity::new("package.name", 2, 2);
         f.parent_class = Some("package".to_string());
-        f.signature = r#"name = "codegraph""#.to_string();
         ir.add_function(f);
+        let (graph, info) = map(&ir, "config.toml");
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let result = ir_to_graph(&ir, &mut graph, &PathBuf::from("config.toml"));
-        assert!(result.is_ok());
-        let info = result.unwrap();
+        let section_id = info.classes[0];
+        let func_id = info.functions[0];
+        let func = graph.get_node(func_id).unwrap();
+        assert_eq!(func.properties.get_string("parent_class"), Some("package"));
+
+        // Contained by its section, not the file.
+        let edge = edge_between(&graph, section_id, func_id);
+        assert_eq!(edge.edge_type, EdgeType::Contains);
+        assert!(graph
+            .get_edges_between(info.file_id, func_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_function_unknown_parent_falls_back_to_file() {
+        let mut ir = CodeIR::new(PathBuf::from("config.toml"));
+        let mut f = FunctionEntity::new("dangling.key", 2, 2);
+        f.parent_class = Some("no_such_section".to_string());
+        ir.add_function(f);
+        let (graph, info) = map(&ir, "config.toml");
+
+        let func_id = info.functions[0];
+        // parent_class prop is still recorded even though the section is absent.
+        let func = graph.get_node(func_id).unwrap();
+        assert_eq!(
+            func.properties.get_string("parent_class"),
+            Some("no_such_section")
+        );
+        // Fallback: contained directly by the file.
+        let edge = edge_between(&graph, info.file_id, func_id);
+        assert_eq!(edge.edge_type, EdgeType::Contains);
+    }
+
+    #[test]
+    fn test_multiple_functions_each_contained() {
+        let mut ir = CodeIR::new(PathBuf::from("config.toml"));
+        ir.add_function(FunctionEntity::new("a", 1, 1));
+        ir.add_function(FunctionEntity::new("b", 2, 2));
+        ir.add_function(FunctionEntity::new("c", 3, 3));
+        let (graph, info) = map(&ir, "config.toml");
+
+        assert_eq!(info.functions.len(), 3);
+        // file node + 3 function nodes.
+        assert_eq!(graph.node_count(), 4);
+        // one Contains edge per function.
+        assert_eq!(graph.edge_count(), 3);
+        for &func_id in &info.functions {
+            let edge = edge_between(&graph, info.file_id, func_id);
+            assert_eq!(edge.edge_type, EdgeType::Contains);
+        }
+    }
+
+    #[test]
+    fn test_section_with_keypair_full_shape() {
+        let mut ir = CodeIR::new(PathBuf::from("config.toml"));
+        ir.add_class(ClassEntity::new("package", 1, 3));
+        let mut f = FunctionEntity::new("package.name", 2, 2);
+        f.parent_class = Some("package".to_string());
+        ir.add_function(f);
+        let (graph, info) = map(&ir, "config.toml");
+
         assert_eq!(info.classes.len(), 1);
         assert_eq!(info.functions.len(), 1);
+        // file + section + keypair.
+        assert_eq!(graph.node_count(), 3);
+        // file->section Contains + section->keypair Contains.
+        assert_eq!(graph.edge_count(), 2);
+    }
+
+    #[test]
+    fn test_traits_and_imports_always_empty() {
+        let mut ir = CodeIR::new(PathBuf::from("config.toml"));
+        ir.add_class(ClassEntity::new("package", 1, 3));
+        ir.add_function(FunctionEntity::new("edition", 2, 2));
+        let (_graph, info) = map(&ir, "config.toml");
+
+        assert!(info.traits.is_empty());
+        assert!(info.imports.is_empty());
+    }
+
+    #[test]
+    fn test_no_module_line_count_defaults_zero() {
+        let ir = CodeIR::new(PathBuf::from("config.toml"));
+        let (_graph, info) = map(&ir, "config.toml");
+        assert_eq!(info.line_count, 0);
     }
 }

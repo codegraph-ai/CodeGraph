@@ -397,6 +397,20 @@ impl CParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    const SIMPLE_C: &str = "int add(int a, int b) { return a + b; }\n";
+
+    fn graph() -> CodeGraph {
+        CodeGraph::in_memory().expect("in-memory graph")
+    }
+
+    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).expect("create temp file");
+        f.write_all(content.as_bytes()).expect("write temp file");
+        path
+    }
 
     #[test]
     fn test_language() {
@@ -417,5 +431,202 @@ mod tests {
         assert!(parser.can_parse(Path::new("header.h")));
         assert!(!parser.can_parse(Path::new("main.rs")));
         assert!(!parser.can_parse(Path::new("main.cpp")));
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let parser = CParser::default();
+        assert_eq!(parser.language(), "c");
+        // Fresh parser starts with zeroed metrics.
+        assert_eq!(parser.metrics(), ParserMetrics::default());
+    }
+
+    #[test]
+    fn with_config_is_reflected_by_accessor() {
+        let cfg = ParserConfig::default()
+            .with_parallel(true)
+            .with_max_file_size(123);
+        let parser = CParser::with_config(cfg);
+        assert!(parser.config().parallel);
+        assert_eq!(parser.config().max_file_size, 123);
+    }
+
+    #[test]
+    fn config_accessor_defaults() {
+        let parser = CParser::new();
+        assert!(!parser.config().parallel);
+        assert_eq!(parser.config().max_file_size, 10 * 1024 * 1024);
+    }
+
+    // ---- resolve_local_includes ----
+
+    #[test]
+    fn resolve_includes_empty_when_no_includes() {
+        let types = CParser::resolve_local_includes(SIMPLE_C, Path::new("/tmp/x/main.c"));
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn resolve_includes_ignores_angle_bracket_headers() {
+        let src = "#include <stdio.h>\nint main() { return 0; }\n";
+        let types = CParser::resolve_local_includes(src, Path::new("/tmp/x/main.c"));
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn resolve_includes_missing_header_yields_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = write_file(dir.path(), "main.c", "#include \"nope.h\"\n");
+        let types = CParser::resolve_local_includes("#include \"nope.h\"\n", &main);
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn resolve_includes_returns_empty_when_no_parent() {
+        // A path with no parent short-circuits before any header lookup.
+        let types = CParser::resolve_local_includes("#include \"foo.h\"\n", Path::new("/"));
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn resolve_includes_extracts_types_from_local_header() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "types.h",
+            "typedef struct point_impl point_t;\n",
+        );
+        let src = "#include \"types.h\"\nint main() { return 0; }\n";
+        let main = write_file(dir.path(), "main.c", src);
+        let types = CParser::resolve_local_includes(src, &main);
+        assert!(types.iter().any(|(name, _)| name == "point_t"));
+    }
+
+    #[test]
+    fn resolve_includes_dedups_repeated_header() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "types.h",
+            "typedef struct point_impl point_t;\n",
+        );
+        let src = "#include \"types.h\"\n#include \"types.h\"\nint main() { return 0; }\n";
+        let main = write_file(dir.path(), "main.c", src);
+        let types = CParser::resolve_local_includes(src, &main);
+        // The header is read once despite two include directives.
+        assert_eq!(
+            types.iter().filter(|(name, _)| name == "point_t").count(),
+            1
+        );
+    }
+
+    // ---- parse_source / parse_source_with_headers ----
+
+    #[test]
+    fn parse_source_extracts_function() {
+        let parser = CParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SIMPLE_C, Path::new("/tmp/add.c"), &mut g)
+            .expect("parse simple C");
+        assert!(!info.functions.is_empty());
+        assert_eq!(info.line_count, SIMPLE_C.lines().count());
+        assert_eq!(info.byte_count, SIMPLE_C.len());
+    }
+
+    #[test]
+    fn parse_source_with_headers_extracts_function() {
+        let parser = CParser::new();
+        let mut g = graph();
+        let header_types = vec![("point_t".to_string(), "struct point_impl".to_string())];
+        let info = parser
+            .parse_source_with_headers(SIMPLE_C, Path::new("/tmp/add.c"), &mut g, header_types)
+            .expect("parse with headers");
+        assert!(!info.functions.is_empty());
+        assert_eq!(info.byte_count, SIMPLE_C.len());
+    }
+
+    // ---- parse_file end-to-end + metrics ----
+
+    #[test]
+    fn parse_file_reads_and_updates_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "add.c", SIMPLE_C);
+        let parser = CParser::new();
+        let mut g = graph();
+        let info = parser.parse_file(&path, &mut g).expect("parse file");
+        assert!(!info.functions.is_empty());
+
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_succeeded, 1);
+        assert_eq!(m.files_failed, 0);
+    }
+
+    #[test]
+    fn parse_file_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "add.c", SIMPLE_C);
+        let parser = CParser::with_config(ParserConfig::default().with_max_file_size(4));
+        let mut g = graph();
+        let err = parser.parse_file(&path, &mut g).unwrap_err();
+        assert!(matches!(err, ParserError::FileTooLarge(_, _)));
+        // The size check returns before update_metrics runs, so a too-large
+        // file is never counted as attempted.
+        assert_eq!(parser.metrics(), ParserMetrics::default());
+    }
+
+    #[test]
+    fn parse_file_missing_path_is_io_error() {
+        let parser = CParser::new();
+        let mut g = graph();
+        let err = parser
+            .parse_file(Path::new("/nonexistent/definitely/missing.c"), &mut g)
+            .unwrap_err();
+        assert!(matches!(err, ParserError::IoError(_, _)));
+    }
+
+    #[test]
+    fn reset_metrics_zeroes_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "add.c", SIMPLE_C);
+        let mut parser = CParser::new();
+        let mut g = graph();
+        parser.parse_file(&path, &mut g).expect("parse file");
+        assert_eq!(parser.metrics().files_attempted, 1);
+        parser.reset_metrics();
+        assert_eq!(parser.metrics(), ParserMetrics::default());
+    }
+
+    // ---- parse_files sequential + parallel ----
+
+    #[test]
+    fn parse_files_sequential_reports_success_and_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = write_file(dir.path(), "add.c", SIMPLE_C);
+        let missing = dir.path().join("gone.c");
+        let parser = CParser::new();
+        let mut g = graph();
+        let project = parser
+            .parse_files(&[good, missing], &mut g)
+            .expect("parse_files");
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.failed_files.len(), 1);
+        assert!(project.total_functions >= 1);
+    }
+
+    #[test]
+    fn parse_files_parallel_matches_sequential_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = write_file(dir.path(), "add.c", SIMPLE_C);
+        let missing = dir.path().join("gone.c");
+        let parser = CParser::with_config(ParserConfig::default().with_parallel(true));
+        let mut g = graph();
+        let project = parser
+            .parse_files(&[good, missing], &mut g)
+            .expect("parse_files parallel");
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.failed_files.len(), 1);
+        assert!(project.total_functions >= 1);
     }
 }

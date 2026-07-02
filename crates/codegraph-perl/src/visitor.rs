@@ -49,10 +49,15 @@ impl<'a> PerlVisitor<'a> {
             "use_no_statement" => {
                 self.visit_use_statement(node);
             }
-            "require_expression" => {
+            "use_parent_statement" | "use_base_statement" => {
+                self.visit_use_parent_statement(node);
+            }
+            "require_expression" | "require_statement" => {
                 self.visit_require_expression(node);
             }
-            "call_expression_with_spaced_args" | "call_expression_with_bareword" | "method_call_expression" => {
+            "call_expression_with_spaced_args"
+            | "call_expression_with_bareword"
+            | "method_call_expression" => {
                 self.visit_call_expression(node);
             }
             _ => {}
@@ -192,12 +197,14 @@ impl<'a> PerlVisitor<'a> {
         String::new()
     }
 
+    #[allow(clippy::manual_find)] // Iterator::find can't return a cursor-borrowing Node
     fn find_block<'b>(&self, node: Node<'b>) -> Option<Node<'b>> {
         // function_definition has a "body" field
         if let Some(body) = node.child_by_field_name("body") {
             return Some(body);
         }
-        // Fallback: look for block child
+        // Fallback: look for block child. Cannot use Iterator::find here because
+        // the returned Node borrows the TreeCursor, which must outlive the search.
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "block" {
@@ -242,7 +249,10 @@ impl<'a> PerlVisitor<'a> {
             && module != "parent"
         {
             self.imports.push(ImportRelation {
-                importer: self.current_package.clone().unwrap_or_else(|| "main".to_string()),
+                importer: self
+                    .current_package
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string()),
                 imported: module,
                 symbols: Vec::new(),
                 is_wildcard: false,
@@ -253,13 +263,39 @@ impl<'a> PerlVisitor<'a> {
             let parent = self.extract_use_list(node);
             for p in parent {
                 self.imports.push(ImportRelation {
-                    importer: self.current_package.clone().unwrap_or_else(|| "main".to_string()),
+                    importer: self
+                        .current_package
+                        .clone()
+                        .unwrap_or_else(|| "main".to_string()),
                     imported: p,
                     symbols: Vec::new(),
                     is_wildcard: false,
                     alias: None,
                 });
             }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.visit_node(child);
+        }
+    }
+
+    fn visit_use_parent_statement(&mut self, node: Node) {
+        // use parent 'SomeClass'; / use base 'SomeClass'; — the grammar emits a
+        // dedicated use_parent_statement/use_base_statement node, so extract the
+        // quoted parent class name(s) as imports.
+        for parent in self.extract_use_list(node) {
+            self.imports.push(ImportRelation {
+                importer: self
+                    .current_package
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string()),
+                imported: parent,
+                symbols: Vec::new(),
+                is_wildcard: false,
+                alias: None,
+            });
         }
 
         let mut cursor = node.walk();
@@ -291,8 +327,9 @@ impl<'a> PerlVisitor<'a> {
         let text = self.node_text(node);
         // Extract quoted strings from the statement
         for part in text.split_whitespace() {
-            let cleaned = part
-                .trim_matches(|c| c == '\'' || c == '"' || c == ',' || c == ';' || c == '(' || c == ')');
+            let cleaned = part.trim_matches(|c| {
+                c == '\'' || c == '"' || c == ',' || c == ';' || c == '(' || c == ')'
+            });
             if !cleaned.is_empty() && cleaned.contains("::") {
                 list.push(cleaned.to_string());
             }
@@ -311,7 +348,10 @@ impl<'a> PerlVisitor<'a> {
             .replace(".pm", "");
         if !module.is_empty() {
             self.imports.push(ImportRelation {
-                importer: self.current_package.clone().unwrap_or_else(|| "main".to_string()),
+                importer: self
+                    .current_package
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string()),
                 imported: module,
                 symbols: Vec::new(),
                 is_wildcard: false,
@@ -359,7 +399,9 @@ impl<'a> PerlVisitor<'a> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
-                "call_expression" | "method_call_expression" => {
+                "call_expression_with_spaced_args"
+                | "call_expression_with_bareword"
+                | "method_call_expression" => {
                     self.visit_call_expression(child);
                     self.visit_body_for_calls(child);
                 }
@@ -372,7 +414,7 @@ impl<'a> PerlVisitor<'a> {
 
     fn extract_doc_comment(&self, node: Node) -> Option<String> {
         if let Some(prev) = node.prev_sibling() {
-            if prev.kind() == "comment" {
+            if prev.kind() == "comment" || prev.kind() == "comments" {
                 let text = self.node_text(prev);
                 if text.starts_with("##") || text.starts_with("#!") || text.starts_with("# ") {
                     return Some(text);
@@ -397,16 +439,17 @@ impl<'a> PerlVisitor<'a> {
             "elsif_clause" | "else_clause" => {
                 builder.add_branch();
             }
-            "while_statement"
-            | "until_statement"
-            | "for_statement"
-            | "foreach_statement" => {
+            "while_statement" | "until_statement" | "for_statement" | "foreach_statement" => {
                 builder.add_loop();
                 builder.enter_scope();
             }
             "binary_expression" => {
                 let text = self.node_text(node);
-                if text.contains(" && ") || text.contains(" || ") || text.contains(" and ") || text.contains(" or ") {
+                if text.contains(" && ")
+                    || text.contains(" || ")
+                    || text.contains(" and ")
+                    || text.contains(" or ")
+                {
                     builder.add_logical_operator();
                 }
             }
@@ -419,12 +462,8 @@ impl<'a> PerlVisitor<'a> {
         }
 
         match node.kind() {
-            "if_statement"
-            | "unless_statement"
-            | "while_statement"
-            | "until_statement"
-            | "for_statement"
-            | "foreach_statement" => {
+            "if_statement" | "unless_statement" | "while_statement" | "until_statement"
+            | "for_statement" | "foreach_statement" => {
                 builder.exit_scope();
             }
             _ => {}
@@ -435,6 +474,7 @@ impl<'a> PerlVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     fn parse_and_visit(source: &[u8]) -> PerlVisitor<'_> {
         let mut parser = tree_sitter::Parser::new();
@@ -466,6 +506,448 @@ mod tests {
     fn test_visitor_use_extraction() {
         let source = b"use Moose;\nuse Data::Dumper;\n";
         let visitor = parse_and_visit(source);
-        assert!(visitor.imports.len() >= 1);
+        assert!(!visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_private_function_visibility() {
+        let source = b"sub _helper {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_public_function_visibility() {
+        let source = b"sub run {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_signature_uses_bare_name_not_package_qualified() {
+        let source = b"package Foo;\nsub greet {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "sub greet");
+    }
+
+    #[test]
+    fn test_package_qualified_full_name_and_parent_class() {
+        let source = b"package MyApp::User;\nsub load {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "MyApp::User::load");
+        assert_eq!(
+            visitor.functions[0].parent_class.as_deref(),
+            Some("MyApp::User")
+        );
+    }
+
+    #[test]
+    fn test_function_without_package_has_no_parent() {
+        let source = b"sub standalone {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].name, "standalone");
+        assert!(visitor.functions[0].parent_class.is_none());
+    }
+
+    #[test]
+    fn test_is_test_prefix_detection() {
+        let source = b"sub test_login {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_non_test_function_not_flagged() {
+        let source = b"sub login {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(!visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_function_flag_defaults() {
+        let source = b"sub plain {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert!(!f.is_async);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.return_type.is_none());
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_body_prefix_present() {
+        let source = b"sub greet {\n    print \"hi\";\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_complexity_baseline() {
+        let source = b"sub straight {\n    my $x = 1;\n    return $x;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_complexity_if_increases() {
+        let source = b"sub branchy {\n    if ($x) {\n        return 1;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_loop_increases() {
+        let source = b"sub looper {\n    while ($x) {\n        $x--;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_doc_comment_extracted() {
+        let source = b"# This greets the user\nsub greet {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_some());
+    }
+
+    #[test]
+    fn test_no_doc_comment() {
+        let source = b"sub greet {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_use_strict_and_warnings_excluded() {
+        let source = b"use strict;\nuse warnings;\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_use_module_import_recorded() {
+        let source = b"use Data::Dumper;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Data::Dumper");
+        assert_eq!(visitor.imports[0].importer, "main");
+    }
+
+    #[test]
+    fn test_use_import_importer_is_current_package() {
+        let source = b"package MyApp;\nuse Data::Dumper;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].importer, "MyApp");
+    }
+
+    #[test]
+    fn test_use_parent_extracts_base_class() {
+        let source = b"use parent 'Base::Class';\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Base::Class");
+    }
+
+    #[test]
+    fn test_require_expression_recorded() {
+        let source = b"require Foo::Bar;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Foo::Bar");
+    }
+
+    #[test]
+    fn test_call_tracking_inside_function() {
+        let source = b"sub run {\n    helper();\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.calls.iter().any(|c| c.callee == "helper"),
+            "expected a call to helper, got {:?}",
+            visitor.calls
+        );
+        assert!(visitor.calls.iter().all(|c| c.caller == "run"));
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = b"sub a {\n    return 1;\n}\nsub b {\n    return 2;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+    }
+
+    #[test]
+    fn test_package_class_metadata() {
+        let source = b"package MyApp::Thing;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        let c = &visitor.classes[0];
+        assert_eq!(c.visibility, "public");
+        assert!(!c.is_abstract);
+        assert!(!c.is_interface);
+        assert!(c.base_classes.is_empty());
+    }
+
+    #[test]
+    fn test_line_numbers_offset_by_leading_blank_lines() {
+        // Two blank lines push the sub to line 3 (1-indexed); the body's closing
+        // brace lands on line 5.
+        let source = b"\n\nsub greet {\n    return 1;\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].line_start, 3);
+        assert_eq!(visitor.functions[0].line_end, 5);
+    }
+
+    #[test]
+    fn test_complexity_unless_increases() {
+        let source =
+            b"sub guard {\n    unless ($x) {\n        return 1;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_logical_operator_increases() {
+        // A `&&` inside a binary_expression body raises cyclomatic complexity.
+        let source = b"sub combine {\n    my $c = $a && $b;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        // A body whose block text exceeds BODY_PREFIX_MAX_CHARS is truncated exactly.
+        let filler = "x".repeat(BODY_PREFIX_MAX_CHARS + 200);
+        let source = format!("sub big {{\n    my $s = \"{}\";\n}}\n", filler);
+        let visitor = parse_and_visit(source.as_bytes());
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(bp.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_two_packages_emit_two_classes() {
+        let source =
+            b"package Foo;\nsub a {\n    return 1;\n}\npackage Bar;\nsub b {\n    return 2;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 2);
+    }
+
+    #[test]
+    fn test_function_attributed_to_enclosing_package() {
+        // The sub after the second package declaration is qualified with that package.
+        let source =
+            b"package Foo;\nsub a {\n    return 1;\n}\npackage Bar;\nsub b {\n    return 2;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].name, "Foo::a");
+        assert_eq!(visitor.functions[1].name, "Bar::b");
+        assert_eq!(visitor.functions[1].parent_class.as_deref(), Some("Bar"));
+    }
+
+    #[test]
+    fn test_require_importer_is_current_package() {
+        // A bareword require inside a package is attributed to that package.
+        let source = b"package MyApp;\nrequire Foo::Bar;\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Foo::Bar");
+        assert_eq!(visitor.imports[0].importer, "MyApp");
+    }
+
+    #[test]
+    fn test_call_site_line_recorded() {
+        let source = b"sub run {\n    helper();\n}\n";
+        let visitor = parse_and_visit(source);
+        let call = visitor.calls.iter().find(|c| c.callee == "helper").unwrap();
+        assert_eq!(call.call_site_line, 2);
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_is_test_capital_test_prefix() {
+        let source = b"sub TestLogin {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].is_test);
+    }
+
+    #[test]
+    fn test_nested_call_attributed_to_function() {
+        // A call inside an if block still belongs to the enclosing sub.
+        let source = b"sub run {\n    if ($x) {\n        helper();\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.iter().any(|c| c.callee == "helper"));
+        assert!(visitor.calls.iter().all(|c| c.caller == "run"));
+    }
+
+    #[test]
+    fn test_foreach_complexity_gap() {
+        // tree-sitter-perl emits `for_statement_2` for the `foreach my $i (@list)`
+        // form, which the complexity visitor does not match (it only handles
+        // for_statement/foreach_statement), so complexity stays at baseline 1.
+        let source =
+            b"sub iter {\n    foreach my $i (@list) {\n        print $i;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_complexity_until_increases() {
+        let source =
+            b"sub wait_loop {\n    until ($done) {\n        $done = check();\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_word_or_operator_increases() {
+        // The word form `or` in a binary_expression raises complexity like `||`.
+        let source = b"sub pick {\n    my $c = $a or $b;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_elsif_adds_branches() {
+        // if / elsif / else should push complexity to at least 3.
+        let source = b"sub grade {\n    if ($x) {\n        return 1;\n    } elsif ($y) {\n        return 2;\n    } else {\n        return 3;\n    }\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_method_invocation_call_gap() {
+        // $obj->greet() parses as a `method_invocation` node, but the visitor only
+        // records call_expression_with_spaced_args/bareword/method_call_expression,
+        // so method calls are silently dropped - pinned as a regression test.
+        let source = b"sub run {\n    $obj->greet();\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.calls.is_empty(),
+            "method_invocation should not be recorded, got {:?}",
+            visitor.calls
+        );
+    }
+
+    #[test]
+    fn test_require_quoted_file_path_gap() {
+        // A quoted require ('Foo/Bar.pm') fails to parse - tree-sitter-perl wraps it
+        // in an ERROR node with no require_expression/require_statement, so the
+        // slash->:: / .pm-stripping normalization path never runs and no import is
+        // recorded. Only bareword `require Foo::Bar` is handled.
+        let source = b"require 'Foo/Bar.pm';\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_use_feature_excluded() {
+        let source = b"use feature 'say';\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_use_constant_excluded() {
+        let source = b"use constant PI => 3.14;\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_use_base_records_import() {
+        let source = b"use base 'Some::Base';\n";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "Some::Base");
+    }
+
+    #[test]
+    fn test_use_parent_without_colons_dropped() {
+        // extract_use_list only keeps names containing "::", so a single-segment
+        // parent name yields no import - a latent gap pinned as a regression test.
+        let source = b"use parent 'Base';\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.is_empty());
+    }
+
+    #[test]
+    fn test_comment_without_space_is_not_doc() {
+        // extract_doc_comment requires "##", "#!", or "# " - a bare "#word" comment
+        // is not attached as a doc_comment.
+        let source = b"#nospace\nsub greet {\n    return 1;\n}\n";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_empty_body_yields_brace_prefix() {
+        // An empty {} block has non-empty text so body_prefix is Some, starting with
+        // the braces (the block node text spans through the trailing newline).
+        let source = b"sub noop {}\n";
+        let visitor = parse_and_visit(source);
+        let bp = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(bp.starts_with("{}"), "unexpected body_prefix {:?}", bp);
+    }
+    #[test]
+    fn test_complexity_symbolic_or_operator_increases() {
+        // The `||` spelling in a binary_expression raises complexity like `&&`.
+        let source = b"sub pick {\n    my $c = $a || $b;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.logical_operators >= 1);
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_word_and_operator_gap() {
+        // tree-sitter-perl parses `$c = $a and $b` as a unary_expression wrapping
+        // the assignment, so no binary_expression contains " and " and complexity
+        // stays at baseline - a grammar-shape gap pinned as a regression test.
+        let source = b"sub combine {\n    $c = $a and $b;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_complexity_word_and_operator_via_mixed_expression() {
+        // In `my $c = $a or $b and $d` the outer binary_expression spans the whole
+        // statement, so its text hits the " and " check (evaluated before " or ").
+        let source = b"sub mixed {\n    my $c = $a or $b and $d;\n    return $c;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.logical_operators >= 1);
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_complexity_c_style_for_gap() {
+        // tree-sitter-perl emits `for_statement_1` for the C-style
+        // `for (init; cond; incr)` form, which the complexity visitor does not
+        // match (it only handles for_statement/foreach_statement), so complexity
+        // stays at baseline 1.
+        let source = b"sub loopy {\n    for (my $i = 0; $i < 10; $i++) {\n        print $i;\n    }\n    return 0;\n}\n";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
     }
 }

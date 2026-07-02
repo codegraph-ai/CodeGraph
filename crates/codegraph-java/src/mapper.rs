@@ -192,9 +192,7 @@ pub fn ir_to_graph(
                 method_props = method_props.with("annotations", method.attributes.clone());
             }
             // Detect HTTP handler annotations (Spring MVC, JAX-RS)
-            if let Some((http_method, route)) =
-                detect_java_http_annotation(&method.attributes)
-            {
+            if let Some((http_method, route)) = detect_java_http_annotation(&method.attributes) {
                 method_props = method_props
                     .with("http_method", http_method)
                     .with("route", route)
@@ -790,5 +788,295 @@ mod tests {
             "is_async should be Bool(true), got {:?}",
             func_node.properties.get("is_async")
         );
+    }
+
+    #[test]
+    fn test_detect_java_http_annotation_spring_mapping() {
+        // @GetMapping("/users") -> ("GET", "/users")
+        assert_eq!(
+            detect_java_http_annotation(&["@GetMapping(\"/users\")".to_string()]),
+            Some(("GET".to_string(), "/users".to_string()))
+        );
+        // @PostMapping without a value falls back to "/"
+        assert_eq!(
+            detect_java_http_annotation(&["@PostMapping".to_string()]),
+            Some(("POST".to_string(), "/".to_string()))
+        );
+        // @DeleteMapping and @PutMapping and @PatchMapping recognized
+        assert_eq!(
+            detect_java_http_annotation(&["@DeleteMapping(\"/x\")".to_string()]),
+            Some(("DELETE".to_string(), "/x".to_string()))
+        );
+        assert_eq!(
+            detect_java_http_annotation(&["@PatchMapping".to_string()]),
+            Some(("PATCH".to_string(), "/".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_detect_java_http_annotation_request_mapping() {
+        // @RequestMapping infers the method from the body and extracts the value
+        assert_eq!(
+            detect_java_http_annotation(&[
+                "@RequestMapping(method = RequestMethod.POST, value = \"/save\")".to_string()
+            ]),
+            Some(("POST".to_string(), "/save".to_string()))
+        );
+        // No method keyword defaults to GET
+        assert_eq!(
+            detect_java_http_annotation(&["@RequestMapping(\"/home\")".to_string()]),
+            Some(("GET".to_string(), "/home".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_detect_java_http_annotation_jaxrs() {
+        // Bare JAX-RS verb annotations map to the verb with a "/" route
+        assert_eq!(
+            detect_java_http_annotation(&["@GET".to_string()]),
+            Some(("GET".to_string(), "/".to_string()))
+        );
+        assert_eq!(
+            detect_java_http_annotation(&["@DELETE".to_string()]),
+            Some(("DELETE".to_string(), "/".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_detect_java_http_annotation_none() {
+        // Non-HTTP annotations yield no handler tuple
+        assert_eq!(
+            detect_java_http_annotation(&["@Override".to_string(), "@Deprecated".to_string()]),
+            None
+        );
+        assert_eq!(detect_java_http_annotation(&[]), None);
+    }
+
+    #[test]
+    fn test_extract_annotation_value() {
+        assert_eq!(
+            extract_annotation_value("@GetMapping(\"/users\")"),
+            Some("/users".to_string())
+        );
+        assert_eq!(
+            extract_annotation_value("@RequestMapping(value=\"/a\", method=\"GET\")"),
+            Some("/a".to_string())
+        );
+        // No quoted value present
+        assert_eq!(extract_annotation_value("@GetMapping"), None);
+        // Unterminated quote returns None (no closing quote)
+        assert_eq!(extract_annotation_value("@Path(\"/x"), None);
+    }
+
+    #[test]
+    fn test_ir_to_graph_function_http_handler_props() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.java"));
+        let func = FunctionEntity::new("listUsers", 1, 5)
+            .with_attributes(vec!["@GetMapping(\"/users\")".to_string()]);
+        ir.add_function(func);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.java").as_path()).unwrap();
+
+        let node = graph.get_node(file_info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("http_method"),
+            Some(&PropertyValue::String("GET".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("route"),
+            Some(&PropertyValue::String("/users".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("is_entry_point"),
+            Some(&PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_method_http_handler_props() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.java"));
+        let mut class = ClassEntity::new("UserController", 1, 20);
+        class.methods.push(
+            FunctionEntity::new("create", 2, 8)
+                .with_attributes(vec!["@PostMapping(\"/create\")".to_string()]),
+        );
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.java").as_path()).unwrap();
+
+        let method_node = graph.get_node(file_info.functions[0]).unwrap();
+        assert_eq!(
+            method_node.properties.get("http_method"),
+            Some(&PropertyValue::String("POST".to_string()))
+        );
+        assert_eq!(
+            method_node.properties.get("route"),
+            Some(&PropertyValue::String("/create".to_string()))
+        );
+        assert_eq!(
+            method_node.properties.get("is_entry_point"),
+            Some(&PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_fallback_file_node() {
+        use codegraph::PropertyValue;
+        // No module set -> file node is derived from the path stem, language "java"
+        let ir = CodeIR::new(PathBuf::from("com/example/Widget.java"));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(
+            &ir,
+            &mut graph,
+            PathBuf::from("com/example/Widget.java").as_path(),
+        )
+        .unwrap();
+
+        let file_node = graph.get_node(file_info.file_id).unwrap();
+        assert_eq!(
+            file_node.properties.get("name"),
+            Some(&PropertyValue::String("Widget".to_string()))
+        );
+        assert_eq!(
+            file_node.properties.get("language"),
+            Some(&PropertyValue::String("java".to_string()))
+        );
+        // Fallback path has no module, so line_count is 0
+        assert_eq!(file_info.line_count, 0);
+    }
+
+    #[test]
+    fn test_ir_to_graph_complexity_props() {
+        use codegraph::PropertyValue;
+        use codegraph_parser_api::ComplexityMetrics;
+
+        let mut metrics = ComplexityMetrics::new().with_branches(3).with_loops(1);
+        metrics.calculate_cyclomatic(); // 1 + 3 + 1 = 5
+
+        let mut ir = CodeIR::new(PathBuf::from("Test.java"));
+        ir.add_function(FunctionEntity::new("compute", 1, 20).with_complexity(metrics));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.java").as_path()).unwrap();
+
+        let node = graph.get_node(file_info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("complexity"),
+            Some(&PropertyValue::Int(5))
+        );
+        assert_eq!(
+            node.properties.get("complexity_branches"),
+            Some(&PropertyValue::Int(3))
+        );
+        assert_eq!(
+            node.properties.get("complexity_loops"),
+            Some(&PropertyValue::Int(1))
+        );
+        // Grade for CC=5 is 'A'
+        assert_eq!(
+            node.properties.get("complexity_grade"),
+            Some(&PropertyValue::String("A".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_import_edge_props() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.java"));
+        ir.add_import(
+            ImportRelation::new("default", "java.util.List")
+                .with_alias("L")
+                .wildcard()
+                .with_symbols(vec!["List".to_string(), "ArrayList".to_string()]),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.java").as_path()).unwrap();
+
+        let edges = graph
+            .get_edges_between(file_info.file_id, file_info.imports[0])
+            .unwrap();
+        assert!(!edges.is_empty(), "Should have an Imports edge");
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert_eq!(
+            edge.properties.get("alias"),
+            Some(&PropertyValue::String("L".to_string()))
+        );
+        assert_eq!(
+            edge.properties.get("is_wildcard"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+        assert!(matches!(
+            edge.properties.get("symbols"),
+            Some(PropertyValue::StringList(_))
+        ));
+    }
+
+    #[test]
+    fn test_ir_to_graph_method_props_and_containment() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.java"));
+        let mut class = ClassEntity::new("Calc", 1, 10);
+        class
+            .methods
+            .push(FunctionEntity::new("add", 2, 4).with_visibility("public"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.java").as_path()).unwrap();
+
+        let class_id = file_info.classes[0];
+        let method_id = file_info.functions[0];
+
+        let method_node = graph.get_node(method_id).unwrap();
+        // Method name is qualified as "Class.method"
+        assert_eq!(
+            method_node.properties.get("name"),
+            Some(&PropertyValue::String("Calc.add".to_string()))
+        );
+        assert_eq!(
+            method_node.properties.get("is_method"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+        assert_eq!(
+            method_node.properties.get("parent_class"),
+            Some(&PropertyValue::String("Calc".to_string()))
+        );
+
+        // Class contains the method
+        let edges = graph.get_edges_between(class_id, method_id).unwrap();
+        assert!(!edges.is_empty(), "Class should contain the method");
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_interface_required_methods() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.java"));
+        let trait_entity = TraitEntity::new("Comparable", 1, 5).with_methods(vec![
+            FunctionEntity::new("compareTo", 2, 2),
+            FunctionEntity::new("equals", 3, 3),
+        ]);
+        ir.add_trait(trait_entity);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.java").as_path()).unwrap();
+
+        let iface_node = graph.get_node(file_info.traits[0]).unwrap();
+        match iface_node.properties.get("required_methods") {
+            Some(PropertyValue::StringList(list)) => {
+                assert!(list.contains(&"compareTo".to_string()));
+                assert!(list.contains(&"equals".to_string()));
+            }
+            other => panic!("required_methods should be a StringList, got {other:?}"),
+        }
     }
 }

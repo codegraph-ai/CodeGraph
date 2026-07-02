@@ -109,4 +109,61 @@ mod tests {
         assert!(ir.classes.iter().any(|c| c.name == "Msg"));
         assert!(ir.classes.iter().any(|c| c.name == "Model"));
     }
+
+    #[test]
+    fn extract_falls_back_to_file_stem_when_no_module_decl() {
+        // No `module ... exposing` header, so extract_module_name returns None
+        // and the module name is derived from the file stem instead.
+        let source = "answer = 42\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("Answer.elm"), &config).unwrap();
+        assert_eq!(ir.module.unwrap().name, "Answer");
+    }
+
+    #[test]
+    fn module_declaration_takes_precedence_over_file_stem() {
+        // A real module header wins even when it disagrees with the filename.
+        let source = "module Real.Name exposing (..)\n\nx = 1\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("Different.elm"), &config).unwrap();
+        assert_eq!(ir.module.unwrap().name, "Real.Name");
+    }
+
+    #[test]
+    fn module_metadata_fields_are_populated() {
+        // Pin the ModuleEntity fields extract() assembles directly rather than
+        // via the visitor: language, path (from display()), line_count, and the
+        // None/empty defaults for doc_comment/attributes.
+        let source = "module M exposing (..)\n\nmain = 1\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("dir/M.elm"), &config).unwrap();
+        let module = ir.module.unwrap();
+        assert_eq!(module.language, "elm");
+        assert_eq!(module.path, "dir/M.elm");
+        assert_eq!(module.line_count, source.lines().count());
+        assert_eq!(module.doc_comment, None);
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn empty_source_falls_back_to_file_stem_with_zero_lines() {
+        // Empty Elm source parses to an empty tree (not a ParseError): the name
+        // still falls back to the file stem and line_count is 0 with no functions.
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new("Empty.elm"), &config).unwrap();
+        let module = ir.module.unwrap();
+        assert_eq!(module.name, "Empty");
+        assert_eq!(module.line_count, 0);
+        assert!(ir.functions.is_empty());
+    }
+
+    #[test]
+    fn unknown_fallback_when_path_has_no_stem() {
+        // An empty path has no file_stem, so the stem fallback itself falls back
+        // to the "unknown" literal - the innermost arm of the name resolution.
+        let source = "y = 2\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new(""), &config).unwrap();
+        assert_eq!(ir.module.unwrap().name, "unknown");
+    }
 }

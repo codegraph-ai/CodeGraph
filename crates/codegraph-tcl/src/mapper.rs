@@ -299,12 +299,41 @@ pub fn ir_to_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eda::EdaData;
+    use crate::sdc::{SdcClock, SdcData};
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, ModuleEntity,
+        Parameter, TraitEntity,
+    };
+    use std::path::PathBuf;
+
+    fn default_extra() -> TclExtraData {
+        TclExtraData {
+            sdc: SdcData::default(),
+            eda: EdaData::default(),
+        }
+    }
+
+    fn map_with(ir: &CodeIR, extra: &TclExtraData) -> (CodeGraph, FileInfo) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(ir, extra, &mut graph, Path::new("test.tcl")).unwrap();
+        (graph, info)
+    }
+
+    fn map(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        map_with(ir, &default_extra())
+    }
+
+    /// Return the single edge between two nodes (fails if not exactly one).
+    fn edge_between(graph: &CodeGraph, src: NodeId, dst: NodeId) -> &codegraph::Edge {
+        let ids = graph.get_edges_between(src, dst).unwrap();
+        assert_eq!(ids.len(), 1, "expected exactly one edge {src}->{dst}");
+        graph.get_edge(ids[0]).unwrap()
+    }
 
     #[test]
     fn test_property_types() {
-        use codegraph::PropertyValue;
-        use codegraph_parser_api::{FunctionEntity, ModuleEntity};
-        use std::path::PathBuf;
         let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
         ir.set_module(ModuleEntity::new("test", "test.tcl", "tcl").with_line_count(100));
         let func = FunctionEntity::new("test_fn", 10, 20)
@@ -313,50 +342,362 @@ mod tests {
             .async_fn();
         ir.add_function(func);
 
-        let extra = TclExtraData {
-            sdc: crate::sdc::SdcData::default(),
-            eda: crate::eda::EdaData::default(),
-        };
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let file_info =
-            ir_to_graph(&ir, &extra, &mut graph, std::path::Path::new("test.tcl")).unwrap();
+        let (graph, file_info) = map(&ir);
 
         // Verify file node line_count is Int
         let file_node = graph.get_node(file_info.file_id).unwrap();
-        assert!(
-            matches!(
-                file_node.properties.get("line_count"),
-                Some(PropertyValue::Int(100))
-            ),
-            "line_count should be Int, got {:?}",
-            file_node.properties.get("line_count")
-        );
+        assert!(matches!(
+            file_node.properties.get("line_count"),
+            Some(PropertyValue::Int(100))
+        ));
 
         // Verify function properties are correct types
         let func_node = graph.get_node(file_info.functions[0]).unwrap();
-        assert!(
-            matches!(
-                func_node.properties.get("line_start"),
-                Some(PropertyValue::Int(10))
-            ),
-            "line_start should be Int(10), got {:?}",
-            func_node.properties.get("line_start")
+        assert!(matches!(
+            func_node.properties.get("line_start"),
+            Some(PropertyValue::Int(10))
+        ));
+        assert!(matches!(
+            func_node.properties.get("line_end"),
+            Some(PropertyValue::Int(20))
+        ));
+        assert!(matches!(
+            func_node.properties.get("is_async"),
+            Some(PropertyValue::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn empty_ir_builds_file_node_from_path_stem() {
+        // No module set: name is derived from the file stem, language is
+        // hard-coded to "tcl", and the graph holds only the file node.
+        let ir = CodeIR::new(PathBuf::from("test.tcl"));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(info.line_count, 0);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("test"));
+        assert_eq!(file.properties.get_string("language"), Some("tcl"));
+        assert!(matches!(file.node_type, NodeType::CodeFile));
+    }
+
+    #[test]
+    fn free_function_gets_file_contains_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("free", 1, 2));
+        let (graph, info) = map(&ir);
+
+        let func_id = info.functions[0];
+        let edge = edge_between(&graph, info.file_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
+    }
+
+    #[test]
+    fn class_emits_node_and_contains_edge_but_drops_methods() {
+        // The tcl mapper (unlike swift/cpp) never iterates class.methods: a
+        // namespace becomes a bare Class node wired to the file, and any
+        // methods it carries are silently dropped (no Function nodes).
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        let class = ClassEntity::new("Widget", 1, 30)
+            .with_visibility("public")
+            .with_methods(vec![FunctionEntity::new("render", 5, 9)]);
+        ir.add_class(class);
+        let (graph, info) = map(&ir);
+
+        // file + class only - the method is dropped
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(info.classes.len(), 1);
+        assert!(info.functions.is_empty());
+
+        let class_id = info.classes[0];
+        let class_node = graph.get_node(class_id).unwrap();
+        assert!(matches!(class_node.node_type, NodeType::Class));
+        assert_eq!(class_node.properties.get_string("name"), Some("Widget"));
+        assert!(matches!(
+            edge_between(&graph, info.file_id, class_id).edge_type,
+            EdgeType::Contains
+        ));
+    }
+
+    #[test]
+    fn trait_is_ignored() {
+        // tcl has no trait handling: trait_ids is always empty and no
+        // Interface node is emitted.
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_trait(TraitEntity::new("Drawable", 1, 5));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(graph.node_count(), 1);
+        assert!(info.traits.is_empty());
+    }
+
+    #[test]
+    fn import_creates_external_module_with_symbols_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_import(
+            ImportRelation::new("test", "http")
+                .with_symbols(vec!["geturl".to_string(), "config".to_string()]),
         );
-        assert!(
-            matches!(
-                func_node.properties.get("line_end"),
-                Some(PropertyValue::Int(20))
-            ),
-            "line_end should be Int(20), got {:?}",
-            func_node.properties.get("line_end")
+        let (graph, info) = map(&ir);
+
+        let module_id = info.imports[0];
+        let module = graph.get_node(module_id).unwrap();
+        assert!(matches!(module.node_type, NodeType::Module));
+        assert_eq!(module.properties.get_string("name"), Some("http"));
+        assert_eq!(module.properties.get_string("is_external"), Some("true"));
+
+        let edge = edge_between(&graph, info.file_id, module_id);
+        assert!(matches!(edge.edge_type, EdgeType::Imports));
+        assert_eq!(
+            edge.properties.get_string_list_compat("symbols"),
+            Some(vec!["geturl".to_string(), "config".to_string()])
         );
-        assert!(
-            matches!(
-                func_node.properties.get("is_async"),
-                Some(PropertyValue::Bool(true))
-            ),
-            "is_async should be Bool(true), got {:?}",
-            func_node.properties.get("is_async")
+        // A non-wildcard import records no is_wildcard prop.
+        assert_eq!(edge.properties.get_string("is_wildcard"), None);
+    }
+
+    #[test]
+    fn wildcard_import_tags_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_import(ImportRelation::new("test", "pkg").wildcard());
+        let (graph, info) = map(&ir);
+
+        let edge = edge_between(&graph, info.file_id, info.imports[0]);
+        assert_eq!(edge.properties.get_string("is_wildcard"), Some("true"));
+    }
+
+    #[test]
+    fn duplicate_imports_reuse_one_module_node() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_import(ImportRelation::new("test", "http"));
+        ir.add_import(ImportRelation::new("test", "http"));
+        let (graph, info) = map(&ir);
+
+        // file + single deduped module node
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(info.imports.len(), 2);
+        assert_eq!(info.imports[0], info.imports[1]);
+        // Two Imports edges to the same module.
+        let edges = graph
+            .get_edges_between(info.file_id, info.imports[0])
+            .unwrap();
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn resolved_call_creates_calls_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_function(FunctionEntity::new("callee", 6, 9));
+        ir.add_call(CallRelation::new("caller", "callee", 3));
+        let (graph, info) = map(&ir);
+
+        let caller_id = info.functions[0];
+        let callee_id = info.functions[1];
+        let edge = edge_between(&graph, caller_id, callee_id);
+        assert!(matches!(edge.edge_type, EdgeType::Calls));
+        assert!(matches!(
+            edge.properties.get("call_site_line"),
+            Some(PropertyValue::Int(3))
+        ));
+    }
+
+    #[test]
+    fn unresolved_call_stored_on_caller_without_edge() {
+        // A call whose callee is not in node_map is recorded as an
+        // unresolved_calls string list on the caller, not a Calls edge.
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("caller", 1, 5));
+        ir.add_call(CallRelation::new("caller", "external_proc", 2));
+        let (graph, info) = map(&ir);
+
+        // file + caller only (no callee node created)
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 1); // just the file->caller Contains
+
+        let caller = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(
+            caller.properties.get_string_list_compat("unresolved_calls"),
+            Some(vec!["external_proc".to_string()])
         );
+    }
+
+    #[test]
+    fn sdc_and_eda_data_attached_to_file_node() {
+        // tcl-specific: SDC constraints and EDA commands serialize onto the
+        // file node as JSON-string properties.
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.set_module(ModuleEntity::new("test", "test.tcl", "tcl").with_line_count(10));
+
+        let mut extra = default_extra();
+        extra.sdc.clocks.push(SdcClock {
+            name: "clk".to_string(),
+            period: "10".to_string(),
+            port: "clk_port".to_string(),
+        });
+        extra
+            .eda
+            .design_reads
+            .push(("verilog".to_string(), "top.v".to_string()));
+
+        let (graph, info) = map_with(&ir, &extra);
+        let file = graph.get_node(info.file_id).unwrap();
+
+        let clocks = file.properties.get_string("sdc_clocks").unwrap();
+        assert!(clocks.contains("clk_port"));
+        let reads = file.properties.get_string("eda_design_reads").unwrap();
+        assert!(reads.contains("top.v"));
+    }
+
+    #[test]
+    fn function_complexity_attaches_all_metric_props() {
+        // A function carrying ComplexityMetrics expands into eight numeric
+        // props plus the letter grade. cyclomatic = 1+4+2+3+1 = 11 -> grade C.
+        let mut metrics = ComplexityMetrics::new()
+            .with_branches(4)
+            .with_loops(2)
+            .with_logical_operators(3)
+            .with_nesting_depth(5)
+            .with_exception_handlers(1)
+            .with_early_returns(2);
+        metrics.calculate_cyclomatic();
+
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("busy", 1, 40).with_complexity(metrics));
+        let (graph, info) = map(&ir);
+
+        let func = graph.get_node(info.functions[0]).unwrap();
+        let p = &func.properties;
+        assert!(matches!(p.get("complexity"), Some(PropertyValue::Int(11))));
+        assert_eq!(p.get_string("complexity_grade"), Some("C"));
+        assert!(matches!(
+            p.get("complexity_branches"),
+            Some(PropertyValue::Int(4))
+        ));
+        assert!(matches!(
+            p.get("complexity_loops"),
+            Some(PropertyValue::Int(2))
+        ));
+        assert!(matches!(
+            p.get("complexity_logical_ops"),
+            Some(PropertyValue::Int(3))
+        ));
+        assert!(matches!(
+            p.get("complexity_nesting"),
+            Some(PropertyValue::Int(5))
+        ));
+        assert!(matches!(
+            p.get("complexity_exceptions"),
+            Some(PropertyValue::Int(1))
+        ));
+        assert!(matches!(
+            p.get("complexity_early_returns"),
+            Some(PropertyValue::Int(2))
+        ));
+    }
+
+    #[test]
+    fn function_optional_props_attached_when_present() {
+        // doc/parameters/attributes/body_prefix are only emitted when set.
+        let func = FunctionEntity::new("proc", 1, 5)
+            .with_doc("does a thing")
+            .with_parameters(vec![Parameter::new("a"), Parameter::new("b")])
+            .with_attributes(vec!["export".to_string()])
+            .with_body_prefix("set x 1");
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(func);
+        let (graph, info) = map(&ir);
+
+        let p = &graph.get_node(info.functions[0]).unwrap().properties;
+        assert_eq!(p.get_string("doc"), Some("does a thing"));
+        assert_eq!(
+            p.get_string_list_compat("parameters"),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            p.get_string_list_compat("attributes"),
+            Some(vec!["export".to_string()])
+        );
+        assert_eq!(p.get_string("body_prefix"), Some("set x 1"));
+    }
+
+    #[test]
+    fn function_parent_class_links_to_earlier_function() {
+        // Classes are mapped AFTER functions, so a parent_class name only
+        // resolves in node_map if it belongs to an EARLIER function. Here the
+        // child's parent is a previously-added function, so the Contains edge
+        // comes from that function node, not the file.
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("parent", 1, 20));
+        ir.add_function(FunctionEntity::new("child", 5, 9).with_parent_class("parent"));
+        let (graph, info) = map(&ir);
+
+        let parent_id = info.functions[0];
+        let child_id = info.functions[1];
+        // child is contained by parent, not by the file.
+        assert!(matches!(
+            edge_between(&graph, parent_id, child_id).edge_type,
+            EdgeType::Contains
+        ));
+        assert!(graph
+            .get_edges_between(info.file_id, child_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn function_parent_class_unresolved_leaves_function_orphaned() {
+        // When parent_class is set but never resolves in node_map (e.g. a
+        // namespace mapped later, or a missing name), the inner lookup has no
+        // else arm, so NO Contains edge is emitted - the function is orphaned
+        // (not wired to the file).
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_function(FunctionEntity::new("child", 5, 9).with_parent_class("Missing"));
+        let (graph, info) = map(&ir);
+
+        // file + function nodes, but zero edges.
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph
+            .get_edges_between(info.file_id, info.functions[0])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn module_doc_comment_attached_to_file_node() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.set_module(
+            ModuleEntity::new("test", "test.tcl", "tcl")
+                .with_line_count(7)
+                .with_doc("module docs"),
+        );
+        let (graph, info) = map(&ir);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("doc"), Some("module docs"));
+        assert_eq!(info.line_count, 7);
+    }
+
+    #[test]
+    fn class_optional_props_attached_when_present() {
+        let mut ir = CodeIR::new(PathBuf::from("test.tcl"));
+        ir.add_class(
+            ClassEntity::new("NS", 1, 30)
+                .with_doc("namespace docs")
+                .with_attributes(vec!["public".to_string()])
+                .with_body_prefix("variable state"),
+        );
+        let (graph, info) = map(&ir);
+
+        let p = &graph.get_node(info.classes[0]).unwrap().properties;
+        assert_eq!(p.get_string("doc"), Some("namespace docs"));
+        assert_eq!(
+            p.get_string_list_compat("attributes"),
+            Some(vec!["public".to_string()])
+        );
+        assert_eq!(p.get_string("body_prefix"), Some("variable state"));
     }
 }

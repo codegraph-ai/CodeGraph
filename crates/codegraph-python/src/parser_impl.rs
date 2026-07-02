@@ -141,9 +141,15 @@ impl PythonParser {
                     .with("complexity_grade", complexity.grade().to_string())
                     .with("complexity_branches", complexity.branches as i64)
                     .with("complexity_loops", complexity.loops as i64)
-                    .with("complexity_logical_ops", complexity.logical_operators as i64)
+                    .with(
+                        "complexity_logical_ops",
+                        complexity.logical_operators as i64,
+                    )
                     .with("complexity_nesting", complexity.max_nesting_depth as i64)
-                    .with("complexity_exceptions", complexity.exception_handlers as i64)
+                    .with(
+                        "complexity_exceptions",
+                        complexity.exception_handlers as i64,
+                    )
                     .with("complexity_early_returns", complexity.early_returns as i64);
             }
             if let Some(ref body) = func.body_prefix {
@@ -554,6 +560,242 @@ fn extract_first_string_arg(attr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph::CodeGraph;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    /// Python source with one import, one top-level function, and one class
+    /// containing one method. Methods are flattened into `ir.functions`, so
+    /// this pins functions=2 (greet + hello), classes=1, traits=0, imports=1.
+    const SAMPLE: &str = r#""""Module docstring."""
+import os
+
+def greet(name):
+    return name
+
+class Greeter:
+    def hello(self):
+        return "hi"
+"#;
+
+    fn graph() -> CodeGraph {
+        CodeGraph::in_memory().unwrap()
+    }
+
+    fn write_file(dir: &TempDir, name: &str, contents: &str) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_default_matches_new_metrics() {
+        let a = PythonParser::new().metrics();
+        let b = PythonParser::default().metrics();
+        assert_eq!(a.files_attempted, b.files_attempted);
+        assert_eq!(a.files_succeeded, b.files_succeeded);
+        assert_eq!(a.files_failed, b.files_failed);
+        assert_eq!(a.total_entities, b.total_entities);
+    }
+
+    #[test]
+    fn test_with_config_is_exposed_via_config_accessor() {
+        let cfg = ParserConfig {
+            skip_private: true,
+            max_file_size: 12345,
+            ..Default::default()
+        };
+        let parser = PythonParser::with_config(cfg);
+        assert!(parser.config().skip_private);
+        assert_eq!(parser.config().max_file_size, 12345);
+    }
+
+    #[test]
+    fn test_parse_source_extracts_each_entity_kind() {
+        let parser = PythonParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("sample.py"), &mut g)
+            .unwrap();
+        assert_eq!(info.functions.len(), 2, "greet + hello");
+        assert_eq!(info.classes.len(), 1, "Greeter");
+        assert_eq!(info.traits.len(), 0);
+        assert_eq!(info.imports.len(), 1, "os");
+        assert_eq!(info.entity_count(), 3);
+    }
+
+    #[test]
+    fn test_parse_source_comment_only_yields_no_entities() {
+        let parser = PythonParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source("# just a comment\n", Path::new("c.py"), &mut g)
+            .unwrap();
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.traits.len(), 0);
+        assert_eq!(info.imports.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_source_line_and_byte_counts() {
+        let parser = PythonParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("sample.py"), &mut g)
+            .unwrap();
+        assert_eq!(info.byte_count, SAMPLE.len());
+        assert_eq!(info.line_count, SAMPLE.lines().count());
+    }
+
+    #[test]
+    fn test_parse_source_records_metrics() {
+        // Unlike the sequential-template parsers, Python's parse_source itself
+        // records metrics (parse_file merely delegates to it).
+        let parser = PythonParser::new();
+        let mut g = graph();
+        parser
+            .parse_source(SAMPLE, Path::new("sample.py"), &mut g)
+            .unwrap();
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_succeeded, 1);
+        assert_eq!(m.files_failed, 0);
+        assert!(m.total_entities > 0);
+    }
+
+    #[test]
+    fn test_parse_source_too_large_records_failure() {
+        let cfg = ParserConfig {
+            max_file_size: 4,
+            ..Default::default()
+        };
+        let parser = PythonParser::with_config(cfg);
+        let mut g = graph();
+        let err = parser
+            .parse_source(SAMPLE, Path::new("big.py"), &mut g)
+            .unwrap_err();
+        assert!(matches!(err, ParserError::FileTooLarge(_, _)));
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_failed, 1);
+        assert_eq!(m.files_succeeded, 0);
+    }
+
+    #[test]
+    fn test_parse_file_success_metrics_and_total_entities() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "sample.py", SAMPLE);
+        let parser = PythonParser::new();
+        let mut g = graph();
+        let info = parser.parse_file(&path, &mut g).unwrap();
+        assert_eq!(info.functions.len(), 2);
+        assert_eq!(info.classes.len(), 1);
+        assert_eq!(info.byte_count, SAMPLE.len());
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_succeeded, 1);
+        // module + 2 functions + 1 class = 4 entities (IR entity_count includes module)
+        assert!(m.total_entities >= 3);
+    }
+
+    #[test]
+    fn test_parse_file_missing_file_is_io_error_and_leaves_metrics_untouched() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("does_not_exist.py");
+        let parser = PythonParser::new();
+        let mut g = graph();
+        let err = parser.parse_file(&path, &mut g).unwrap_err();
+        assert!(matches!(err, ParserError::IoError(_, _)));
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.files_failed, 0);
+    }
+
+    #[test]
+    fn test_parse_file_wrong_extension_is_parse_error() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "sample.rs", SAMPLE);
+        let parser = PythonParser::new();
+        let mut g = graph();
+        let err = parser.parse_file(&path, &mut g).unwrap_err();
+        assert!(matches!(err, ParserError::ParseError(_, _)));
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+    }
+
+    #[test]
+    fn test_parse_file_too_large_records_failure() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "big.py", SAMPLE);
+        let cfg = ParserConfig {
+            max_file_size: 4,
+            ..Default::default()
+        };
+        let parser = PythonParser::with_config(cfg);
+        let mut g = graph();
+        let err = parser.parse_file(&path, &mut g).unwrap_err();
+        assert!(matches!(err, ParserError::FileTooLarge(_, _)));
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_failed, 1);
+    }
+
+    #[test]
+    fn test_reset_metrics_zeroes_counters() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "sample.py", SAMPLE);
+        let mut parser = PythonParser::new();
+        let mut g = graph();
+        parser.parse_file(&path, &mut g).unwrap();
+        assert_eq!(parser.metrics().files_attempted, 1);
+        parser.reset_metrics();
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.files_succeeded, 0);
+        assert_eq!(m.total_entities, 0);
+    }
+
+    #[test]
+    fn test_metrics_accumulate_across_files() {
+        let dir = TempDir::new().unwrap();
+        let p1 = write_file(&dir, "a.py", SAMPLE);
+        let p2 = write_file(&dir, "b.py", SAMPLE);
+        let parser = PythonParser::new();
+        let mut g = graph();
+        parser.parse_file(&p1, &mut g).unwrap();
+        parser.parse_file(&p2, &mut g).unwrap();
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 2);
+        assert_eq!(m.files_succeeded, 2);
+    }
+
+    #[test]
+    fn test_parse_files_sequential_aggregates_functions_and_classes() {
+        let dir = TempDir::new().unwrap();
+        let p1 = write_file(&dir, "a.py", SAMPLE);
+        let p2 = write_file(&dir, "b.py", SAMPLE);
+        let parser = PythonParser::new();
+        let mut g = graph();
+        let project = parser.parse_files(&[p1, p2], &mut g).unwrap();
+        assert_eq!(project.files.len(), 2);
+        assert!(project.failed_files.is_empty());
+        assert_eq!(project.total_functions, 4, "2 per file");
+        assert_eq!(project.total_classes, 2, "1 per file");
+    }
+
+    #[test]
+    fn test_parse_files_partitions_failures() {
+        let dir = TempDir::new().unwrap();
+        let good = write_file(&dir, "good.py", SAMPLE);
+        let missing = dir.path().join("missing.py");
+        let parser = PythonParser::new();
+        let mut g = graph();
+        let project = parser.parse_files(&[good, missing], &mut g).unwrap();
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.failed_files.len(), 1);
+    }
 
     #[test]
     fn test_python_parser_new() {
@@ -696,6 +938,86 @@ mod tests {
             node.properties.get_string("is_external"),
             Some("false"),
             "Relative import ..models should be internal"
+        );
+    }
+
+    #[test]
+    fn test_extract_first_string_arg_branches() {
+        // Double-quoted argument extracted verbatim (path braces preserved).
+        assert_eq!(
+            extract_first_string_arg("app.get(\"/users/{id}\")").as_deref(),
+            Some("/users/{id}")
+        );
+        // Single-quoted argument is equally accepted.
+        assert_eq!(
+            extract_first_string_arg("app.get('/home')").as_deref(),
+            Some("/home")
+        );
+        // First quoted string wins when several are present.
+        assert_eq!(
+            extract_first_string_arg("route(\"a\", \"b\")").as_deref(),
+            Some("a")
+        );
+        // The opening quote fixes the delimiter: an inner double quote inside a
+        // single-quoted string is treated as content, not a terminator.
+        assert_eq!(
+            extract_first_string_arg("x('a\"b')").as_deref(),
+            Some("a\"b")
+        );
+        // Empty quoted string is accepted and yields an empty String.
+        assert_eq!(extract_first_string_arg("x(\"\")").as_deref(), Some(""));
+        // No quote at all -> None.
+        assert_eq!(extract_first_string_arg("app.route(path)"), None);
+        // Unterminated quote (no matching closer before end) -> None.
+        assert_eq!(extract_first_string_arg("app.get(\"/oops"), None);
+    }
+
+    #[test]
+    fn test_detect_http_decorator_arms() {
+        // `.METHOD(` pattern (FastAPI/Flask/Starlette): method uppercased, route
+        // pulled from the first string arg.
+        assert_eq!(
+            detect_http_decorator(&["app.get(\"/users\")".to_string()]),
+            Some(("GET".to_string(), "/users".to_string()))
+        );
+        // The method loop is ordered but each pattern is distinct; `.post(`
+        // resolves to POST.
+        assert_eq!(
+            detect_http_decorator(&["router.post(\"/items\")".to_string()]),
+            Some(("POST".to_string(), "/items".to_string()))
+        );
+        // `.route(` without a methods= list defaults to GET.
+        assert_eq!(
+            detect_http_decorator(&["app.route(\"/home\")".to_string()]),
+            Some(("GET".to_string(), "/home".to_string()))
+        );
+        // `.route(` with methods= picks the listed verb via the lowercase probe.
+        assert_eq!(
+            detect_http_decorator(&["app.route(\"/submit\", methods=[\"POST\"])".to_string()]),
+            Some(("POST".to_string(), "/submit".to_string()))
+        );
+        // A `.METHOD(` decorator with no string arg falls back to "/" route.
+        assert_eq!(
+            detect_http_decorator(&["app.delete()".to_string()]),
+            Some(("DELETE".to_string(), "/".to_string()))
+        );
+        // Django REST `api_view(...)`: the method probe compares an uppercase
+        // needle against the lowercased attr, so it never matches and the arm
+        // always yields ("GET", "/") regardless of the listed verbs.
+        assert_eq!(
+            detect_http_decorator(&["api_view([\"POST\"])".to_string()]),
+            Some(("GET".to_string(), "/".to_string()))
+        );
+        // First matching attribute wins across the list; a non-HTTP decorator is
+        // skipped before the route decorator is reached.
+        assert_eq!(
+            detect_http_decorator(&["staticmethod".to_string(), "app.put(\"/p\")".to_string()]),
+            Some(("PUT".to_string(), "/p".to_string()))
+        );
+        // No HTTP decorator present -> None.
+        assert_eq!(
+            detect_http_decorator(&["staticmethod".to_string(), "cached".to_string()]),
+            None
         );
     }
 }

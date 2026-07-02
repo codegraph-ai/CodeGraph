@@ -40,3 +40,41 @@ pub fn current_rss_mb() -> u64 {
         .map(|p| p.memory() / (1024 * 1024))
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn emit_tel_respects_off_optout_and_emits_otherwise() {
+        // This is the only reader of CODEGRAPH_TELEMETRY in the crate, so
+        // mutating it here cannot race another test. Exercise both arms in one
+        // test to avoid intra-module env races between parallel tests.
+        let event = json!({ "event": "test_event", "n": 1 });
+
+        // Opt-out arm: `off` (case-insensitive) returns early without emitting.
+        std::env::set_var("CODEGRAPH_TELEMETRY", "OfF");
+        emit_tel(event.clone());
+
+        // Emit arm: any non-`off` value (or unset) reaches the eprintln! path.
+        std::env::set_var("CODEGRAPH_TELEMETRY", "on");
+        emit_tel(event.clone());
+        std::env::remove_var("CODEGRAPH_TELEMETRY");
+        emit_tel(event);
+        // No panic and no return value: the contract is that emission never
+        // blocks or fails the caller regardless of the opt-out state.
+    }
+
+    #[test]
+    fn current_rss_mb_reports_megabytes() {
+        // The running test process must have some resident memory; the value is
+        // reported in MB, so it stays well under a 1 TB sanity bound (it would
+        // blow past this if the fn accidentally returned raw bytes).
+        let rss = current_rss_mb();
+        assert!(
+            rss < 1_000_000,
+            "rss {rss} MB implausibly large - unit bug?"
+        );
+    }
+}

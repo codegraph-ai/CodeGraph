@@ -185,3 +185,176 @@ impl ClassEntity {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_new_defaults() {
+        let f = Field::new("count");
+        assert_eq!(f.name, "count");
+        assert_eq!(f.type_annotation, None);
+        assert_eq!(f.visibility, "public");
+        assert!(!f.is_static);
+        assert!(!f.is_constant);
+        assert_eq!(f.default_value, None);
+    }
+
+    #[test]
+    fn field_builder_chain() {
+        let f = Field::new("MAX")
+            .with_type("u32")
+            .with_visibility("private")
+            .static_field()
+            .constant()
+            .with_default("100");
+        assert_eq!(f.type_annotation, Some("u32".to_string()));
+        assert_eq!(f.visibility, "private");
+        assert!(f.is_static);
+        assert!(f.is_constant);
+        assert_eq!(f.default_value, Some("100".to_string()));
+    }
+
+    #[test]
+    fn class_new_defaults() {
+        let c = ClassEntity::new("Widget", 1, 20);
+        assert_eq!(c.name, "Widget");
+        assert_eq!(c.visibility, "public");
+        assert_eq!(c.line_start, 1);
+        assert_eq!(c.line_end, 20);
+        assert!(!c.is_abstract);
+        assert!(!c.is_interface);
+        assert!(c.base_classes.is_empty());
+        assert!(c.implemented_traits.is_empty());
+        assert!(c.methods.is_empty());
+        assert!(c.fields.is_empty());
+        assert_eq!(c.doc_comment, None);
+        assert!(c.attributes.is_empty());
+        assert!(c.type_parameters.is_empty());
+        assert_eq!(c.body_prefix, None);
+    }
+
+    #[test]
+    fn class_builder_covers_all_setters() {
+        let methods = vec![FunctionEntity::new("render", 2, 4)];
+        let fields = vec![Field::new("id")];
+        let c = ClassEntity::new("View", 1, 30)
+            .with_visibility("internal")
+            .abstract_class()
+            .interface()
+            .with_bases(vec!["Base".to_string()])
+            .with_traits(vec!["Drawable".to_string()])
+            .with_methods(methods.clone())
+            .with_fields(fields.clone())
+            .with_doc("a view")
+            .with_attributes(vec!["@component".to_string()])
+            .with_type_parameters(vec!["T".to_string()])
+            .with_body_prefix("class View {}");
+        assert_eq!(c.visibility, "internal");
+        assert!(c.is_abstract);
+        assert!(c.is_interface);
+        assert_eq!(c.base_classes, vec!["Base".to_string()]);
+        assert_eq!(c.implemented_traits, vec!["Drawable".to_string()]);
+        assert_eq!(c.methods, methods);
+        assert_eq!(c.fields, fields);
+        assert_eq!(c.doc_comment, Some("a view".to_string()));
+        assert_eq!(c.attributes, vec!["@component".to_string()]);
+        assert_eq!(c.type_parameters, vec!["T".to_string()]);
+        assert_eq!(c.body_prefix, Some("class View {}".to_string()));
+    }
+
+    #[test]
+    fn class_serde_round_trip() {
+        let c = ClassEntity::new("Rt", 1, 2).with_fields(vec![Field::new("x")]);
+        let json = serde_json::to_string(&c).unwrap();
+        let back: ClassEntity = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn field_serde_round_trip_all_fields() {
+        // Field's derived Serialize/Deserialize is only ever exercised nested
+        // inside ClassEntity; pin the standalone round-trip with every field
+        // populated so the Option arms and exact snake_case wire names are covered.
+        let f = Field::new("MAX")
+            .with_type("u32")
+            .with_visibility("private")
+            .static_field()
+            .constant()
+            .with_default("100");
+        let json = serde_json::to_string(&f).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "MAX");
+        assert_eq!(v["type_annotation"], "u32");
+        assert_eq!(v["visibility"], "private");
+        assert_eq!(v["is_static"], true);
+        assert_eq!(v["is_constant"], true);
+        assert_eq!(v["default_value"], "100");
+        let back: Field = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
+    }
+
+    #[test]
+    fn field_eq_and_hash_dedup_in_set() {
+        // Field uniquely derives Eq + Hash (ClassEntity only has PartialEq);
+        // exercise those derives by using Field as a HashSet key.
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Field::new("x").with_type("i32"));
+        set.insert(Field::new("x").with_type("i32")); // equal -> collapses
+        set.insert(Field::new("x").with_type("i64")); // differs by type -> distinct
+        set.insert(Field::new("y").with_type("i32")); // differs by name -> distinct
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&Field::new("x").with_type("i32")));
+    }
+
+    #[test]
+    fn class_default_serializes_exact_wire_format() {
+        // class_serde_round_trip only asserts round-trip equality; pin the exact
+        // snake_case wire names so an accidental rename of any multi-word field
+        // (line_start, line_end, is_abstract, is_interface, base_classes,
+        // implemented_traits, doc_comment, type_parameters, body_prefix) is caught.
+        let c = ClassEntity::new("Widget", 1, 20);
+        let v: serde_json::Value = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["name"], "Widget");
+        assert_eq!(v["visibility"], "public");
+        assert_eq!(v["line_start"], 1);
+        assert_eq!(v["line_end"], 20);
+        assert_eq!(v["is_abstract"], false);
+        assert_eq!(v["is_interface"], false);
+        assert_eq!(v["base_classes"], serde_json::json!([]));
+        assert_eq!(v["implemented_traits"], serde_json::json!([]));
+        assert_eq!(v["methods"], serde_json::json!([]));
+        assert_eq!(v["fields"], serde_json::json!([]));
+        // doc_comment / body_prefix carry no skip_serializing_if -> explicit null.
+        assert!(v["doc_comment"].is_null());
+        assert_eq!(v["attributes"], serde_json::json!([]));
+        assert_eq!(v["type_parameters"], serde_json::json!([]));
+        assert!(v["body_prefix"].is_null());
+    }
+
+    #[test]
+    fn class_populated_serializes_exact_wire_format() {
+        let c = ClassEntity::new("View", 1, 30)
+            .with_visibility("internal")
+            .abstract_class()
+            .interface()
+            .with_bases(vec!["Base".to_string()])
+            .with_traits(vec!["Drawable".to_string()])
+            .with_doc("a view")
+            .with_attributes(vec!["@component".to_string()])
+            .with_type_parameters(vec!["T".to_string()])
+            .with_body_prefix("class View {}");
+        let v: serde_json::Value = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["visibility"], "internal");
+        assert_eq!(v["is_abstract"], true);
+        assert_eq!(v["is_interface"], true);
+        assert_eq!(v["base_classes"], serde_json::json!(["Base"]));
+        assert_eq!(v["implemented_traits"], serde_json::json!(["Drawable"]));
+        assert_eq!(v["doc_comment"], "a view");
+        assert_eq!(v["attributes"], serde_json::json!(["@component"]));
+        assert_eq!(v["type_parameters"], serde_json::json!(["T"]));
+        assert_eq!(v["body_prefix"], "class View {}");
+    }
+}

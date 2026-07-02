@@ -35,11 +35,20 @@ impl McpClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let mut child = cmd.spawn().with_context(|| {
-            format!("spawn {} --mcp --workspace {}", binary.display(), workspace.display())
+            format!(
+                "spawn {} --mcp --workspace {}",
+                binary.display(),
+                workspace.display()
+            )
         })?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
-        let mut client = McpClient { child, stdin, stdout, next_id: 1 };
+        let mut client = McpClient {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        };
         client.handshake()?;
         Ok(client)
     }
@@ -137,9 +146,8 @@ impl McpClient {
     }
 
     fn send(&mut self, value: &Value) -> anyhow::Result<()> {
-        let body = serde_json::to_vec(value)?;
+        let body = encode_request(value)?;
         self.stdin.write_all(&body)?;
-        self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
         Ok(())
     }
@@ -157,13 +165,80 @@ impl McpClient {
             if n == 0 {
                 return Err(anyhow!("server closed stdout"));
             }
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+            match parse_response_line(&line)? {
+                Some(value) => return Ok(value),
+                None => continue,
             }
-            let value: Value = serde_json::from_str(trimmed)
-                .with_context(|| format!("parse JSON line: {:?}", trimmed))?;
-            return Ok(value);
         }
+    }
+}
+
+/// Serialize a JSON-RPC message into a line-delimited frame: the compact
+/// JSON body followed by a single `\n`. Shared by `send` so the framing is
+/// testable without a live child process.
+fn encode_request(value: &Value) -> anyhow::Result<Vec<u8>> {
+    let mut body = serde_json::to_vec(value)?;
+    body.push(b'\n');
+    Ok(body)
+}
+
+/// Parse one line of the server's line-delimited JSON-RPC output.
+/// Returns `Ok(None)` for a blank/whitespace-only line (skipped by the
+/// caller), `Ok(Some(value))` for a well-formed JSON document, or `Err`
+/// for malformed JSON. Extracted from `recv` to create a stdout-free seam.
+fn parse_response_line(line: &str) -> anyhow::Result<Option<Value>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value: Value =
+        serde_json::from_str(trimmed).with_context(|| format!("parse JSON line: {:?}", trimmed))?;
+    Ok(Some(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_request_appends_single_newline() {
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+        let bytes = encode_request(&msg).expect("encode");
+        assert_eq!(*bytes.last().unwrap(), b'\n');
+        // Exactly one trailing newline, none embedded in the compact body.
+        assert_eq!(bytes.iter().filter(|&&b| b == b'\n').count(), 1);
+        // The body (minus the newline) round-trips back to the same value.
+        let parsed: Value = serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("parse");
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn parse_response_line_valid_json() {
+        let line = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n";
+        let value = parse_response_line(line).expect("ok").expect("some");
+        assert_eq!(value.get("id").and_then(Value::as_i64), Some(7));
+        assert_eq!(
+            value.pointer("/result/ok").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn parse_response_line_trims_surrounding_whitespace() {
+        let line = "   \t {\"jsonrpc\":\"2.0\",\"id\":3}  \r\n";
+        let value = parse_response_line(line).expect("ok").expect("some");
+        assert_eq!(value.get("id").and_then(Value::as_i64), Some(3));
+    }
+
+    #[test]
+    fn parse_response_line_blank_is_none() {
+        assert!(parse_response_line("").expect("ok").is_none());
+        assert!(parse_response_line("   \t\r\n").expect("ok").is_none());
+    }
+
+    #[test]
+    fn parse_response_line_malformed_is_err() {
+        let err = parse_response_line("{not valid json").unwrap_err();
+        assert!(err.to_string().contains("parse JSON line"));
     }
 }

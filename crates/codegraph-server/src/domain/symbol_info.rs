@@ -186,3 +186,183 @@ pub(crate) async fn get_detailed_symbol(
         fallback_message,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{EdgeType, NodeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+
+    /// Add a node carrying the given key/value string properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, &str)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), PropertyValue::String(v.to_string()));
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// Wrap a built graph in the Arc<RwLock<>> a QueryEngine owns.
+    fn engine_for(g: CodeGraph) -> (Arc<RwLock<CodeGraph>>, QueryEngine) {
+        let graph = Arc::new(RwLock::new(g));
+        let engine = QueryEngine::new(graph.clone());
+        (graph, engine)
+    }
+
+    #[tokio::test]
+    async fn get_symbol_info_missing_node_returns_none() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let (graph, engine) = engine_for(g);
+        let result = get_symbol_info(&graph, &engine, 999, true, false, None).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_symbol_info_include_refs_populates_ref_fields() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_node(&mut g, NodeType::Function, &[("name", "target")]);
+        let (graph, engine) = engine_for(g);
+
+        let result = get_symbol_info(&graph, &engine, f, true, false, None)
+            .await
+            .expect("symbol info");
+        // With include_refs, the four ref collections are present (even if empty).
+        assert!(result.callers.is_some());
+        assert!(result.callees.is_some());
+        assert!(result.dependencies.is_some());
+        assert!(result.dependents.is_some());
+        assert_eq!(result.symbol.name, "target");
+    }
+
+    #[tokio::test]
+    async fn get_symbol_info_without_refs_suppresses_ref_fields() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_node(&mut g, NodeType::Function, &[("name", "target")]);
+        let (graph, engine) = engine_for(g);
+
+        let result = get_symbol_info(&graph, &engine, f, false, false, None)
+            .await
+            .expect("symbol info");
+        assert!(result.callers.is_none());
+        assert!(result.callees.is_none());
+        assert!(result.dependencies.is_none());
+        assert!(result.dependents.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_symbol_info_fallback_sets_message_with_line_and_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_node(&mut g, NodeType::Function, &[("name", "nearby")]);
+        let (graph, engine) = engine_for(g);
+
+        let result = get_symbol_info(&graph, &engine, f, false, true, Some(42))
+            .await
+            .expect("symbol info");
+        assert_eq!(result.used_fallback, Some(true));
+        assert_eq!(
+            result.fallback_message.as_deref(),
+            Some("No symbol at line 42. Using nearest symbol 'nearby' instead.")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_symbol_info_no_fallback_leaves_fallback_fields_none() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "plain"), ("line_start", "10"), ("line_end", "13")],
+        );
+        let (graph, engine) = engine_for(g);
+
+        let result = get_symbol_info(&graph, &engine, f, false, false, None)
+            .await
+            .expect("symbol info");
+        assert_eq!(result.used_fallback, None);
+        assert_eq!(result.fallback_message, None);
+        // lines_of_code is derived from the inclusive line range (13 - 10 + 1).
+        assert_eq!(result.lines_of_code, 4);
+    }
+
+    #[tokio::test]
+    async fn get_symbol_info_reports_import_dependencies() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_node(&mut g, NodeType::Function, &[("name", "consumer")]);
+        let dep = add_node(&mut g, NodeType::Module, &[("name", "helpers")]);
+        edge(&mut g, f, dep, EdgeType::Imports);
+        let (graph, engine) = engine_for(g);
+
+        let result = get_symbol_info(&graph, &engine, f, true, false, None)
+            .await
+            .expect("symbol info");
+        assert_eq!(
+            result.dependencies.as_deref(),
+            Some(&["helpers".to_string()][..])
+        );
+    }
+
+    #[tokio::test]
+    async fn get_detailed_symbol_missing_node_returns_empty_shell() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let (graph, engine) = engine_for(g);
+        let result = get_detailed_symbol(&graph, &engine, 999, true, true, true, false, None).await;
+        assert!(result.symbol.is_none());
+        // Source/callers/callees are still requested but resolve to empty/None for a missing node.
+        assert!(result.source.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_detailed_symbol_includes_inline_source() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "withbody"), ("source", "fn withbody() {}")],
+        );
+        let (graph, engine) = engine_for(g);
+
+        let result = get_detailed_symbol(&graph, &engine, f, true, false, false, false, None).await;
+        assert!(result.symbol.is_some());
+        assert_eq!(result.source.as_deref(), Some("fn withbody() {}"));
+        // Callers/callees were not requested.
+        assert!(result.callers.is_none());
+        assert!(result.callees.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_detailed_symbol_omits_source_when_not_requested() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "withbody"), ("source", "fn withbody() {}")],
+        );
+        let (graph, engine) = engine_for(g);
+
+        let result = get_detailed_symbol(&graph, &engine, f, false, true, true, false, None).await;
+        assert!(result.source.is_none());
+        assert!(result.callers.is_some());
+        assert!(result.callees.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_detailed_symbol_fallback_uses_symbol_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_node(&mut g, NodeType::Function, &[("name", "nearest")]);
+        let (graph, engine) = engine_for(g);
+
+        let result =
+            get_detailed_symbol(&graph, &engine, f, false, false, false, true, Some(7)).await;
+        assert_eq!(result.used_fallback, Some(true));
+        assert_eq!(
+            result.fallback_message.as_deref(),
+            Some("No symbol at line 7. Using nearest symbol 'nearest' instead.")
+        );
+    }
+}

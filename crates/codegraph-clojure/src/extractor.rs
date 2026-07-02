@@ -57,24 +57,109 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        extract(source, Path::new(path), &ParserConfig::default()).expect("extract should succeed")
+    }
+
     #[test]
     fn test_extract_defn() {
-        let source = "(defn hello [] (println \"Hello, world!\"))";
-        let config = ParserConfig::default();
-        let result = extract(source, Path::new("test.clj"), &config);
-        assert!(result.is_ok());
-        let ir = result.unwrap();
+        let ir = extract_ok("(defn hello [] (println \"Hello, world!\"))", "test.clj");
         assert_eq!(ir.functions.len(), 1);
         assert_eq!(ir.functions[0].name, "hello");
     }
 
     #[test]
     fn test_extract_ns_require() {
-        let source = "(ns my.app (:require [clojure.string :as str]))";
-        let config = ParserConfig::default();
-        let result = extract(source, Path::new("test.clj"), &config);
-        assert!(result.is_ok());
-        let ir = result.unwrap();
+        let ir = extract_ok(
+            "(ns my.app (:require [clojure.string :as str]))",
+            "test.clj",
+        );
         assert!(ir.imports.iter().any(|i| i.imported == "clojure.string"));
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("(defn f [] 1)", "src/core.clj");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "core");
+        assert_eq!(module.language, "clojure");
+    }
+
+    #[test]
+    fn test_module_path_and_line_count() {
+        let source = "(defn a [] 1)\n(defn b [] 2)\n(defn c [] 3)";
+        let ir = extract_ok(source, "app/util.clj");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "app/util.clj");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_module_name_unknown_without_stem() {
+        // A path with no file stem falls back to "unknown".
+        let ir = extract_ok("(defn f [] 1)", "..");
+        assert_eq!(ir.module.expect("module").name, "unknown");
+    }
+
+    #[test]
+    fn test_extract_defprotocol_as_class() {
+        let ir = extract_ok("(defprotocol Animal (speak [this]))", "test.clj");
+        assert_eq!(ir.classes.len(), 1);
+        assert_eq!(ir.classes[0].name, "Animal");
+        assert!(ir.classes[0].is_interface);
+    }
+
+    #[test]
+    fn test_extract_defrecord_as_class() {
+        let ir = extract_ok("(defrecord Dog [name breed])", "test.clj");
+        assert_eq!(ir.classes.len(), 1);
+        assert_eq!(ir.classes[0].name, "Dog");
+        assert!(!ir.classes[0].is_interface);
+    }
+
+    #[test]
+    fn test_extract_calls_populated() {
+        let ir = extract_ok("(defn f [x] (helper x))", "test.clj");
+        assert!(ir
+            .calls
+            .iter()
+            .any(|c| c.caller == "f" && c.callee == "helper"));
+    }
+
+    #[test]
+    fn test_extract_mixed_entities() {
+        let source = "(ns my.app (:require [clojure.set :as set]))\n\
+             (defprotocol Shape (area [this]))\n\
+             (defn square [s] (* s s))";
+        let ir = extract_ok(source, "shapes.clj");
+        assert_eq!(ir.functions.len(), 1);
+        assert_eq!(ir.classes.len(), 1);
+        assert!(ir.imports.iter().any(|i| i.imported == "clojure.set"));
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "empty.clj");
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.module.is_some());
+    }
+
+    #[test]
+    fn test_comment_only_source_yields_no_entities() {
+        let ir = extract_ok("; just a comment\n;; another one", "c.clj");
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.imports.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let ir = extract_ok("(defn a [] 1)\n(defn b [] 2)", "m.clj");
+        let names: Vec<&str> = ir.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
     }
 }

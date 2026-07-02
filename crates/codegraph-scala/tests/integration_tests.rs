@@ -40,7 +40,9 @@ fn test_parse_sample_app_classes() {
         class_names
     );
     assert!(
-        class_names.iter().any(|n| n.contains("User") && !n.contains("UserService")),
+        class_names
+            .iter()
+            .any(|n| n.contains("User") && !n.contains("UserService")),
         "Should contain User class, found: {:?}",
         class_names
     );
@@ -160,22 +162,29 @@ fn test_parse_sample_app_complexity() {
     let mut found_complex = false;
     for func_id in &file_info.functions {
         let node = graph.get_node(*func_id).unwrap();
-        if let Some(codegraph::PropertyValue::Int(complexity)) =
-            node.properties.get("complexity")
-        {
+        if let Some(codegraph::PropertyValue::Int(complexity)) = node.properties.get("complexity") {
             if *complexity > 1 {
                 found_complex = true;
                 let name = node
                     .properties
                     .get("name")
-                    .and_then(|v| if let codegraph::PropertyValue::String(s) = v { Some(s.as_str()) } else { None })
+                    .and_then(|v| {
+                        if let codegraph::PropertyValue::String(s) = v {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or("?");
                 println!("Complex function: {} (complexity={})", name, complexity);
             }
         }
     }
 
-    assert!(found_complex, "Expected at least one function with complexity > 1");
+    assert!(
+        found_complex,
+        "Expected at least one function with complexity > 1"
+    );
 }
 
 #[test]

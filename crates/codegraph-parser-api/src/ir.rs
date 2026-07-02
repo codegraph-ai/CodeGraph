@@ -118,3 +118,136 @@ impl CodeIR {
         self.type_references.push(type_ref);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_references_count_toward_relationships() {
+        let mut ir = CodeIR::new(PathBuf::from("t.rs"));
+        assert_eq!(ir.relationship_count(), 0);
+        ir.add_type_reference(TypeReference::new("f", "Widget", 3));
+        assert_eq!(ir.type_references.len(), 1);
+        assert_eq!(ir.relationship_count(), 1);
+        assert_eq!(ir.type_references[0].type_name, "Widget");
+    }
+
+    #[test]
+    fn default_is_empty() {
+        let ir = CodeIR::default();
+        assert_eq!(ir.file_path, PathBuf::new());
+        assert_eq!(ir.entity_count(), 0);
+        assert_eq!(ir.relationship_count(), 0);
+    }
+
+    #[test]
+    fn new_sets_path_and_leaves_rest_empty() {
+        let ir = CodeIR::new(PathBuf::from("src/lib.rs"));
+        assert_eq!(ir.file_path, PathBuf::from("src/lib.rs"));
+        assert!(ir.module.is_none());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.calls.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.inheritance.is_empty());
+        assert!(ir.implementations.is_empty());
+        assert!(ir.type_references.is_empty());
+        assert_eq!(ir.entity_count(), 0);
+        assert_eq!(ir.relationship_count(), 0);
+    }
+
+    #[test]
+    fn set_module_counts_as_one_entity() {
+        let mut ir = CodeIR::new(PathBuf::from("m.rs"));
+        assert_eq!(ir.entity_count(), 0);
+        ir.set_module(ModuleEntity::new("m", "m.rs", "rust"));
+        assert!(ir.module.is_some());
+        assert_eq!(ir.entity_count(), 1);
+        assert_eq!(ir.relationship_count(), 0);
+    }
+
+    #[test]
+    fn add_entities_increment_entity_count() {
+        let mut ir = CodeIR::new(PathBuf::from("e.rs"));
+        ir.set_module(ModuleEntity::new("e", "e.rs", "rust"));
+        ir.add_function(FunctionEntity::new("f", 1, 2));
+        ir.add_class(ClassEntity::new("C", 3, 4));
+        ir.add_trait(TraitEntity::new("T", 5, 6));
+        assert_eq!(ir.functions.len(), 1);
+        assert_eq!(ir.classes.len(), 1);
+        assert_eq!(ir.traits.len(), 1);
+        // module + function + class + trait
+        assert_eq!(ir.entity_count(), 4);
+        assert_eq!(ir.relationship_count(), 0);
+    }
+
+    #[test]
+    fn add_relationships_increment_relationship_count() {
+        let mut ir = CodeIR::new(PathBuf::from("r.rs"));
+        ir.add_call(CallRelation::new("a", "b", 1));
+        ir.add_import(ImportRelation::new("a", "std::io"));
+        ir.add_inheritance(InheritanceRelation::new("Child", "Parent"));
+        ir.add_implementation(ImplementationRelation::new("S", "Trait"));
+        ir.add_type_reference(TypeReference::new("f", "Widget", 9));
+        assert_eq!(ir.calls.len(), 1);
+        assert_eq!(ir.imports.len(), 1);
+        assert_eq!(ir.inheritance.len(), 1);
+        assert_eq!(ir.implementations.len(), 1);
+        assert_eq!(ir.type_references.len(), 1);
+        assert_eq!(ir.relationship_count(), 5);
+        assert_eq!(ir.entity_count(), 0);
+    }
+
+    #[test]
+    fn add_methods_append_in_order() {
+        let mut ir = CodeIR::new(PathBuf::from("o.rs"));
+        ir.add_function(FunctionEntity::new("first", 1, 1));
+        ir.add_function(FunctionEntity::new("second", 2, 2));
+        assert_eq!(ir.functions[0].name, "first");
+        assert_eq!(ir.functions[1].name, "second");
+    }
+
+    #[test]
+    fn clone_is_an_independent_deep_copy() {
+        let mut original = CodeIR::new(PathBuf::from("c.rs"));
+        original.set_module(ModuleEntity::new("c", "c.rs", "rust"));
+        original.add_function(FunctionEntity::new("f", 1, 2));
+        original.add_call(CallRelation::new("a", "b", 1));
+
+        let mut cloned = original.clone();
+        // The clone starts out equal to the original.
+        assert_eq!(cloned.file_path, PathBuf::from("c.rs"));
+        assert_eq!(cloned.entity_count(), 2);
+        assert_eq!(cloned.relationship_count(), 1);
+
+        // Mutating the clone must not affect the original (deep, not shared).
+        cloned.add_function(FunctionEntity::new("g", 3, 4));
+        cloned.add_call(CallRelation::new("c", "d", 2));
+        assert_eq!(cloned.entity_count(), 3);
+        assert_eq!(cloned.relationship_count(), 2);
+        assert_eq!(original.entity_count(), 2);
+        assert_eq!(original.relationship_count(), 1);
+        assert_eq!(original.functions.len(), 1);
+        assert_eq!(original.calls.len(), 1);
+    }
+
+    #[test]
+    fn clone_preserves_module_presence() {
+        // A module-less IR clones to a module-less IR (the None arm of the Option).
+        let without = CodeIR::new(PathBuf::from("n.rs"));
+        assert!(without.clone().module.is_none());
+
+        // A populated module survives the clone with its fields intact.
+        let mut with = CodeIR::new(PathBuf::from("y.rs"));
+        with.set_module(ModuleEntity::new("mod_y", "y.rs", "rust"));
+        let cloned = with.clone();
+        assert_eq!(cloned.entity_count(), 1);
+        let module = cloned
+            .module
+            .as_ref()
+            .expect("cloned module should be present");
+        assert_eq!(module.name, "mod_y");
+    }
+}

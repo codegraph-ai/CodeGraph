@@ -702,4 +702,249 @@ mod tests {
             func_node.properties.get("is_async")
         );
     }
+
+    #[test]
+    fn test_ir_to_graph_fallback_file_node() {
+        use codegraph::PropertyValue;
+        // No module set -> file node is derived from the path stem, language "kotlin"
+        let ir = CodeIR::new(PathBuf::from("com/example/Widget.kt"));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(
+            &ir,
+            &mut graph,
+            PathBuf::from("com/example/Widget.kt").as_path(),
+        )
+        .unwrap();
+
+        let file_node = graph.get_node(file_info.file_id).unwrap();
+        assert_eq!(
+            file_node.properties.get("name"),
+            Some(&PropertyValue::String("Widget".to_string()))
+        );
+        assert_eq!(
+            file_node.properties.get("language"),
+            Some(&PropertyValue::String("kotlin".to_string()))
+        );
+        // Fallback path has no module, so line_count is 0
+        assert_eq!(file_info.line_count, 0);
+    }
+
+    #[test]
+    fn test_ir_to_graph_complexity_props() {
+        use codegraph::PropertyValue;
+        use codegraph_parser_api::ComplexityMetrics;
+
+        let mut metrics = ComplexityMetrics::new().with_branches(3).with_loops(1);
+        metrics.calculate_cyclomatic(); // 1 + 3 + 1 = 5
+
+        let mut ir = CodeIR::new(PathBuf::from("Test.kt"));
+        ir.add_function(FunctionEntity::new("compute", 1, 20).with_complexity(metrics));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.kt").as_path()).unwrap();
+
+        let node = graph.get_node(file_info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("complexity"),
+            Some(&PropertyValue::Int(5))
+        );
+        assert_eq!(
+            node.properties.get("complexity_branches"),
+            Some(&PropertyValue::Int(3))
+        );
+        assert_eq!(
+            node.properties.get("complexity_loops"),
+            Some(&PropertyValue::Int(1))
+        );
+        // Grade for CC=5 is 'A'
+        assert_eq!(
+            node.properties.get("complexity_grade"),
+            Some(&PropertyValue::String("A".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_import_edge_props() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.kt"));
+        ir.add_import(
+            ImportRelation::new("default", "java.util.List")
+                .with_alias("L")
+                .wildcard()
+                .with_symbols(vec!["List".to_string(), "ArrayList".to_string()]),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.kt").as_path()).unwrap();
+
+        let edges = graph
+            .get_edges_between(file_info.file_id, file_info.imports[0])
+            .unwrap();
+        assert!(!edges.is_empty(), "Should have an Imports edge");
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert_eq!(
+            edge.properties.get("alias"),
+            Some(&PropertyValue::String("L".to_string()))
+        );
+        assert_eq!(
+            edge.properties.get("is_wildcard"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+        assert!(matches!(
+            edge.properties.get("symbols"),
+            Some(PropertyValue::StringList(_))
+        ));
+    }
+
+    #[test]
+    fn test_ir_to_graph_import_node_dedup() {
+        // Two imports of the same module reuse a single Module node.
+        let mut ir = CodeIR::new(PathBuf::from("Test.kt"));
+        ir.add_import(ImportRelation::new("default", "kotlin.collections.List"));
+        ir.add_import(ImportRelation::new("default", "kotlin.collections.List"));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.kt").as_path()).unwrap();
+
+        // Both imports are recorded...
+        assert_eq!(file_info.imports.len(), 2);
+        // ...but they point at the same underlying node id.
+        assert_eq!(file_info.imports[0], file_info.imports[1]);
+    }
+
+    #[test]
+    fn test_ir_to_graph_method_props_and_containment() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.kt"));
+        let mut class = ClassEntity::new("Calc", 1, 10);
+        class
+            .methods
+            .push(FunctionEntity::new("add", 2, 4).with_visibility("public"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.kt").as_path()).unwrap();
+
+        let class_id = file_info.classes[0];
+        let method_id = file_info.functions[0];
+
+        let method_node = graph.get_node(method_id).unwrap();
+        // Method name is qualified as "Class.method"
+        assert_eq!(
+            method_node.properties.get("name"),
+            Some(&PropertyValue::String("Calc.add".to_string()))
+        );
+        assert_eq!(
+            method_node.properties.get("is_method"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+        assert_eq!(
+            method_node.properties.get("parent_class"),
+            Some(&PropertyValue::String("Calc".to_string()))
+        );
+
+        // Class contains the method
+        let edges = graph.get_edges_between(class_id, method_id).unwrap();
+        assert!(!edges.is_empty(), "Class should contain the method");
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_interface_required_methods() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.kt"));
+        let trait_entity = TraitEntity::new("Comparable", 1, 5).with_methods(vec![
+            FunctionEntity::new("compareTo", 2, 2),
+            FunctionEntity::new("equals", 3, 3),
+        ]);
+        ir.add_trait(trait_entity);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.kt").as_path()).unwrap();
+
+        let iface_node = graph.get_node(file_info.traits[0]).unwrap();
+        match iface_node.properties.get("required_methods") {
+            Some(PropertyValue::StringList(list)) => {
+                assert!(list.contains(&"compareTo".to_string()));
+                assert!(list.contains(&"equals".to_string()));
+            }
+            other => panic!("required_methods should be a StringList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ir_to_graph_class_type_parameters() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.kt"));
+        ir.add_class(
+            ClassEntity::new("Box", 1, 10)
+                .with_type_parameters(vec!["T".to_string(), "R".to_string()]),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.kt").as_path()).unwrap();
+
+        let class_node = graph.get_node(file_info.classes[0]).unwrap();
+        match class_node.properties.get("type_parameters") {
+            Some(PropertyValue::StringList(list)) => {
+                assert!(list.contains(&"T".to_string()));
+                assert!(list.contains(&"R".to_string()));
+            }
+            other => panic!("type_parameters should be a StringList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ir_to_graph_function_doc_and_return_type() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(PathBuf::from("Test.kt"));
+        ir.add_function(
+            FunctionEntity::new("greet", 1, 5)
+                .with_doc("Says hello")
+                .with_return_type("String"),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.kt").as_path()).unwrap();
+
+        let node = graph.get_node(file_info.functions[0]).unwrap();
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("Says hello".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("return_type"),
+            Some(&PropertyValue::String("String".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_inheritance_order_prop() {
+        use codegraph::PropertyValue;
+        use codegraph_parser_api::InheritanceRelation;
+
+        let mut ir = CodeIR::new(PathBuf::from("Test.kt"));
+        ir.add_class(ClassEntity::new("Base", 1, 10));
+        ir.add_class(ClassEntity::new("Derived", 12, 25));
+        ir.add_inheritance(InheritanceRelation::new("Derived", "Base"));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.kt").as_path()).unwrap();
+
+        let derived_id = file_info.classes[1];
+        let base_id = file_info.classes[0];
+        let edges = graph.get_edges_between(derived_id, base_id).unwrap();
+        assert!(!edges.is_empty(), "Should have an Extends edge");
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Extends);
+        assert_eq!(
+            edge.properties.get("order"),
+            Some(&PropertyValue::Int(0)),
+            "default inheritance order should be 0"
+        );
+    }
 }

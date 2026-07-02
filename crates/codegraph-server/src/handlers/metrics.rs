@@ -119,7 +119,88 @@ impl CodeGraphBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_query::QueryEngine;
     use crate::domain::complexity::{complexity_grade, file_grade};
+    use codegraph::CodeGraph;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// Create a test backend with an in-memory graph and empty symbol index.
+    async fn create_test_backend() -> CodeGraphBackend {
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("Failed to create in-memory graph"),
+        ));
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        CodeGraphBackend::new_for_test(graph, query_engine)
+    }
+
+    #[tokio::test]
+    async fn test_get_file_node_ids_invalid_uri() {
+        let backend = create_test_backend().await;
+        let graph = backend.graph.read().await;
+        // A string that is not a parseable URL fails at Url::parse.
+        let err = backend
+            .get_file_node_ids(&graph, "not a valid uri")
+            .expect_err("expected invalid params for unparseable URI");
+        assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_node_ids_non_file_scheme() {
+        let backend = create_test_backend().await;
+        let graph = backend.graph.read().await;
+        // A well-formed but non-file URL parses, then fails at to_file_path.
+        let err = backend
+            .get_file_node_ids(&graph, "http://example.com/foo.rs")
+            .expect_err("expected invalid params for non-file scheme");
+        assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_node_ids_valid_uri_empty_index() {
+        let backend = create_test_backend().await;
+        let graph = backend.graph.read().await;
+        // Valid file URI, but the symbol index has no entries for it.
+        let ids = backend
+            .get_file_node_ids(&graph, "file:///tmp/does_not_exist.rs")
+            .expect("valid file URI should resolve");
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_analyze_complexity_empty_file() {
+        let backend = create_test_backend().await;
+        // No symbols indexed -> no functions -> zeroed summary with default grade.
+        let resp = backend
+            .handle_analyze_complexity(ComplexityParams {
+                uri: "file:///tmp/does_not_exist.rs".to_string(),
+                line: None,
+                threshold: None,
+                include_metrics: None,
+            })
+            .await
+            .expect("empty-file analysis should succeed");
+        assert!(resp.functions.is_empty());
+        assert_eq!(resp.file_summary.total_functions, 0);
+        assert_eq!(resp.file_summary.max_complexity, 0);
+        assert_eq!(resp.file_summary.functions_above_threshold, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_analyze_complexity_invalid_uri_propagates_error() {
+        let backend = create_test_backend().await;
+        // The handler surfaces get_file_node_ids' invalid-params error.
+        let err = backend
+            .handle_analyze_complexity(ComplexityParams {
+                uri: "http://example.com/foo.rs".to_string(),
+                line: None,
+                threshold: Some(5),
+                include_metrics: Some(true),
+            })
+            .await
+            .expect_err("non-file URI should fail");
+        assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+    }
 
     #[test]
     fn test_complexity_grade() {

@@ -76,6 +76,11 @@ fn extract_module_name(root: tree_sitter::Node, source: &[u8]) -> Option<String>
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        let config = ParserConfig::default();
+        extract(source, Path::new(path), &config).expect("extract should succeed")
+    }
+
     #[test]
     fn test_extract_simple_function() {
         let source =
@@ -87,6 +92,109 @@ mod tests {
         let ir = result.unwrap();
         let greet = ir.functions.iter().find(|f| f.name == "greet");
         assert!(greet.is_some(), "greet function not found");
+    }
+
+    #[test]
+    fn test_module_name_from_header() {
+        // The header's `module` name takes precedence over the file stem.
+        let ir = extract_ok("module Data.Widget where\nx = 1\n", "test.hs");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "Data.Widget");
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem_when_no_header() {
+        // Without a `module ... where` header, the file stem is used.
+        let ir = extract_ok("x = 1\n", "Widget.hs");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "Widget");
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        // No header and a path with no file_stem falls back to "unknown".
+        let ir = extract_ok("x = 1\n", "..");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_module_metadata() {
+        let source = "module M where\nx = 1\ny = 2\n";
+        let ir = extract_ok(source, "src/M.hs");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "src/M.hs");
+        assert_eq!(module.language, "haskell");
+        assert_eq!(module.line_count, 3);
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "Empty.hs");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let ir = extract_ok("-- just a comment\n", "Comment.hs");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+    }
+
+    #[test]
+    fn test_import_flows_into_ir() {
+        let ir = extract_ok("module M where\nimport Data.Text (Text)\n", "test.hs");
+        assert_eq!(ir.imports.len(), 1);
+        assert_eq!(ir.imports[0].imported, "Data.Text");
+    }
+
+    #[test]
+    fn test_data_type_flows_into_classes() {
+        let ir = extract_ok(
+            "module M where\ndata Color = Red | Green | Blue\n",
+            "test.hs",
+        );
+        assert!(ir.classes.iter().any(|c| c.name == "Color"));
+    }
+
+    #[test]
+    fn test_typeclass_flows_into_classes() {
+        let source = "module M where\nclass Greet a where\n  greet :: a -> String\n";
+        let ir = extract_ok(source, "test.hs");
+        assert!(ir.classes.iter().any(|c| c.name == "Greet"));
+    }
+
+    #[test]
+    fn test_calls_populated_via_function_application() {
+        // A function whose body applies another function records a call relation.
+        let source = "module M where\nhelper x = x\ncaller y = helper y\n";
+        let ir = extract_ok(source, "test.hs");
+        assert!(
+            ir.calls
+                .iter()
+                .any(|c| c.caller == "caller" && c.callee == "helper"),
+            "expected caller->helper call, got {:?}",
+            ir.calls
+        );
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = "module M where\nfoo x = x\nbar y = y\nbaz z = z\n";
+        let ir = extract_ok(source, "test.hs");
+        for name in ["foo", "bar", "baz"] {
+            assert!(
+                ir.functions.iter().any(|f| f.name == name),
+                "{name} not found"
+            );
+        }
     }
 
     #[test]

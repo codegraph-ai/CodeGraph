@@ -314,3 +314,247 @@ pub trait CodeParser: Send + Sync {
     /// Clears accumulated metrics. Useful for benchmarking.
     fn reset_metrics(&mut self);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_info(path: &str, funcs: usize, classes: usize, traits: usize) -> FileInfo {
+        FileInfo {
+            file_path: PathBuf::from(path),
+            file_id: 0,
+            functions: (0..funcs as u64).collect(),
+            classes: (0..classes as u64).collect(),
+            traits: (0..traits as u64).collect(),
+            imports: Vec::new(),
+            parse_time: Duration::from_secs(1),
+            line_count: 10,
+            byte_count: 100,
+        }
+    }
+
+    #[test]
+    fn file_info_entity_count_sums_funcs_classes_traits() {
+        let info = file_info("a.rs", 3, 2, 1);
+        assert_eq!(info.entity_count(), 6);
+    }
+
+    #[test]
+    fn file_info_entity_count_ignores_imports() {
+        let mut info = file_info("a.rs", 1, 0, 0);
+        info.imports = vec![1, 2, 3];
+        assert_eq!(info.entity_count(), 1);
+    }
+
+    #[test]
+    fn file_info_serde_round_trip_truncates_subsecond() {
+        let mut info = file_info("src/lib.rs", 2, 1, 0);
+        info.parse_time = Duration::from_millis(1500);
+        let json = serde_json::to_string(&info).unwrap();
+        let back: FileInfo = serde_json::from_str(&json).unwrap();
+        // duration_serde stores whole seconds only
+        assert_eq!(back.parse_time, Duration::from_secs(1));
+        assert_eq!(back.file_path, info.file_path);
+        assert_eq!(back.functions, info.functions);
+    }
+
+    fn project_info(ok: usize, failed: usize) -> ProjectInfo {
+        ProjectInfo {
+            files: (0..ok)
+                .map(|i| file_info(&format!("ok{i}.rs"), 1, 0, 0))
+                .collect(),
+            total_functions: ok,
+            total_classes: 0,
+            total_parse_time: Duration::from_secs(ok as u64),
+            failed_files: (0..failed)
+                .map(|i| (PathBuf::from(format!("bad{i}.rs")), "boom".to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn project_total_files_counts_success_and_failure() {
+        let p = project_info(3, 2);
+        assert_eq!(p.total_files(), 5);
+    }
+
+    #[test]
+    fn project_success_rate_empty_is_zero() {
+        let p = project_info(0, 0);
+        assert_eq!(p.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn project_success_rate_partial() {
+        let p = project_info(3, 1);
+        assert_eq!(p.success_rate(), 0.75);
+    }
+
+    #[test]
+    fn project_avg_parse_time_empty_is_zero() {
+        let p = project_info(0, 0);
+        assert_eq!(p.avg_parse_time(), Duration::ZERO);
+    }
+
+    #[test]
+    fn project_avg_parse_time_divides_by_file_count() {
+        let mut p = project_info(2, 0);
+        p.total_parse_time = Duration::from_secs(10);
+        assert_eq!(p.avg_parse_time(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn project_info_serde_round_trip() {
+        let p = project_info(1, 1);
+        let json = serde_json::to_string(&p).unwrap();
+        let back: ProjectInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_files(), 2);
+        assert_eq!(back.failed_files, p.failed_files);
+    }
+
+    /// Minimal parser exercising the trait's default methods. `parse_file`
+    /// succeeds unless the path stem contains "fail", in which case it errors.
+    struct StubParser {
+        config: ParserConfig,
+        exts: Vec<&'static str>,
+    }
+
+    impl StubParser {
+        fn new() -> Self {
+            Self {
+                config: ParserConfig::default(),
+                exts: vec![".rs"],
+            }
+        }
+    }
+
+    impl CodeParser for StubParser {
+        fn language(&self) -> &str {
+            "stub"
+        }
+
+        fn file_extensions(&self) -> &[&str] {
+            &self.exts
+        }
+
+        fn parse_file(&self, path: &Path, _graph: &mut CodeGraph) -> Result<FileInfo, ParserError> {
+            if path.to_string_lossy().contains("fail") {
+                return Err(ParserError::ParseError(
+                    path.to_path_buf(),
+                    "stub failure".to_string(),
+                ));
+            }
+            Ok(file_info(&path.to_string_lossy(), 2, 1, 0))
+        }
+
+        fn parse_source(
+            &self,
+            _source: &str,
+            file_path: &Path,
+            graph: &mut CodeGraph,
+        ) -> Result<FileInfo, ParserError> {
+            self.parse_file(file_path, graph)
+        }
+
+        fn config(&self) -> &ParserConfig {
+            &self.config
+        }
+
+        fn metrics(&self) -> ParserMetrics {
+            ParserMetrics::default()
+        }
+
+        fn reset_metrics(&mut self) {}
+    }
+
+    #[test]
+    fn can_parse_matches_extension() {
+        let p = StubParser::new();
+        assert!(p.can_parse(Path::new("foo.rs")));
+        assert!(!p.can_parse(Path::new("foo.py")));
+        assert!(!p.can_parse(Path::new("noext")));
+    }
+
+    #[test]
+    fn parse_files_aggregates_success_and_failure() {
+        let p = StubParser::new();
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let paths = vec![
+            PathBuf::from("a.rs"),
+            PathBuf::from("b.rs"),
+            PathBuf::from("fail.rs"),
+        ];
+        let info = p.parse_files(&paths, &mut graph).unwrap();
+        assert_eq!(info.files.len(), 2);
+        assert_eq!(info.failed_files.len(), 1);
+        // each stub success reports 2 functions, 1 class
+        assert_eq!(info.total_functions, 4);
+        assert_eq!(info.total_classes, 2);
+        assert_eq!(info.total_parse_time, Duration::from_secs(2));
+        assert_eq!(info.total_files(), 3);
+        assert_eq!(info.failed_files[0].0, PathBuf::from("fail.rs"));
+    }
+
+    #[test]
+    fn parse_files_empty_input_yields_empty_project() {
+        let p = StubParser::new();
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = p.parse_files(&[], &mut graph).unwrap();
+        assert_eq!(info.total_files(), 0);
+        assert_eq!(info.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn discover_files_walks_recursively_and_filters_by_extension() {
+        // The crate's own src/ tree is a stable real directory with nested .rs files.
+        let p = StubParser::new();
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let found = p.discover_files(&src).unwrap();
+        assert!(!found.is_empty(), "expected to find .rs files under src/");
+        assert!(found.iter().all(|f| f.extension().unwrap() == "rs"));
+        // recursion reaches nested modules (relationships/, entities/)
+        assert!(found
+            .iter()
+            .any(|f| f.components().any(|c| c.as_os_str() == "relationships")));
+    }
+
+    #[test]
+    fn discover_files_nonexistent_dir_is_empty() {
+        let p = StubParser::new();
+        let found = p
+            .discover_files(Path::new("/no/such/codegraph/dir"))
+            .unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn discover_files_no_matching_extension_is_empty() {
+        // Restrict to an extension the crate source never uses.
+        let p = StubParser {
+            config: ParserConfig::default(),
+            exts: vec![".zzz"],
+        };
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let found = p.discover_files(&src).unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn parse_directory_discovers_then_parses() {
+        let p = StubParser::new();
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let info = p.parse_directory(&src, &mut graph).unwrap();
+        // every discovered .rs file parses (none contain "fail")
+        assert!(info.files.len() > 3);
+        assert!(info.failed_files.is_empty());
+        assert_eq!(info.success_rate(), 1.0);
+    }
+
+    #[test]
+    fn language_and_extensions_report_configured_values() {
+        let p = StubParser::new();
+        assert_eq!(p.language(), "stub");
+        assert_eq!(p.file_extensions(), &[".rs"]);
+    }
+}

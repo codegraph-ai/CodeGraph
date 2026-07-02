@@ -390,3 +390,389 @@ fn regex_match(pattern: &str, text: &str) -> bool {
         text.contains(pattern)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{CodeGraph, EdgeType, PropertyMap};
+    use std::collections::HashSet;
+
+    /// Build a small two-file graph and return (graph, main.rs id, processData id).
+    fn build_graph() -> (CodeGraph, NodeId, NodeId) {
+        let mut g = CodeGraph::in_memory().unwrap();
+
+        let main = g
+            .add_node(
+                NodeType::CodeFile,
+                PropertyMap::new().with("path", "src/main.rs"),
+            )
+            .unwrap();
+        let f1 = g
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new()
+                    .with("name", "processData")
+                    .with("visibility", "public")
+                    .with("line_start", 10i64)
+                    .with("line_end", 80i64),
+            )
+            .unwrap();
+        let f2 = g
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new()
+                    .with("name", "helper")
+                    .with("visibility", "private")
+                    .with("line_start", 90i64)
+                    .with("line_end", 95i64),
+            )
+            .unwrap();
+        let widget = g
+            .add_node(NodeType::Class, PropertyMap::new().with("name", "Widget"))
+            .unwrap();
+        g.add_edge(main, f1, EdgeType::Contains, PropertyMap::new())
+            .unwrap();
+        g.add_edge(main, f2, EdgeType::Contains, PropertyMap::new())
+            .unwrap();
+        g.add_edge(main, widget, EdgeType::Contains, PropertyMap::new())
+            .unwrap();
+
+        let lib = g
+            .add_node(
+                NodeType::CodeFile,
+                PropertyMap::new().with("path", "src/lib.rs"),
+            )
+            .unwrap();
+        let f3 = g
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new().with("name", "libFunc"),
+            )
+            .unwrap();
+        g.add_edge(lib, f3, EdgeType::Contains, PropertyMap::new())
+            .unwrap();
+
+        (g, main, f1)
+    }
+
+    fn as_set(ids: Vec<NodeId>) -> HashSet<NodeId> {
+        ids.into_iter().collect()
+    }
+
+    #[test]
+    fn node_type_filter_matches_all_functions() {
+        let (g, _, _) = build_graph();
+        let results = g.query().node_type(NodeType::Function).execute().unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn in_file_restricts_to_that_files_children() {
+        let (g, _, f1) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .in_file("src/main.rs")
+            .execute()
+            .unwrap();
+        let set = as_set(results);
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&f1));
+    }
+
+    #[test]
+    fn in_file_unknown_path_returns_empty() {
+        let (g, _, _) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .in_file("src/missing.rs")
+            .execute()
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn property_exact_match() {
+        let (g, _, f1) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("visibility", "public")
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![f1]);
+    }
+
+    #[test]
+    fn property_int_exact_match() {
+        // f1 has line_start=10, f2 has line_start=90 - the Int==Int arm.
+        let (g, _, f1) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("line_start", 10i64)
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![f1]);
+    }
+
+    #[test]
+    fn property_float_exact_match() {
+        // Exercises the Float==Float arm (epsilon comparison).
+        let mut g = CodeGraph::in_memory().unwrap();
+        let hit = g
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new().with("name", "a").with("score", 0.5f64),
+            )
+            .unwrap();
+        g.add_node(
+            NodeType::Function,
+            PropertyMap::new().with("name", "b").with("score", 0.75f64),
+        )
+        .unwrap();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("score", 0.5f64)
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![hit]);
+    }
+
+    #[test]
+    fn property_bool_exact_match() {
+        // Exercises the Bool==Bool arm.
+        let mut g = CodeGraph::in_memory().unwrap();
+        let hit = g
+            .add_node(
+                NodeType::Function,
+                PropertyMap::new().with("name", "a").with("async", true),
+            )
+            .unwrap();
+        g.add_node(
+            NodeType::Function,
+            PropertyMap::new().with("name", "b").with("async", false),
+        )
+        .unwrap();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("async", true)
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![hit]);
+    }
+
+    #[test]
+    fn property_type_mismatch_returns_no_match() {
+        // Querying an Int-valued property with a String filter hits the
+        // catch-all `_ => false` arm - present key, incompatible type.
+        let (g, _, _) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property("line_start", "10")
+            .execute()
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn property_exists_ignores_value() {
+        let (g, _, _) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .property_exists("visibility")
+            .execute()
+            .unwrap();
+        // Only f1 and f2 carry a visibility property; f3 does not.
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn name_contains_is_case_insensitive() {
+        let (g, _, f1) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .name_contains("PROCESS")
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![f1]);
+    }
+
+    #[test]
+    fn name_matches_anchors_and_ends() {
+        let (g, _, f1) = build_graph();
+        let starts = g
+            .query()
+            .node_type(NodeType::Function)
+            .name_matches("^lib")
+            .execute()
+            .unwrap();
+        assert_eq!(starts.len(), 1);
+
+        let ends = g
+            .query()
+            .node_type(NodeType::Function)
+            .name_matches("Data$")
+            .execute()
+            .unwrap();
+        assert_eq!(ends, vec![f1]);
+    }
+
+    #[test]
+    fn custom_predicate_filters_by_line_span() {
+        let (g, _, f1) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .custom(|node| {
+                if let (Some(start), Some(end)) = (
+                    node.properties.get_int("line_start"),
+                    node.properties.get_int("line_end"),
+                ) {
+                    (end - start) > 50
+                } else {
+                    false
+                }
+            })
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![f1]);
+    }
+
+    #[test]
+    fn limit_truncates_results() {
+        let (g, _, _) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .limit(1)
+            .execute()
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn file_pattern_matches_both_source_files() {
+        let (g, _, _) = build_graph();
+        let star = g.query().file_pattern("src/*.rs").execute().unwrap();
+        assert_eq!(star.len(), 2);
+
+        let recursive = g.query().file_pattern("**/*.rs").execute().unwrap();
+        assert_eq!(recursive.len(), 2);
+    }
+
+    #[test]
+    fn count_matches_execute_length() {
+        let (g, _, _) = build_graph();
+        let q = g.query().node_type(NodeType::Function);
+        let count = q.count().unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn exists_short_circuits() {
+        let (g, _, _) = build_graph();
+        assert!(g.query().node_type(NodeType::Class).exists().unwrap());
+        assert!(!g
+            .query()
+            .node_type(NodeType::Function)
+            .property("name", "nope")
+            .exists()
+            .unwrap());
+    }
+
+    #[test]
+    fn combined_filters_are_conjunctive() {
+        let (g, _, f1) = build_graph();
+        let results = g
+            .query()
+            .node_type(NodeType::Function)
+            .in_file("src/main.rs")
+            .property("visibility", "public")
+            .execute()
+            .unwrap();
+        assert_eq!(results, vec![f1]);
+    }
+
+    #[test]
+    fn glob_match_exact_and_wildcards() {
+        assert!(glob_match("src/main.rs", "src/main.rs"));
+        assert!(!glob_match("src/main.rs", "src/lib.rs"));
+        assert!(glob_match("src/*.rs", "src/main.rs"));
+        assert!(!glob_match("src/*.rs", "tests/main.rs"));
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(!glob_match("*.py", "main.rs"));
+    }
+
+    #[test]
+    fn glob_match_double_star_directories() {
+        assert!(glob_match("**/*.rs", "src/deep/nested/main.rs"));
+        assert!(glob_match("src/**", "src/a/b.rs"));
+        assert!(!glob_match("tests/**", "src/a/b.rs"));
+    }
+
+    #[test]
+    fn glob_match_double_star_recurses_into_bare_filename() {
+        // "**/*.rs" splits on "**" into ["", "/*.rs"]; the suffix "*.rs"
+        // still contains '*', so glob_match recurses on the filename. When the
+        // path has no '/', it recurses on the whole path (the else branch of
+        // the rfind('/') lookup) rather than a trailing segment.
+        assert!(glob_match("**/*.rs", "main.rs"));
+        assert!(!glob_match("**/*.py", "main.rs"));
+    }
+
+    #[test]
+    fn glob_match_double_star_with_literal_suffix() {
+        // A "**" pattern whose suffix has no wildcard takes the simple
+        // ends_with path (not the recursive branch): prefix must match the
+        // start, suffix must match the end.
+        assert!(glob_match("src/**/util.rs", "src/a/b/util.rs"));
+        assert!(!glob_match("src/**/util.rs", "src/a/b/other.rs"));
+        // Prefix mismatch fails before the suffix is even consulted.
+        assert!(!glob_match("src/**/util.rs", "lib/a/util.rs"));
+    }
+
+    #[test]
+    fn glob_match_bare_double_star_matches_everything() {
+        // "**" -> ["", ""]: empty prefix and empty suffix, so every path
+        // passes through to the `return true` at the end of the ** block.
+        assert!(glob_match("**", "any/deeply/nested/path.rs"));
+        assert!(glob_match("**", "flat.rs"));
+    }
+
+    #[test]
+    fn glob_match_multiple_double_stars_fall_through_to_wildcards() {
+        // Three-way split on "**" (["", "a", ""]) has len != 2, so the **
+        // fast path is skipped and the generic '*' matcher runs instead,
+        // treating "a" as a required middle literal.
+        assert!(glob_match("**a**", "xax"));
+        assert!(!glob_match("**a**", "xyz"));
+    }
+
+    #[test]
+    fn glob_match_middle_wildcard_segment() {
+        // A three-part '*' split ("src", "util", "rs") exercises the middle
+        // branch: "util" must appear in order between the anchored ends, and a
+        // missing middle literal returns false.
+        assert!(glob_match("src*util*rs", "src/x/util/y.rs"));
+        assert!(!glob_match("src*zzz*rs", "src/x/util/y.rs"));
+    }
+
+    #[test]
+    fn regex_match_anchors() {
+        assert!(regex_match("^process", "processData"));
+        assert!(!regex_match("^Data", "processData"));
+        assert!(regex_match("Data$", "processData"));
+        assert!(!regex_match("process$", "processData"));
+        assert!(regex_match("^processData$", "processData"));
+        assert!(!regex_match("^process$", "processData"));
+        assert!(regex_match("cess", "processData"));
+        assert!(!regex_match("xyz", "processData"));
+    }
+}

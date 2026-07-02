@@ -192,7 +192,10 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create a new MemoryManager
     pub fn new(extension_path: Option<PathBuf>) -> Self {
-        Self::with_model(extension_path, codegraph_memory::EmbeddingBackend::default())
+        Self::with_model(
+            extension_path,
+            codegraph_memory::EmbeddingBackend::default(),
+        )
     }
 
     /// Create a new MemoryManager with a specific embedding backend
@@ -633,8 +636,90 @@ mod tests {
     }
 
     #[test]
+    fn project_slug_has_base_and_4hex_suffix() {
+        // Non-existent path: canonicalize fails and the raw path is used, so the
+        // slug is deterministic and derived from the final component.
+        let slug = project_slug(Path::new("/tmp/codegraph-slug-target/MyApp"));
+        let parts: Vec<&str> = slug.rsplitn(2, '-').collect();
+        assert_eq!(parts.len(), 2, "slug must contain a '-' separator: {slug}");
+        assert_eq!(parts[0].len(), 4, "hash suffix must be 4 chars: {slug}");
+        assert!(
+            parts[0].chars().all(|c| c.is_ascii_hexdigit()),
+            "hash suffix must be hex: {slug}"
+        );
+        assert!(
+            parts[1].starts_with("myapp"),
+            "base must be lowercased dir name: {slug}"
+        );
+    }
+
+    #[test]
+    fn project_slug_replaces_non_alphanumerics_with_dash() {
+        // The '!' in the final component must become '-' in the slug base.
+        let slug = project_slug(Path::new("/tmp/codegraph-slug-target/My App!"));
+        let base = slug.rsplit_once('-').unwrap().0;
+        assert!(!base.contains(' '), "space must be replaced: {slug}");
+        assert!(!base.contains('!'), "'!' must be replaced: {slug}");
+        assert!(base.starts_with("my-app"), "unexpected base: {slug}");
+    }
+
+    #[test]
+    fn project_slug_is_deterministic_and_path_sensitive() {
+        let a1 = project_slug(Path::new("/tmp/codegraph-slug-target/alpha"));
+        let a2 = project_slug(Path::new("/tmp/codegraph-slug-target/alpha"));
+        let b = project_slug(Path::new("/tmp/codegraph-slug-target/beta"));
+        assert_eq!(a1, a2, "same path must yield same slug");
+        assert_ne!(a1, b, "different paths must yield different slugs");
+    }
+
+    #[test]
+    fn is_ephemeral_slug_matches_harness_prefix_only() {
+        assert!(is_ephemeral_slug("codegraph-harness-abc123"));
+        assert!(!is_ephemeral_slug("codegraph-harness")); // no trailing dash
+        assert!(!is_ephemeral_slug("myproject-1a2b"));
+        assert!(!is_ephemeral_slug(""));
+    }
+
+    #[test]
+    fn is_ephemeral_workspace_detects_harness_component_anywhere() {
+        // Non-existent paths skip canonicalization and are inspected as-is.
+        assert!(is_ephemeral_workspace(Path::new(
+            "/tmp/codegraph-harness-xyz/workspace"
+        )));
+        assert!(is_ephemeral_workspace(Path::new(
+            "/var/codegraph-harness-run42"
+        )));
+        assert!(!is_ephemeral_workspace(Path::new("/tmp/regular-project")));
+        assert!(!is_ephemeral_workspace(Path::new(
+            "/tmp/codegraph-harnessless/ws"
+        )));
+    }
+
+    #[test]
+    fn project_data_dir_routes_ephemeral_workspace_to_local_state() {
+        let ws = Path::new("/tmp/codegraph-harness-abc/ws");
+        let dir = project_data_dir(ws).unwrap();
+        assert_eq!(dir, ws.join(".codegraph-state"));
+    }
+
+    #[test]
+    fn codegraph_home_dir_ends_with_dot_codegraph() {
+        // HOME/USERPROFILE is always set in the test environment.
+        let _guard = crate::test_env::lock();
+        let dir = codegraph_home_dir().unwrap();
+        assert_eq!(dir.file_name().and_then(|n| n.to_str()), Some(".codegraph"));
+    }
+
+    #[test]
+    fn default_manager_reports_bge_small_telemetry_id() {
+        let manager = MemoryManager::new(None);
+        assert_eq!(manager.embedding_telemetry_id(), "bge-small");
+    }
+
+    #[test]
     fn test_project_data_dir_format() {
         // Uses a path that exists so canonicalize works
+        let _guard = crate::test_env::lock();
         let dir = project_data_dir(Path::new("/tmp")).unwrap();
         let dir_str = dir.to_string_lossy();
 
@@ -660,6 +745,7 @@ mod tests {
 
     #[test]
     fn test_project_data_dir_different_paths_different_hashes() {
+        let _guard = crate::test_env::lock();
         let dir1 = project_data_dir(Path::new("/tmp/project-a")).unwrap();
         let dir2 = project_data_dir(Path::new("/tmp/project-b")).unwrap();
         assert_ne!(dir1, dir2);
@@ -667,6 +753,7 @@ mod tests {
 
     #[test]
     fn test_project_data_dir_same_name_different_parent() {
+        let _guard = crate::test_env::lock();
         let dir1 = project_data_dir(Path::new("/tmp/a/app")).unwrap();
         let dir2 = project_data_dir(Path::new("/tmp/b/app")).unwrap();
         // Same base name but different hashes
@@ -689,8 +776,10 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires model files"]
+    #[allow(clippy::await_holding_lock)]
     async fn test_memory_manager_lifecycle() {
         use tempfile::TempDir;
+        let _guard = crate::test_env::lock();
         let temp_dir = TempDir::new().unwrap();
         let manager = MemoryManager::new(None);
 
@@ -721,5 +810,65 @@ mod tests {
 
         // Invalidate it
         manager.invalidate(&id, "testing").await.unwrap();
+    }
+
+    #[test]
+    fn migrate_data_moves_dir_and_removes_empty_codegraph_parent() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        // old layout: <ws>/.codegraph/memory/graph.db
+        let old_dir = tmp.path().join("ws").join(".codegraph").join("memory");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("graph.db"), b"payload").unwrap();
+        // new_dir does not exist and its parent must be created by migrate_data
+        let new_dir = tmp.path().join("global").join("slug").join("memory");
+
+        MemoryManager::migrate_data(&old_dir, &new_dir).expect("migration should succeed");
+
+        // Data landed at the new location...
+        assert!(new_dir.join("graph.db").exists());
+        assert_eq!(std::fs::read(new_dir.join("graph.db")).unwrap(), b"payload");
+        // ...the old memory dir is gone...
+        assert!(!old_dir.exists());
+        // ...and its now-empty .codegraph parent is cleaned up.
+        assert!(!tmp.path().join("ws").join(".codegraph").exists());
+    }
+
+    #[test]
+    fn migrate_data_keeps_nonempty_codegraph_parent() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let codegraph_dir = tmp.path().join("ws").join(".codegraph");
+        let old_dir = codegraph_dir.join("memory");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("graph.db"), b"x").unwrap();
+        // A sibling of memory/ keeps .codegraph non-empty after the move.
+        std::fs::write(codegraph_dir.join("config.toml"), b"y").unwrap();
+        let new_dir = tmp.path().join("global").join("memory");
+
+        MemoryManager::migrate_data(&old_dir, &new_dir).unwrap();
+
+        assert!(new_dir.join("graph.db").exists());
+        assert!(!old_dir.exists());
+        // The parent survives because the sibling file still lives in it.
+        assert!(codegraph_dir.exists());
+        assert!(codegraph_dir.join("config.toml").exists());
+    }
+
+    #[test]
+    fn migrate_data_errors_when_source_is_missing() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let old_dir = tmp.path().join("does-not-exist").join("memory");
+        let new_dir = tmp.path().join("global").join("memory");
+
+        let err = MemoryManager::migrate_data(&old_dir, &new_dir)
+            .expect_err("renaming a missing source must fail");
+        assert!(
+            err.contains("rename failed"),
+            "unexpected error message: {err}"
+        );
+        // Nothing was created at the destination on failure.
+        assert!(!new_dir.exists());
     }
 }

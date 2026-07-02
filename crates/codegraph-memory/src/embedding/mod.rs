@@ -95,3 +95,138 @@ fn default_static_model_dir() -> PathBuf {
         .join("static_models")
         .join("jina-code-static-256")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Guards process-wide env mutation across the env-sensitive tests.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn is_fastembed(b: &EmbeddingBackend, model: CodeGraphEmbeddingModel) -> bool {
+        matches!(b, EmbeddingBackend::Fastembed(m) if m.model_id_tag() == model.model_id_tag())
+    }
+
+    #[test]
+    fn parse_static_aliases_select_static_backend() {
+        for s in ["static", "static-code", "model2vec"] {
+            assert!(
+                matches!(EmbeddingBackend::parse(s), EmbeddingBackend::Static(_)),
+                "{s} should parse to Static"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_jina_selects_jina() {
+        assert!(is_fastembed(
+            &EmbeddingBackend::parse("jina-code-v2"),
+            CodeGraphEmbeddingModel::JinaCodeV2
+        ));
+    }
+
+    #[test]
+    fn parse_granite_aliases_select_granite() {
+        for s in ["granite-97m", "granite", "granite-97m-multilingual-r2"] {
+            assert!(
+                is_fastembed(
+                    &EmbeddingBackend::parse(s),
+                    CodeGraphEmbeddingModel::Granite97mMultilingualR2
+                ),
+                "{s} should parse to Granite"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_unknown_and_empty_fall_back_to_bge() {
+        for s in ["", "bge-small", "totally-unknown"] {
+            assert!(
+                is_fastembed(
+                    &EmbeddingBackend::parse(s),
+                    CodeGraphEmbeddingModel::BgeSmall
+                ),
+                "{s:?} should fall back to BgeSmall"
+            );
+        }
+    }
+
+    #[test]
+    fn default_backend_is_fastembed_bge() {
+        let b = EmbeddingBackend::default();
+        assert!(is_fastembed(&b, CodeGraphEmbeddingModel::BgeSmall));
+        assert_eq!(b.telemetry_id(), "bge-small");
+    }
+
+    #[test]
+    fn display_name_fastembed_delegates_to_model() {
+        let b = EmbeddingBackend::Fastembed(CodeGraphEmbeddingModel::JinaCodeV2);
+        assert_eq!(
+            b.display_name(),
+            CodeGraphEmbeddingModel::JinaCodeV2.display_name()
+        );
+    }
+
+    #[test]
+    fn display_name_static_uses_dir_basename() {
+        let b = EmbeddingBackend::Static(PathBuf::from("/models/jina-code-static-256"));
+        assert_eq!(b.display_name(), "static:jina-code-static-256 (model2vec)");
+    }
+
+    #[test]
+    fn telemetry_id_covers_every_backend() {
+        assert_eq!(
+            EmbeddingBackend::Static(PathBuf::from("/x")).telemetry_id(),
+            "static"
+        );
+        assert_eq!(
+            EmbeddingBackend::Fastembed(CodeGraphEmbeddingModel::BgeSmall).telemetry_id(),
+            "bge-small"
+        );
+        assert_eq!(
+            EmbeddingBackend::Fastembed(CodeGraphEmbeddingModel::JinaCodeV2).telemetry_id(),
+            "jina-code-v2"
+        );
+        assert_eq!(
+            EmbeddingBackend::Fastembed(CodeGraphEmbeddingModel::Granite97mMultilingualR2)
+                .telemetry_id(),
+            "granite-97m"
+        );
+    }
+
+    #[test]
+    fn static_model_dir_prefers_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("CODEGRAPH_STATIC_MODEL");
+        std::env::set_var("CODEGRAPH_STATIC_MODEL", "/custom/model/path");
+        let dir = default_static_model_dir();
+        match saved {
+            Some(v) => std::env::set_var("CODEGRAPH_STATIC_MODEL", v),
+            None => std::env::remove_var("CODEGRAPH_STATIC_MODEL"),
+        }
+        assert_eq!(dir, PathBuf::from("/custom/model/path"));
+    }
+
+    #[test]
+    fn static_model_dir_default_path_under_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved_model = std::env::var_os("CODEGRAPH_STATIC_MODEL");
+        let saved_home = std::env::var_os("HOME");
+        std::env::remove_var("CODEGRAPH_STATIC_MODEL");
+        std::env::set_var("HOME", "/home/tester");
+        let dir = default_static_model_dir();
+        match saved_model {
+            Some(v) => std::env::set_var("CODEGRAPH_STATIC_MODEL", v),
+            None => std::env::remove_var("CODEGRAPH_STATIC_MODEL"),
+        }
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(
+            dir,
+            PathBuf::from("/home/tester/.codegraph/static_models/jina-code-static-256")
+        );
+    }
+}

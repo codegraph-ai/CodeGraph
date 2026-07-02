@@ -107,3 +107,97 @@ impl ParserConfig {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_timeout_is_30s() {
+        let c = ParserConfig::default();
+        assert_eq!(c.timeout_per_file, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn fast_disables_docs_types_and_skips_tests() {
+        let c = ParserConfig::fast();
+        assert!(c.skip_tests);
+        assert!(!c.include_docs);
+        assert!(!c.extract_types);
+        // Other fields keep their defaults.
+        assert_eq!(c.max_file_size, 10 * 1024 * 1024);
+        assert!(!c.parallel);
+    }
+
+    #[test]
+    fn comprehensive_keeps_docs_and_types() {
+        let c = ParserConfig::comprehensive();
+        assert!(!c.skip_private);
+        assert!(!c.skip_tests);
+        assert!(c.include_docs);
+        assert!(c.extract_types);
+    }
+
+    #[test]
+    fn builder_setters_apply() {
+        let c = ParserConfig::default()
+            .with_parallel(true)
+            .with_max_file_size(42);
+        assert!(c.parallel);
+        assert_eq!(c.max_file_size, 42);
+    }
+
+    #[test]
+    fn serde_round_trip_with_some_timeout() {
+        let c = ParserConfig::default();
+        let json = serde_json::to_string(&c).unwrap();
+        let back: ParserConfig = serde_json::from_str(&json).unwrap();
+        // duration_option serializes as whole seconds.
+        assert_eq!(back.timeout_per_file, Some(Duration::from_secs(30)));
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn serde_round_trip_with_none_timeout() {
+        let c = ParserConfig {
+            timeout_per_file: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let back: ParserConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timeout_per_file, None);
+    }
+
+    #[test]
+    fn default_serializes_to_exact_wire_format() {
+        // Pins the full snake_case wire contract: every field name plus the
+        // custom duration_option serializer emitting timeout_per_file as a bare
+        // whole-second number (not a {secs,nanos} Duration struct), None as
+        // explicit null (parallel_workers), and max_file_size as 10 MiB.
+        let json = serde_json::to_string(&ParserConfig::default()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"skip_private":false,"skip_tests":false,"max_file_size":10485760,"timeout_per_file":30,"parallel":false,"parallel_workers":null,"include_docs":true,"extract_types":true}"#
+        );
+    }
+
+    #[test]
+    fn sub_second_timeout_truncates_to_whole_seconds() {
+        // duration_option::serialize calls Duration::as_secs(), which floors to
+        // whole seconds - so any sub-second component is silently dropped and
+        // the value does NOT round-trip. Pin this lossy behavior so a future
+        // switch to as_secs_f64/as_millis is a deliberate, test-visible change.
+        let c = ParserConfig {
+            timeout_per_file: Some(Duration::from_millis(1500)),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(
+            json.contains(r#""timeout_per_file":1"#),
+            "1500ms should serialize as bare 1, got: {json}"
+        );
+        let back: ParserConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timeout_per_file, Some(Duration::from_secs(1)));
+        assert_ne!(back.timeout_per_file, c.timeout_per_file);
+    }
+}

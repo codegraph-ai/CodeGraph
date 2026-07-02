@@ -220,9 +220,7 @@ fn test_parse_sample_app_complexity() {
     let mut found_complex = false;
     for func_id in &file_info.functions {
         let node = graph.get_node(*func_id).unwrap();
-        if let Some(codegraph::PropertyValue::Int(complexity)) =
-            node.properties.get("complexity")
-        {
+        if let Some(codegraph::PropertyValue::Int(complexity)) = node.properties.get("complexity") {
             if *complexity > 1 {
                 found_complex = true;
                 let name = node

@@ -734,4 +734,85 @@ mod tests {
             func_node.properties.get("is_async")
         );
     }
+
+    #[test]
+    fn test_ir_to_graph_function_optional_props_emitted() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(std::path::PathBuf::from("test.rs"));
+        // Populate the three optional function arms (doc/return_type/body_prefix)
+        // that every other function test leaves as None.
+        let func = FunctionEntity::new("documented", 1, 5)
+            .with_doc("/// docs here")
+            .with_return_type("i32")
+            .with_body_prefix("let x = 1;");
+        ir.add_function(func);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, Path::new("test.rs")).unwrap();
+        let node = graph.get_node(info.functions[0]).unwrap();
+
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("/// docs here".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("return_type"),
+            Some(&PropertyValue::String("i32".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&PropertyValue::String("let x = 1;".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_class_optional_props_emitted() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(std::path::PathBuf::from("test.rs"));
+        // Populate the class doc/body_prefix arms and the non-empty
+        // type_parameters arm, none of which prior class tests exercise.
+        let class = codegraph_parser_api::ClassEntity::new("Wrapper", 1, 10)
+            .with_doc("/// wrapper")
+            .with_body_prefix("struct Wrapper {")
+            .with_type_parameters(vec!["T".to_string(), "U".to_string()]);
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, Path::new("test.rs")).unwrap();
+        let node = graph.get_node(info.classes[0]).unwrap();
+
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("/// wrapper".to_string()))
+        );
+        assert_eq!(
+            node.properties.get("body_prefix"),
+            Some(&PropertyValue::String("struct Wrapper {".to_string()))
+        );
+        // type_parameters is joined with ", " only when the vec is non-empty.
+        assert_eq!(
+            node.properties.get("type_parameters"),
+            Some(&PropertyValue::String("T, U".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_ir_to_graph_trait_doc_prop_emitted() {
+        use codegraph::PropertyValue;
+        let mut ir = CodeIR::new(std::path::PathBuf::from("test.rs"));
+        // The trait node's doc_comment arm is untested; every trait test
+        // leaves doc_comment as None.
+        let trait_entity =
+            codegraph_parser_api::TraitEntity::new("Drawable", 1, 5).with_doc("/// drawable");
+        ir.add_trait(trait_entity);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, Path::new("test.rs")).unwrap();
+        let node = graph.get_node(info.traits[0]).unwrap();
+
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("/// drawable".to_string()))
+        );
+    }
 }

@@ -138,11 +138,8 @@ fn run_inner(
     //    placeholders restored.
     let fixture_str = fixture_in_workspace.to_string_lossy().to_string();
     let workspace_str = workspace_path.to_string_lossy().to_string();
-    let args = crate::compare::substitute_placeholders(
-        &case.invoke.args,
-        &fixture_str,
-        &workspace_str,
-    );
+    let args =
+        crate::compare::substitute_placeholders(&case.invoke.args, &fixture_str, &workspace_str);
 
     // 4. Call tool. If `retry_on_warmup` is set, retry every 2s
     //    for up to 30s while the response shape indicates the
@@ -227,7 +224,11 @@ fn make_workspace(setup: &Setup, fixtures_root: &Path) -> Result<tempfile::TempD
                 .with_context(|| format!("copy {} -> {}", src.display(), dest.display()))?;
         }
         WorkspaceLayout::MultiFile => {
-            let dir = if src.is_dir() { src.clone() } else { src.parent().unwrap().to_path_buf() };
+            let dir = if src.is_dir() {
+                src.clone()
+            } else {
+                src.parent().unwrap().to_path_buf()
+            };
             copy_dir_recursive(&dir, workspace.path())?;
         }
     }
@@ -293,17 +294,28 @@ fn init_git_repo(workspace: &Path) -> Result<()> {
         }
         Ok(())
     }
-    run(std::process::Command::new("git").arg("init").arg("-q").current_dir(workspace))?;
-    run(std::process::Command::new("git").args(["add", "."]).current_dir(workspace))?;
+    run(std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(workspace))?;
+    run(std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(workspace))?;
     // Pin author + committer dates so the commit content (and the
     // SHA derived from it) is byte-stable across runs. Without these,
     // git uses wallclock and every run produces a different hash.
     run(std::process::Command::new("git")
         .args([
-            "-c", "user.email=harness@codegraph.test",
-            "-c", "user.name=Harness",
-            "-c", "commit.gpgsign=false",
-            "commit", "-q", "-m", "harness fixture",
+            "-c",
+            "user.email=harness@codegraph.test",
+            "-c",
+            "user.name=Harness",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "harness fixture",
         ])
         .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00+0000")
         .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00+0000")
@@ -328,4 +340,184 @@ fn unwrap_mcp_content(response: &serde_json::Value) -> Option<serde_json::Value>
     let first = content.first()?;
     let text = first.get("text")?.as_str()?;
     serde_json::from_str(text).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn setup(fixture: &str, layout: WorkspaceLayout) -> Setup {
+        Setup {
+            fixture: fixture.to_string(),
+            workspace_layout: layout,
+            pre_index: true,
+            init_git: false,
+        }
+    }
+
+    #[test]
+    fn unwrap_mcp_content_parses_inner_json() {
+        let response = json!({
+            "content": [{ "type": "text", "text": "{\"key\": 42}" }]
+        });
+        let inner = unwrap_mcp_content(&response).expect("should unwrap");
+        assert_eq!(inner, json!({ "key": 42 }));
+    }
+
+    #[test]
+    fn unwrap_mcp_content_none_without_wrapper() {
+        // A bare payload (no `content` array) is not an MCP envelope.
+        let response = json!({ "result": "direct" });
+        assert!(unwrap_mcp_content(&response).is_none());
+    }
+
+    #[test]
+    fn unwrap_mcp_content_none_when_content_not_array() {
+        let response = json!({ "content": "not-an-array" });
+        assert!(unwrap_mcp_content(&response).is_none());
+    }
+
+    #[test]
+    fn unwrap_mcp_content_none_when_text_not_json() {
+        // `text` present but not parseable as JSON -> None (caller falls
+        // back to the raw response).
+        let response = json!({
+            "content": [{ "type": "text", "text": "plain error message" }]
+        });
+        assert!(unwrap_mcp_content(&response).is_none());
+    }
+
+    #[test]
+    fn is_warmup_response_detects_status_field() {
+        let response = json!({ "status": "embeddings_in_progress" });
+        assert!(is_warmup_response(&response));
+    }
+
+    #[test]
+    fn is_warmup_response_detects_message_substring() {
+        let response = json!({ "message": "Embeddings are building, retry soon" });
+        assert!(is_warmup_response(&response));
+    }
+
+    #[test]
+    fn is_warmup_response_detects_wrapped_status() {
+        // The warmup signal arrives inside the MCP text envelope.
+        let response = json!({
+            "content": [{ "type": "text", "text": "{\"status\": \"embeddings_in_progress\"}" }]
+        });
+        assert!(is_warmup_response(&response));
+    }
+
+    #[test]
+    fn is_warmup_response_false_for_normal_payload() {
+        let response = json!({ "status": "ok", "message": "done" });
+        assert!(!is_warmup_response(&response));
+    }
+
+    #[test]
+    fn resolve_fixture_path_uses_file_name_only() {
+        // A nested fixture path is flattened to its file_name under the
+        // workspace root (single-file layout copies only the file).
+        let s = setup("lang/rust/sample.rs", WorkspaceLayout::SingleFile);
+        let ws = Path::new("/tmp/ws");
+        let resolved = resolve_fixture_path(&s, ws).expect("resolve");
+        assert_eq!(resolved, PathBuf::from("/tmp/ws/sample.rs"));
+    }
+
+    #[test]
+    fn make_workspace_single_file_copies_named_file() {
+        let fixtures = tempfile::tempdir().unwrap();
+        std::fs::write(fixtures.path().join("sample.rs"), "fn main() {}").unwrap();
+        let s = setup("sample.rs", WorkspaceLayout::SingleFile);
+
+        let ws = make_workspace(&s, fixtures.path()).expect("make_workspace");
+        let copied = ws.path().join("sample.rs");
+        assert!(copied.exists());
+        assert_eq!(std::fs::read_to_string(copied).unwrap(), "fn main() {}");
+    }
+
+    #[test]
+    fn make_workspace_missing_fixture_errors() {
+        let fixtures = tempfile::tempdir().unwrap();
+        let s = setup("does-not-exist.rs", WorkspaceLayout::SingleFile);
+        let err = make_workspace(&s, fixtures.path()).unwrap_err();
+        assert!(err.to_string().contains("fixture not found"));
+    }
+
+    #[test]
+    fn make_workspace_multi_file_copies_directory_tree() {
+        let fixtures = tempfile::tempdir().unwrap();
+        let proj = fixtures.path().join("proj");
+        std::fs::create_dir_all(proj.join("sub")).unwrap();
+        std::fs::write(proj.join("a.rs"), "a").unwrap();
+        std::fs::write(proj.join("sub").join("b.rs"), "b").unwrap();
+        let s = setup("proj", WorkspaceLayout::MultiFile);
+
+        let ws = make_workspace(&s, fixtures.path()).expect("make_workspace");
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("a.rs")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("sub").join("b.rs")).unwrap(),
+            "b"
+        );
+    }
+
+    #[test]
+    fn make_workspace_multi_file_from_file_copies_parent_dir() {
+        // MultiFile layout pointed at a *file* (not a directory) copies the
+        // file's parent directory tree — the `else` arm of the is_dir()
+        // branch (line ~230), which every prior multi_file test skipped by
+        // pointing the fixture straight at a directory.
+        let fixtures = tempfile::tempdir().unwrap();
+        let proj = fixtures.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(proj.join("helper.rs"), "fn help() {}").unwrap();
+        // Fixture names a single file inside the directory.
+        let s = setup("proj/main.rs", WorkspaceLayout::MultiFile);
+
+        let ws = make_workspace(&s, fixtures.path()).expect("make_workspace");
+        // Both siblings land in the workspace root because the whole parent
+        // directory was copied, not just the named file.
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("main.rs")).unwrap(),
+            "fn main() {}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("helper.rs")).unwrap(),
+            "fn help() {}"
+        );
+    }
+
+    #[test]
+    fn resolve_fixture_path_errors_when_fixture_has_no_filename() {
+        // A fixture string with no final path component (empty here) makes
+        // Path::file_name() return None, hitting the error arm — untested
+        // because every other case supplies a real filename.
+        let s = setup("", WorkspaceLayout::SingleFile);
+        let err = resolve_fixture_path(&s, Path::new("/tmp/ws")).unwrap_err();
+        assert!(err.to_string().contains("fixture has no filename"));
+    }
+
+    #[test]
+    fn copy_dir_recursive_preserves_nested_structure() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("deep/nest")).unwrap();
+        std::fs::write(src.path().join("top.txt"), "top").unwrap();
+        std::fs::write(src.path().join("deep/nest/leaf.txt"), "leaf").unwrap();
+
+        copy_dir_recursive(src.path(), dst.path()).expect("copy");
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("top.txt")).unwrap(),
+            "top"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("deep/nest/leaf.txt")).unwrap(),
+            "leaf"
+        );
+    }
 }

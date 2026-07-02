@@ -113,30 +113,179 @@ pub(crate) fn ir_to_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::FunctionEntity;
+    use codegraph_parser_api::{FunctionEntity, ModuleEntity};
     use std::path::PathBuf;
 
-    #[test]
-    fn test_ir_to_graph_empty() {
-        let ir = CodeIR::new(PathBuf::from("Dockerfile"));
+    fn map(ir: &CodeIR) -> (CodeGraph, FileInfo) {
+        map_with(ir, Path::new("Dockerfile"))
+    }
+
+    fn map_with(ir: &CodeIR, path: &Path) -> (CodeGraph, FileInfo) {
         let mut graph = CodeGraph::in_memory().unwrap();
-        let info = ir_to_graph(&ir, &mut graph, PathBuf::from("Dockerfile").as_path()).unwrap();
-        assert_eq!(info.functions.len(), 0);
+        let info = ir_to_graph(ir, &mut graph, path).unwrap();
+        (graph, info)
+    }
+
+    /// Return the single edge between two nodes (fails if not exactly one).
+    fn edge_between(graph: &CodeGraph, src: NodeId, dst: NodeId) -> &codegraph::Edge {
+        let ids = graph.get_edges_between(src, dst).unwrap();
+        assert_eq!(ids.len(), 1, "expected exactly one edge {src}->{dst}");
+        graph.get_edge(ids[0]).unwrap()
     }
 
     #[test]
-    fn test_ir_to_graph_with_directives() {
+    fn empty_ir_yields_file_node_from_path_name() {
+        let ir = CodeIR::new(PathBuf::from("Dockerfile"));
+        let (graph, info) = map(&ir);
+
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(info.line_count, 0);
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert!(matches!(file.node_type, NodeType::CodeFile));
+        assert_eq!(file.properties.get_string("name"), Some("Dockerfile"));
+        assert_eq!(file.properties.get_string("language"), Some("dockerfile"));
+        assert_eq!(file.properties.get_string("path"), Some("Dockerfile"));
+    }
+
+    #[test]
+    fn file_name_uses_full_filename_including_extension() {
+        let ir = CodeIR::new(PathBuf::from("build/app.dockerfile"));
+        let (graph, info) = map_with(&ir, Path::new("build/app.dockerfile"));
+
+        let file = graph.get_node(info.file_id).unwrap();
+        // Unlike source-language mappers that stem the name, the dockerfile
+        // fallback keeps the full file_name (extension included).
+        assert_eq!(file.properties.get_string("name"), Some("app.dockerfile"));
+        assert_eq!(
+            file.properties.get_string("path"),
+            Some("build/app.dockerfile")
+        );
+    }
+
+    #[test]
+    fn missing_file_name_falls_back_to_dockerfile() {
+        let ir = CodeIR::new(PathBuf::from(".."));
+        // Path::new("..").file_name() is None, triggering the "Dockerfile" default.
+        let (graph, info) = map_with(&ir, Path::new(".."));
+
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("Dockerfile"));
+    }
+
+    #[test]
+    fn module_drives_file_metadata_and_line_count() {
+        let mut ir = CodeIR::new(PathBuf::from("Dockerfile"));
+        ir.set_module(
+            ModuleEntity::new("Dockerfile", "docker/Dockerfile", "dockerfile")
+                .with_line_count(17)
+                .with_doc("build image"),
+        );
+        let (graph, info) = map(&ir);
+
+        assert_eq!(info.line_count, 17);
+        let file = graph.get_node(info.file_id).unwrap();
+        assert_eq!(file.properties.get_string("name"), Some("Dockerfile"));
+        assert_eq!(
+            file.properties.get_string("path"),
+            Some("docker/Dockerfile")
+        );
+        assert_eq!(file.properties.get_int("line_count"), Some(17));
+        assert_eq!(file.properties.get_string("doc"), Some("build image"));
+    }
+
+    #[test]
+    fn directive_becomes_function_with_contains_edge() {
         let mut ir = CodeIR::new(PathBuf::from("Dockerfile"));
         let mut from_dir = FunctionEntity::new("FROM", 1, 1);
         from_dir.body_prefix = Some("FROM python:3.11".to_string());
         ir.add_function(from_dir);
 
-        let mut user_dir = FunctionEntity::new("USER", 2, 2);
-        user_dir.body_prefix = Some("USER root".to_string());
-        ir.add_function(user_dir);
+        let (graph, info) = map(&ir);
+        assert_eq!(info.functions.len(), 1);
+        assert_eq!(graph.node_count(), 2);
 
-        let mut graph = CodeGraph::in_memory().unwrap();
-        let info = ir_to_graph(&ir, &mut graph, PathBuf::from("Dockerfile").as_path()).unwrap();
-        assert_eq!(info.functions.len(), 2);
+        let func_id = info.functions[0];
+        let func = graph.get_node(func_id).unwrap();
+        assert!(matches!(func.node_type, NodeType::Function));
+        assert_eq!(func.properties.get_string("name"), Some("FROM"));
+        assert_eq!(
+            func.properties.get_string("body_prefix"),
+            Some("FROM python:3.11")
+        );
+        assert_eq!(func.properties.get_string("path"), Some("Dockerfile"));
+
+        let edge = edge_between(&graph, info.file_id, func_id);
+        assert!(matches!(edge.edge_type, EdgeType::Contains));
+    }
+
+    #[test]
+    fn function_flags_and_line_bounds_are_recorded() {
+        let mut ir = CodeIR::new(PathBuf::from("Dockerfile"));
+        ir.add_function(FunctionEntity::new("RUN", 3, 5).with_visibility("private"));
+
+        let (graph, info) = map(&ir);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.properties.get_int("line_start"), Some(3));
+        assert_eq!(func.properties.get_int("line_end"), Some(5));
+        assert_eq!(func.properties.get_string("visibility"), Some("private"));
+        assert_eq!(func.properties.get_bool("is_async"), Some(false));
+        assert_eq!(func.properties.get_bool("is_static"), Some(false));
+        assert_eq!(func.properties.get_bool("is_abstract"), Some(false));
+        assert_eq!(func.properties.get_bool("is_test"), Some(false));
+    }
+
+    #[test]
+    fn directive_doc_comment_maps_to_doc_prop() {
+        let mut ir = CodeIR::new(PathBuf::from("Dockerfile"));
+        ir.add_function(FunctionEntity::new("CMD", 8, 8).with_doc("entry command"));
+
+        let (graph, info) = map(&ir);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.properties.get_string("doc"), Some("entry command"));
+    }
+
+    #[test]
+    fn absent_body_prefix_and_doc_leave_props_unset() {
+        let mut ir = CodeIR::new(PathBuf::from("Dockerfile"));
+        ir.add_function(FunctionEntity::new("EXPOSE", 9, 9));
+
+        let (graph, info) = map(&ir);
+        let func = graph.get_node(info.functions[0]).unwrap();
+        assert_eq!(func.properties.get_string("body_prefix"), None);
+        assert_eq!(func.properties.get_string("doc"), None);
+    }
+
+    #[test]
+    fn multiple_directives_each_get_contains_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("Dockerfile"));
+        for (i, name) in ["FROM", "USER", "RUN"].iter().enumerate() {
+            ir.add_function(FunctionEntity::new(*name, i + 1, i + 1));
+        }
+
+        let (graph, info) = map(&ir);
+        assert_eq!(info.functions.len(), 3);
+        // 1 file node + 3 directive function nodes.
+        assert_eq!(graph.node_count(), 4);
+        // One Contains edge per directive.
+        assert_eq!(graph.edge_count(), 3);
+        for func_id in &info.functions {
+            let edge = edge_between(&graph, info.file_id, *func_id);
+            assert!(matches!(edge.edge_type, EdgeType::Contains));
+        }
+    }
+
+    #[test]
+    fn classes_traits_imports_are_always_empty() {
+        let mut ir = CodeIR::new(PathBuf::from("Dockerfile"));
+        ir.add_function(FunctionEntity::new("FROM", 1, 1));
+
+        let (_graph, info) = map(&ir);
+        // The dockerfile mapper never emits class/trait/import nodes.
+        assert!(info.classes.is_empty());
+        assert!(info.traits.is_empty());
+        assert!(info.imports.is_empty());
     }
 }

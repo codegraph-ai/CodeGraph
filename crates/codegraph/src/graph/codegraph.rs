@@ -964,3 +964,492 @@ mod persist_tests {
         assert_eq!(backend.scan_prefix(b"node:").unwrap().len(), 1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::property::PropertyMap;
+    use super::super::types::{Direction, EdgeType, NodeType};
+    use super::CodeGraph;
+    use crate::error::GraphError;
+
+    fn graph() -> CodeGraph {
+        CodeGraph::in_memory().unwrap()
+    }
+
+    fn named(name: &str) -> PropertyMap {
+        let mut props = PropertyMap::new();
+        props.insert("name", name);
+        props
+    }
+
+    #[test]
+    fn add_and_get_node_roundtrips_type_and_properties() {
+        let mut g = graph();
+        let id = g.add_node(NodeType::Function, named("foo")).unwrap();
+
+        let node = g.get_node(id).unwrap();
+        assert_eq!(node.node_type, NodeType::Function);
+        assert_eq!(node.properties.get_string("name"), Some("foo"));
+        assert_eq!(g.node_count(), 1);
+    }
+
+    #[test]
+    fn node_ids_are_monotonic_from_zero() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        assert_eq!((a, b, c), (0, 1, 2));
+    }
+
+    #[test]
+    fn get_missing_node_is_node_not_found() {
+        let g = graph();
+        match g.get_node(99) {
+            Err(GraphError::NodeNotFound { node_id }) => assert_eq!(node_id, "99"),
+            other => panic!("expected NodeNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_node_mut_allows_mutation() {
+        let mut g = graph();
+        let id = g.add_node(NodeType::Function, named("old")).unwrap();
+        g.get_node_mut(id).unwrap().properties.insert("name", "new");
+        assert_eq!(
+            g.get_node(id).unwrap().properties.get_string("name"),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn update_node_properties_merges_and_overwrites() {
+        let mut g = graph();
+        let id = g.add_node(NodeType::Function, named("foo")).unwrap();
+
+        let mut update = PropertyMap::new();
+        update.insert("name", "bar");
+        update.insert("visibility", "public");
+        g.update_node_properties(id, update).unwrap();
+
+        let node = g.get_node(id).unwrap();
+        assert_eq!(node.properties.get_string("name"), Some("bar"));
+        assert_eq!(node.properties.get_string("visibility"), Some("public"));
+    }
+
+    #[test]
+    fn update_node_properties_on_missing_node_errors() {
+        // The merge-and-overwrite test only exercises the happy path; the
+        // NodeNotFound arm that update_node_properties propagates from
+        // get_node_mut (before any storage.put) is otherwise unhit.
+        let mut g = graph();
+        match g.update_node_properties(404, named("ghost")) {
+            Err(GraphError::NodeNotFound { node_id }) => assert_eq!(node_id, "404"),
+            other => panic!("expected NodeNotFound, got {other:?}"),
+        }
+        // Nothing was written, so the node still doesn't exist.
+        assert!(g.get_node(404).is_err());
+    }
+
+    #[test]
+    fn add_and_get_edge_roundtrips() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let e = g
+            .add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let edge = g.get_edge(e).unwrap();
+        assert_eq!(edge.source_id, a);
+        assert_eq!(edge.target_id, b);
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(g.edge_count(), 1);
+    }
+
+    #[test]
+    fn add_edge_with_missing_endpoint_errors() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        assert!(g
+            .add_edge(a, 999, EdgeType::Calls, PropertyMap::new())
+            .is_err());
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn get_missing_edge_is_edge_not_found() {
+        let g = graph();
+        match g.get_edge(7) {
+            Err(GraphError::EdgeNotFound { edge_id }) => assert_eq!(edge_id, "7"),
+            other => panic!("expected EdgeNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_node_cascades_connected_edges() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(c, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        g.delete_node(b).unwrap();
+
+        assert!(g.get_node(b).is_err());
+        // Both edges touching b are gone.
+        assert_eq!(g.edge_count(), 0);
+        assert_eq!(
+            g.get_neighbors(a, Direction::Outgoing).unwrap(),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn delete_missing_node_errors() {
+        let mut g = graph();
+        assert!(matches!(
+            g.delete_node(5),
+            Err(GraphError::NodeNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn delete_edge_updates_adjacency() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let e = g
+            .add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        g.delete_edge(e).unwrap();
+
+        assert!(g.get_edge(e).is_err());
+        assert_eq!(g.get_neighbors(a, Direction::Outgoing).unwrap().len(), 0);
+        assert_eq!(g.get_neighbors(b, Direction::Incoming).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn delete_missing_edge_errors() {
+        let mut g = graph();
+        assert!(matches!(
+            g.delete_edge(3),
+            Err(GraphError::EdgeNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn get_neighbors_respects_direction() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(c, a, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        assert_eq!(g.get_neighbors(a, Direction::Outgoing).unwrap(), vec![b]);
+        assert_eq!(g.get_neighbors(a, Direction::Incoming).unwrap(), vec![c]);
+
+        let both = g.get_neighbors(a, Direction::Both).unwrap();
+        assert_eq!(both.len(), 2);
+        assert!(both.contains(&b) && both.contains(&c));
+    }
+
+    #[test]
+    fn get_neighbors_missing_node_errors() {
+        let g = graph();
+        assert!(g.get_neighbors(0, Direction::Both).is_err());
+    }
+
+    #[test]
+    fn get_edges_between_filters_by_target() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let e1 = g
+            .add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        let e2 = g
+            .add_edge(a, b, EdgeType::References, PropertyMap::new())
+            .unwrap();
+        g.add_edge(a, c, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let between = g.get_edges_between(a, b).unwrap();
+        assert_eq!(between.len(), 2);
+        assert!(between.contains(&e1) && between.contains(&e2));
+    }
+
+    #[test]
+    fn get_edges_between_isolated_nodes_is_empty() {
+        // filters_by_target always has an adjacency_out entry for the source;
+        // two nodes with no edges at all drive the `if let Some(out_edges)`
+        // None arm, which returns an empty vec instead of iterating.
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        assert!(g.get_edges_between(a, b).unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_nodes_batch_returns_ordered_ids() {
+        let mut g = graph();
+        let ids = g
+            .add_nodes_batch(vec![
+                (NodeType::Function, named("a")),
+                (NodeType::Module, named("b")),
+            ])
+            .unwrap();
+        assert_eq!(ids, vec![0, 1]);
+        assert_eq!(g.node_count(), 2);
+        assert_eq!(g.get_node(ids[1]).unwrap().node_type, NodeType::Module);
+    }
+
+    #[test]
+    fn add_edges_batch_rejects_missing_node_before_writing() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let result = g.add_edges_batch(vec![
+            (a, a, EdgeType::Calls, PropertyMap::new()),
+            (a, 42, EdgeType::Calls, PropertyMap::new()),
+        ]);
+        assert!(result.is_err());
+        // Verification happens up front, so nothing is committed.
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn iterators_and_counts_agree() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_node(NodeType::Module, PropertyMap::new()).unwrap();
+        assert_eq!(g.iter_nodes().count(), 2);
+        assert_eq!(g.nodes_iter().count(), 2);
+        assert_eq!(g.node_count(), 2);
+        assert_eq!(g.iter_edges().count(), 0);
+    }
+
+    #[test]
+    fn clear_empties_graph_and_resets_ids() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        g.clear().unwrap();
+
+        assert_eq!(g.node_count(), 0);
+        assert_eq!(g.edge_count(), 0);
+        // Counter reset: the next node reuses id 0.
+        assert_eq!(
+            g.add_node(NodeType::Function, PropertyMap::new()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn detach_storage_keeps_data_readable() {
+        let mut g = graph();
+        let id = g.add_node(NodeType::Function, named("keep")).unwrap();
+        g.detach_storage().unwrap();
+        // Cached data survives the backend swap.
+        assert_eq!(
+            g.get_node(id).unwrap().properties.get_string("name"),
+            Some("keep")
+        );
+        // And the graph is still writable in memory-only mode.
+        assert_eq!(g.add_node(NodeType::Module, PropertyMap::new()).unwrap(), 1);
+    }
+
+    #[test]
+    fn flush_persists_without_error() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        assert!(g.flush().is_ok());
+    }
+
+    #[test]
+    fn export_dot_and_json_render_nodes() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, named("caller")).unwrap();
+        let b = g.add_node(NodeType::Function, named("callee")).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let dot = g.export_dot().unwrap();
+        assert!(dot.contains("digraph"));
+
+        let json = g.export_json().unwrap();
+        assert!(json.contains("nodes"));
+    }
+
+    #[test]
+    fn find_all_paths_walks_the_graph() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(b, c, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let paths = g.find_all_paths(a, c, Some(10)).unwrap();
+        assert_eq!(paths, vec![vec![a, b, c]]);
+    }
+
+    #[test]
+    fn bfs_reaches_transitive_nodes() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(b, c, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        // Unbounded BFS reaches both b and c (start excluded).
+        let mut reached = g.bfs(a, Direction::Outgoing, None).unwrap();
+        reached.sort_unstable();
+        assert_eq!(reached, vec![b, c]);
+
+        // Depth 1 stops before c.
+        assert_eq!(g.bfs(a, Direction::Outgoing, Some(1)).unwrap(), vec![b]);
+    }
+
+    #[test]
+    fn dfs_reaches_transitive_nodes() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(b, c, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let mut reached = g.dfs(a, Direction::Outgoing, None).unwrap();
+        reached.sort_unstable();
+        assert_eq!(reached, vec![b, c]);
+    }
+
+    #[test]
+    fn find_strongly_connected_components_detects_cycle() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let c = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        // a <-> b form a cycle; c is standalone.
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        g.add_edge(b, a, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let sccs = g.find_strongly_connected_components().unwrap();
+        // The {a, b} cycle must appear as a single multi-node component.
+        let cycle = sccs
+            .iter()
+            .find(|scc| scc.len() > 1)
+            .expect("expected a multi-node SCC");
+        assert_eq!(cycle.len(), 2);
+        assert!(cycle.contains(&a) && cycle.contains(&b));
+        assert!(!cycle.contains(&c));
+    }
+
+    #[test]
+    fn export_dot_styled_respects_rankdir() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, named("solo")).unwrap();
+
+        let options = crate::export::DotOptions {
+            rankdir: "TB".to_string(),
+            ..Default::default()
+        };
+        let dot = g.export_dot_styled(options).unwrap();
+
+        assert!(dot.contains("digraph"));
+        assert!(dot.contains("rankdir=TB"));
+    }
+
+    #[test]
+    fn export_json_filtered_excludes_nonmatching_nodes() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, named("keep")).unwrap();
+        g.add_node(NodeType::Module, named("drop")).unwrap();
+
+        // Only Function nodes pass the filter.
+        let json = g
+            .export_json_filtered(|n| n.node_type == NodeType::Function, false)
+            .unwrap();
+        assert!(json.contains("keep"));
+        assert!(!json.contains("drop"));
+    }
+
+    #[test]
+    fn export_csv_via_codegraph_writes_both_files() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, named("caller")).unwrap();
+        let b = g.add_node(NodeType::Function, named("callee")).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = dir.path().join("nodes.csv");
+        let edges = dir.path().join("edges.csv");
+
+        // The standalone node/edge exporters and the combined convenience wrapper
+        // all go through check_export_size before delegating.
+        g.export_csv_nodes(&nodes).unwrap();
+        assert!(std::fs::read_to_string(&nodes).unwrap().contains("caller"));
+
+        g.export_csv_edges(&edges).unwrap();
+        assert!(std::fs::read_to_string(&edges).unwrap().contains("Calls"));
+
+        let nodes2 = dir.path().join("nodes2.csv");
+        let edges2 = dir.path().join("edges2.csv");
+        g.export_csv(&nodes2, &edges2).unwrap();
+        assert!(nodes2.exists() && edges2.exists());
+    }
+
+    #[test]
+    fn export_triples_renders_nodes() {
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, named("caller")).unwrap();
+        let b = g.add_node(NodeType::Function, named("callee")).unwrap();
+        g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+
+        let triples = g.export_triples().unwrap();
+        // N-Triples lines terminate with " ." and reference the node names.
+        assert!(triples.contains("caller"));
+        assert!(triples.trim_end().ends_with('.'));
+    }
+
+    #[test]
+    fn query_builder_filters_by_node_type() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, named("f")).unwrap();
+        g.add_node(NodeType::Module, named("m")).unwrap();
+
+        let functions = g.query().node_type(NodeType::Function).execute().unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(g.query().node_type(NodeType::Module).count().unwrap(), 1);
+    }
+
+    #[test]
+    fn close_flushes_and_consumes_graph() {
+        let mut g = graph();
+        g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        // close() takes ownership and must succeed after flushing counters.
+        assert!(g.close().is_ok());
+    }
+}

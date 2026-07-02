@@ -36,7 +36,11 @@ fn sample_texts(n: usize) -> Vec<String> {
 }
 
 /// Returns texts/sec, or None if the engine couldn't be built.
-fn measure(label: &str, engine: Result<VectorEngine, impl std::fmt::Display>, texts: &[String]) -> Option<f64> {
+fn measure(
+    label: &str,
+    engine: Result<VectorEngine, impl std::fmt::Display>,
+    texts: &[String],
+) -> Option<f64> {
     match engine {
         Ok(engine) => {
             let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
@@ -69,7 +73,9 @@ fn main() {
             }
             let v: Vec<S> =
                 serde_json::from_slice(&std::fs::read(&path).expect("read corpus")).expect("json");
-            v.iter().map(|s| format!("{}: {}", s.id, s.signature)).collect()
+            v.iter()
+                .map(|s| format!("{}: {}", s.id, s.signature))
+                .collect()
         }
         Err(_) => sample_texts(512),
     };
@@ -81,8 +87,14 @@ fn main() {
     // jina-code-static-256), else the potion-base-8M floor.
     let static_dir = std::env::var("CODEGRAPH_STATIC_MODEL")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M"));
-    let static_sps = measure("static", VectorEngine::with_static_model(&static_dir), &texts);
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(&home).join(".codegraph/static_models/potion-base-8M")
+        });
+    let static_sps = measure(
+        "static",
+        VectorEngine::with_static_model(&static_dir),
+        &texts,
+    );
 
     let cache = std::path::PathBuf::from(&home).join(".codegraph/fastembed_cache");
     let onnx_sps = measure(
@@ -92,6 +104,9 @@ fn main() {
     );
 
     if let (Some(s), Some(o)) = (static_sps, onnx_sps) {
-        println!("\nstatic is {:.1}x faster than ONNX BGE ({s:.0} vs {o:.0} texts/sec)", s / o);
+        println!(
+            "\nstatic is {:.1}x faster than ONNX BGE ({s:.0} vs {o:.0} texts/sec)",
+            s / o
+        );
     }
 }

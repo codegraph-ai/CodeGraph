@@ -529,6 +529,7 @@ impl<'a> ObjcVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
     use tree_sitter::Parser;
 
     fn parse_and_visit(source: &[u8]) -> ObjcVisitor<'_> {
@@ -611,5 +612,837 @@ mod tests {
         let visitor = parse_and_visit(source);
         assert_eq!(visitor.classes.len(), 1);
         assert_eq!(visitor.classes[0].base_classes, vec!["NSObject"]);
+    }
+
+    #[test]
+    fn test_no_superclass_empty_base_classes() {
+        // A category-less interface with no `: Super` still parses; base_classes empty.
+        let source = br#"
+@interface Standalone
+- (void)ping;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].name, "Standalone");
+        assert!(visitor.classes[0].base_classes.is_empty());
+    }
+
+    #[test]
+    fn test_class_metadata() {
+        let source = br#"
+@interface MyClass : NSObject
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let class = &visitor.classes[0];
+        assert_eq!(class.visibility, "public");
+        assert!(!class.is_abstract);
+        assert!(!class.is_interface);
+        // @interface starts on line 2 (leading newline), single line span.
+        assert_eq!(class.line_start, 2);
+        assert_eq!(class.line_end, 3);
+    }
+
+    #[test]
+    fn test_instance_method_not_static() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let greet = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "greet")
+            .unwrap();
+        assert!(!greet.is_static);
+    }
+
+    #[test]
+    fn test_class_method_is_static() {
+        let source = br#"
+@implementation MyClass
++ (instancetype)sharedInstance {
+    return nil;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let shared = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "sharedInstance")
+            .unwrap();
+        assert!(shared.is_static);
+    }
+
+    #[test]
+    fn test_interface_method_is_abstract() {
+        // A `method_declaration` (no body) under @interface is abstract with no complexity/body.
+        let source = br#"
+@interface MyClass : NSObject
+- (void)greet;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let greet = &visitor.functions[0];
+        assert_eq!(greet.name, "greet");
+        assert!(greet.is_abstract);
+        assert!(greet.complexity.is_none());
+        assert!(greet.body_prefix.is_none());
+        // Signature is the declaration line with the trailing `;` trimmed.
+        assert_eq!(greet.signature, "- (void)greet");
+    }
+
+    #[test]
+    fn test_implementation_method_not_abstract() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let greet = &visitor.functions[0];
+        assert!(!greet.is_abstract);
+        assert!(greet.complexity.is_some());
+        assert!(greet.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_method_parent_class() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].parent_class,
+            Some("MyClass".to_string())
+        );
+    }
+
+    #[test]
+    fn test_protocol_method_parent_class() {
+        let source = br#"
+@protocol MyProtocol
+- (void)doSomething;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let m = &visitor.functions[0];
+        assert_eq!(m.name, "doSomething");
+        assert!(m.is_abstract);
+        assert_eq!(m.parent_class, Some("MyProtocol".to_string()));
+    }
+
+    #[test]
+    fn test_method_complexity_branching() {
+        let source = br#"
+@implementation MyClass
+- (void)decide:(int)x {
+    if (x > 0) {
+        return;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let decide = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "decide")
+            .unwrap();
+        let complexity = decide.complexity.as_ref().unwrap();
+        assert!(complexity.cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_call_extraction() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"Hello");
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(!visitor.calls.is_empty());
+        let call = &visitor.calls[0];
+        assert_eq!(call.caller, "greet");
+        assert_eq!(call.callee, "NSLog");
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_system_import_cleaned() {
+        let source = br#"
+#import <Foundation/Foundation.h>
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        let imp = &visitor.imports[0];
+        assert_eq!(imp.imported, "Foundation/Foundation.h");
+        assert_eq!(imp.importer, "main");
+        assert!(!imp.is_wildcard);
+        assert!(imp.alias.is_none());
+    }
+
+    #[test]
+    fn test_quoted_import_cleaned() {
+        let source = br#"
+#import "MyHelper.h"
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 1);
+        assert_eq!(visitor.imports[0].imported, "MyHelper.h");
+    }
+
+    #[test]
+    fn test_multiple_classes() {
+        let source = br#"
+@interface Alpha : NSObject
+@end
+
+@interface Beta : NSObject
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 2);
+        let names: Vec<&str> = visitor.classes.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Alpha"));
+        assert!(names.contains(&"Beta"));
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.traits.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_method_line_numbers_one_indexed() {
+        // The method_definition starts on physical line 3 (leading newline = line 1).
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let greet = &visitor.functions[0];
+        assert_eq!(greet.line_start, 3);
+        assert_eq!(greet.line_end, 5);
+    }
+
+    #[test]
+    fn test_method_def_signature_first_line_only() {
+        // Signature keeps only the first physical line of the definition (with the `{`).
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "- (void)greet {");
+    }
+
+    #[test]
+    fn test_method_def_body_prefix_content() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let body = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert!(body.contains("return"));
+    }
+
+    #[test]
+    fn test_method_default_flags() {
+        // is_async/is_test are always false for ObjC methods.
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let greet = &visitor.functions[0];
+        assert!(!greet.is_async);
+        assert!(!greet.is_test);
+        assert!(greet.return_type.is_none());
+        assert!(greet.doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_method_complexity_loop() {
+        let source = br#"
+@implementation MyClass
+- (void)loop:(int)n {
+    for (int i = 0; i < n; i++) {
+        NSLog(@"%d", i);
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "loop").unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_method_complexity_switch() {
+        let source = br#"
+@implementation MyClass
+- (void)choose:(int)x {
+    switch (x) {
+        case 1:
+            break;
+        default:
+            break;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "choose")
+            .unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_method_complexity_logical_operator() {
+        let source = br#"
+@implementation MyClass
+- (void)both:(BOOL)a with:(BOOL)b {
+    if (a && b) {
+        return;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "both").unwrap();
+        // if branch (+1) plus the && logical operator (+1) over the base of 1.
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_method_complexity_logical_or_operator() {
+        let source = br#"
+@implementation MyClass
+- (void)either:(BOOL)a with:(BOOL)b {
+    if (a || b) {
+        return;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "either")
+            .unwrap();
+        let complexity = m.complexity.as_ref().unwrap();
+        // if branch (+1) plus the || logical operator (+1) over the base of 1.
+        assert!(complexity.logical_operators >= 1);
+        assert!(complexity.cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_multiple_imports_order() {
+        let source = br#"
+#import <Foundation/Foundation.h>
+#import "MyHelper.h"
+#import <UIKit/UIKit.h>
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.imports.len(), 3);
+        assert_eq!(visitor.imports[0].imported, "Foundation/Foundation.h");
+        assert_eq!(visitor.imports[1].imported, "MyHelper.h");
+        assert_eq!(visitor.imports[2].imported, "UIKit/UIKit.h");
+    }
+
+    #[test]
+    fn test_protocol_trait_metadata() {
+        let source = br#"
+@protocol MyProtocol
+- (void)doSomething;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let t = &visitor.traits[0];
+        assert_eq!(t.visibility, "public");
+        assert_eq!(t.line_start, 2);
+        assert!(t.parent_traits.is_empty());
+        assert!(t.doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_call_site_line_recorded() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"Hello");
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        // NSLog(...) sits on physical line 4.
+        assert_eq!(visitor.calls[0].call_site_line, 4);
+    }
+
+    #[test]
+    fn test_interface_multiple_methods_all_abstract() {
+        let source = br#"
+@interface MyClass : NSObject
+- (void)one;
+- (void)two;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+        assert!(visitor.functions.iter().all(|f| f.is_abstract));
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"one"));
+        assert!(names.contains(&"two"));
+    }
+
+    #[test]
+    fn test_method_body_prefix_truncated() {
+        // A body longer than BODY_PREFIX_MAX_CHARS is truncated to exactly that many bytes.
+        let filler = "    x = x + 1;\n".repeat(200);
+        let source = format!(
+            "@implementation MyClass\n- (void)big {{\n{}}}\n@end\n",
+            filler
+        );
+        let visitor = parse_and_visit(source.as_bytes());
+        let big = visitor.functions.iter().find(|f| f.name == "big").unwrap();
+        let body = big.body_prefix.as_ref().unwrap();
+        assert_eq!(body.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_method_complexity_baseline_one() {
+        // A straight-line method with no branches keeps cyclomatic complexity 1.
+        let source = br#"
+@implementation MyClass
+- (void)plain {
+    int y = 1;
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "plain")
+            .unwrap();
+        assert_eq!(m.complexity.as_ref().unwrap().cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_method_complexity_else_branch() {
+        // An if/else raises complexity above a lone if (else_clause adds a branch).
+        let source = br#"
+@implementation MyClass
+- (void)pick:(int)x {
+    if (x > 0) {
+        return;
+    } else {
+        return;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "pick").unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 3);
+    }
+
+    #[test]
+    fn test_method_complexity_while() {
+        let source = br#"
+@implementation MyClass
+- (void)spin:(int)n {
+    while (n > 0) {
+        n--;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "spin").unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_method_complexity_do_while() {
+        let source = br#"
+@implementation MyClass
+- (void)repeat:(int)n {
+    do {
+        n--;
+    } while (n > 0);
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "repeat")
+            .unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_call_default_metadata() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"Hello");
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let call = &visitor.calls[0];
+        assert_eq!(call.caller, "greet");
+        assert_eq!(call.callee, "NSLog");
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+    }
+
+    #[test]
+    fn test_multiple_calls_in_body() {
+        let source = br#"
+@implementation MyClass
+- (void)greet {
+    NSLog(@"one");
+    NSLog(@"two");
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.calls.len(), 2);
+        assert!(visitor.calls.iter().all(|c| c.caller == "greet"));
+    }
+
+    #[test]
+    fn test_nested_call_attributed_to_method() {
+        // A call inside an if block is still attributed to the enclosing method.
+        let source = br#"
+@implementation MyClass
+- (void)guarded:(int)x {
+    if (x > 0) {
+        NSLog(@"positive");
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller, "guarded");
+        assert_eq!(visitor.calls[0].callee, "NSLog");
+    }
+
+    #[test]
+    fn test_class_method_in_interface_abstract_and_static() {
+        // A `+` class-method declaration under @interface is abstract and static.
+        let source = br#"
+@interface MyClass : NSObject
++ (instancetype)make;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let make = &visitor.functions[0];
+        assert_eq!(make.name, "make");
+        assert!(make.is_abstract);
+        assert!(make.is_static);
+    }
+
+    #[test]
+    fn test_two_method_defs_source_order_lines() {
+        let source = br#"
+@implementation MyClass
+- (void)first {
+    return;
+}
+- (void)second {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let first = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "first")
+            .unwrap();
+        let second = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "second")
+            .unwrap();
+        assert!(second.line_start > first.line_end);
+    }
+
+    #[test]
+    fn test_protocol_multiple_methods_parented() {
+        let source = br#"
+@protocol MyProtocol
+- (void)alpha;
+- (void)beta;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 2);
+        assert!(visitor
+            .functions
+            .iter()
+            .all(|f| f.parent_class == Some("MyProtocol".to_string()) && f.is_abstract));
+    }
+
+    #[test]
+    fn test_implementation_without_interface_extracts_methods() {
+        // A bare @implementation (no matching @interface) still extracts its methods.
+        let source = br#"
+@implementation Orphan
+- (void)work {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let work = &visitor.functions[0];
+        assert_eq!(work.name, "work");
+        assert_eq!(work.parent_class, Some("Orphan".to_string()));
+        assert!(!work.is_abstract);
+    }
+
+    #[test]
+    fn test_category_interface_extracted_as_class() {
+        // `@interface Foo (Private)` parses as a class_interface; the class name is Foo
+        // and the `(Private)` category identifier is ignored (not a superclass).
+        let source = br#"
+@interface Foo (Private)
+- (void)ping;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        let class = &visitor.classes[0];
+        assert_eq!(class.name, "Foo");
+        // The trailing `Private` identifier appears with no `:`, so it is not a superclass.
+        assert!(class.base_classes.is_empty());
+        // The category's method is still extracted and parented to Foo.
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "ping");
+        assert_eq!(visitor.functions[0].parent_class, Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn test_protocol_inheritance_parent_traits_empty_gap() {
+        // `@protocol Sub <Base>` records Sub but never reads the protocol_reference_list,
+        // so parent_traits stays empty - a latent gap pinned here.
+        let source = br#"
+@protocol Sub <Base>
+- (void)go;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.traits.len(), 1);
+        assert_eq!(visitor.traits[0].name, "Sub");
+        assert!(visitor.traits[0].parent_traits.is_empty());
+    }
+
+    #[test]
+    fn test_class_protocol_conformance_implemented_traits_empty_gap() {
+        // `@interface Foo : NSObject <Bar>` keeps NSObject as the superclass but the
+        // `<Bar>` conformance (a parameterized_arguments node) is never read, so
+        // implemented_traits stays empty - a latent gap pinned here.
+        let source = br#"
+@interface Foo : NSObject <Bar>
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes.len(), 1);
+        let class = &visitor.classes[0];
+        assert_eq!(class.base_classes, vec!["NSObject"]);
+        assert!(class.implemented_traits.is_empty());
+    }
+
+    #[test]
+    fn test_keyword_selector_name_first_part_only_gap() {
+        // A multi-part keyword selector `setX:y:` yields only the first segment `setX`
+        // because extract_method_name_from_node returns the first identifier after the
+        // method_type - the full selector name is truncated (a latent gap).
+        let source = br#"
+@implementation C
+- (void)setX:(int)x y:(int)y {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "setX");
+    }
+
+    #[test]
+    fn test_keyword_selector_parameters_empty_gap() {
+        // extract_method_parameters_from_node always returns an empty vec, so even a
+        // keyword selector with two typed parameters records no parameters (a latent gap).
+        let source = br#"
+@implementation C
+- (void)setX:(int)x y:(int)y {
+    return;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn test_message_expression_not_tracked_as_call_gap() {
+        // An ObjC message send `[self ping]` parses as a message_expression, but
+        // visit_body_for_calls only tracks C-style call_expression nodes, so no call
+        // is recorded - a latent gap pinned here.
+        let source = br#"
+@implementation C
+- (void)go {
+    [self ping];
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_ternary_no_complexity_gap() {
+        // A ternary `x > 0 ? 1 : 2` parses as a conditional_expression, which the
+        // complexity visitor does not count, so complexity stays at the baseline 1.
+        let source = br#"
+@implementation C
+- (int)pick:(int)x {
+    return x > 0 ? 1 : 2;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "pick").unwrap();
+        assert_eq!(m.complexity.as_ref().unwrap().cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_for_in_enumeration_complexity_and_call() {
+        // Fast enumeration `for (id x in a)` parses as a for_statement, so it raises
+        // complexity as a loop, and a C-style call in its body is still attributed.
+        let source = br#"
+@implementation C
+- (void)each:(NSArray *)a {
+    for (id x in a) {
+        NSLog(@"%@", x);
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor.functions.iter().find(|f| f.name == "each").unwrap();
+        assert!(m.complexity.as_ref().unwrap().cyclomatic_complexity >= 2);
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller, "each");
+        assert_eq!(visitor.calls[0].callee, "NSLog");
+    }
+
+    #[test]
+    fn test_multiple_protocols_extracted() {
+        let source = br#"
+@protocol Alpha
+- (void)a;
+@end
+
+@protocol Beta
+- (void)b;
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.traits.len(), 2);
+        let names: Vec<&str> = visitor.traits.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Alpha"));
+        assert!(names.contains(&"Beta"));
+    }
+
+    #[test]
+    fn test_class_method_definition_static_with_body() {
+        // A `+` method with a body under @implementation is static, non-abstract, and
+        // carries complexity/body_prefix (unlike an interface class-method declaration).
+        let source = br#"
+@implementation C
++ (instancetype)make {
+    return nil;
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let make = visitor.functions.iter().find(|f| f.name == "make").unwrap();
+        assert!(make.is_static);
+        assert!(!make.is_abstract);
+        assert!(make.complexity.is_some());
+        assert!(make.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_call_in_switch_case_attributed() {
+        // A C-style call inside a switch case body is attributed to the enclosing method.
+        let source = br#"
+@implementation C
+- (void)route:(int)x {
+    switch (x) {
+        case 1:
+            NSLog(@"one");
+            break;
+        default:
+            break;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.calls.len(), 1);
+        assert_eq!(visitor.calls[0].caller, "route");
+        assert_eq!(visitor.calls[0].callee, "NSLog");
     }
 }

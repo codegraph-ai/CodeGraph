@@ -58,6 +58,89 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        let config = ParserConfig::default();
+        extract(source, Path::new(path), &config).expect("extract should succeed")
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("sub f {}\n", "widgets.pl");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "widgets");
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        // ".." has no file_stem, so the extractor falls back to "unknown".
+        let ir = extract_ok("sub f {}\n", "..");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_module_metadata() {
+        let source = "sub a {}\nsub b {}\n";
+        let ir = extract_ok(source, "meta.pl");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "meta.pl");
+        assert_eq!(module.language, "perl");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "empty.pl");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let ir = extract_ok("# just a comment\n", "comment.pl");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_calls_populated_via_caller_callee() {
+        let source = r#"
+sub helper {
+    return 1;
+}
+
+sub run {
+    return helper();
+}
+"#;
+        let ir = extract_ok(source, "calls.pl");
+        assert!(
+            ir.calls.iter().any(|c| c.callee == "helper"),
+            "expected a call to helper, got: {:?}",
+            ir.calls
+        );
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = "sub a {}\nsub b {}\nsub c {}\n";
+        let ir = extract_ok(source, "multi.pl");
+        assert_eq!(ir.functions.len(), 3);
+    }
+
+    #[test]
+    fn test_package_flows_into_classes() {
+        let source = "package My::Thing;\nsub new {}\n";
+        let ir = extract_ok(source, "Thing.pm");
+        assert!(ir.classes.iter().any(|c| c.name == "My::Thing"));
+    }
+
     #[test]
     fn test_extract_simple_sub() {
         let source = r#"

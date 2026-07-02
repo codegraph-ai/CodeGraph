@@ -231,4 +231,86 @@ mod tests {
         let desc = generate_usage_description("", "my_function", "my_function()");
         assert!(desc.contains("Usage of `my_function`"));
     }
+
+    mod handler {
+        use super::super::{AIContextParams, CodeGraphBackend};
+        use crate::ai_query::QueryEngine;
+        use codegraph::CodeGraph;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        use tower_lsp::lsp_types::Position;
+
+        /// Create a test backend with an in-memory graph and empty symbol index.
+        async fn create_test_backend() -> CodeGraphBackend {
+            let graph = Arc::new(RwLock::new(
+                CodeGraph::in_memory().expect("Failed to create in-memory graph"),
+            ));
+            let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+            CodeGraphBackend::new_for_test(graph, query_engine)
+        }
+
+        fn params(uri: &str) -> AIContextParams {
+            AIContextParams {
+                uri: uri.to_string(),
+                line: None,
+                position: None,
+                intent: None,
+                max_tokens: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn test_handle_get_ai_context_unparseable_uri() {
+            let backend = create_test_backend().await;
+            // A string that is not a parseable URL fails at Url::parse.
+            let err = backend
+                .handle_get_ai_context(params("not a valid uri"))
+                .await
+                .expect_err("unparseable URI should fail");
+            assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+            assert!(err.message.contains("Invalid URI"));
+        }
+
+        #[tokio::test]
+        async fn test_handle_get_ai_context_non_file_scheme() {
+            let backend = create_test_backend().await;
+            // A well-formed http:// URL parses but has no file path.
+            let err = backend
+                .handle_get_ai_context(params("http://example.com/foo.rs"))
+                .await
+                .expect_err("non-file URI should fail");
+            assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+            assert!(err.message.contains("Invalid file path"));
+        }
+
+        #[tokio::test]
+        async fn test_handle_get_ai_context_no_symbols() {
+            let backend = create_test_backend().await;
+            // Valid file URI, but the empty graph resolves no nearest node.
+            let err = backend
+                .handle_get_ai_context(params("file:///tmp/does_not_exist.rs"))
+                .await
+                .expect_err("empty graph should yield no symbols");
+            assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+            assert!(err.message.contains("No symbols found"));
+        }
+
+        #[tokio::test]
+        async fn test_handle_get_ai_context_position_line_fallback() {
+            let backend = create_test_backend().await;
+            // With `line` unset, the handler falls back to `position.line`; the
+            // empty graph still yields the no-symbols error, exercising that branch.
+            let mut p = params("file:///tmp/does_not_exist.rs");
+            p.position = Some(Position {
+                line: 42,
+                character: 0,
+            });
+            let err = backend
+                .handle_get_ai_context(p)
+                .await
+                .expect_err("empty graph should yield no symbols");
+            assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+            assert!(err.message.contains("No symbols found"));
+        }
+    }
 }

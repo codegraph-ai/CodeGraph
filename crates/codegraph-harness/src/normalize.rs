@@ -109,7 +109,7 @@ fn strip_volatile(value: &Value, extra: &[String], keep: &[String]) -> Value {
         Value::Object(map) => {
             let mut new_map = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                let is_global = VOLATILE_FIELDS.iter().any(|f| *f == k.as_str());
+                let is_global = VOLATILE_FIELDS.contains(&k.as_str());
                 let is_extra = extra.iter().any(|f| f == k);
                 let is_kept = keep.iter().any(|f| f == k);
                 if (is_global || is_extra) && !is_kept {
@@ -119,11 +119,9 @@ fn strip_volatile(value: &Value, extra: &[String], keep: &[String]) -> Value {
             }
             Value::Object(new_map)
         }
-        Value::Array(arr) => Value::Array(
-            arr.iter()
-                .map(|v| strip_volatile(v, extra, keep))
-                .collect(),
-        ),
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(|v| strip_volatile(v, extra, keep)).collect())
+        }
         other => other.clone(),
     }
 }
@@ -302,11 +300,7 @@ mod tests {
     #[test]
     fn strip_volatile_keep_overrides_extra() {
         let input = json!({"name": "foo", "trace_id": "abc"});
-        let out = strip_volatile(
-            &input,
-            &["trace_id".to_string()],
-            &["trace_id".to_string()],
-        );
+        let out = strip_volatile(&input, &["trace_id".to_string()], &["trace_id".to_string()]);
         assert_eq!(out, json!({"name": "foo", "trace_id": "abc"}));
     }
 
@@ -346,10 +340,13 @@ mod tests {
         ]);
         let out = canonical_sort(&input);
         // Sorted by JSON string — `{"id":1,"name":"a"}` < `{"id":2,"name":"b"}`.
-        assert_eq!(out, json!([
-            {"name": "a", "id": 1},
-            {"name": "b", "id": 2}
-        ]));
+        assert_eq!(
+            out,
+            json!([
+                {"name": "a", "id": 1},
+                {"name": "b", "id": 2}
+            ])
+        );
     }
 
     #[test]
@@ -387,10 +384,44 @@ mod tests {
         });
         let patterns = vec![json!({"kind": "y"})];
         let out = drop_array_elements_matching(&input, &patterns);
-        assert_eq!(
-            out,
-            json!({"outer": [{"inner": [{"kind": "x"}]}]})
-        );
+        assert_eq!(out, json!({"outer": [{"inner": [{"kind": "x"}]}]}));
+    }
+
+    #[test]
+    fn element_matches_true_when_all_pattern_keys_equal() {
+        // All pattern keys present in the element with equal values -> true.
+        // Extra keys on the element are ignored (subset match).
+        let element = json!({"kind": "x", "name": "a", "extra": 1});
+        let pattern = json!({"kind": "x", "name": "a"});
+        assert!(element_matches(&element, &pattern));
+    }
+
+    #[test]
+    fn element_matches_false_when_value_differs() {
+        // Key present but the value differs -> the `Some(ev) => ev == pv` arm
+        // returns false for that key, so `all` short-circuits to false.
+        let element = json!({"kind": "x"});
+        let pattern = json!({"kind": "y"});
+        assert!(!element_matches(&element, &pattern));
+    }
+
+    #[test]
+    fn element_matches_false_when_pattern_key_absent() {
+        // Pattern references a key the element lacks -> the `None => false`
+        // arm. Distinct from a value mismatch and not exercised by the
+        // drop_where tests, whose patterns always name a present key.
+        let element = json!({"kind": "x"});
+        let pattern = json!({"missing": "z"});
+        assert!(!element_matches(&element, &pattern));
+    }
+
+    #[test]
+    fn element_matches_false_when_either_side_not_object() {
+        // The catch-all `_ => false` arm: any non-(Object, Object) pairing
+        // never matches, regardless of scalar equality.
+        assert!(!element_matches(&json!("x"), &json!({"k": 1})));
+        assert!(!element_matches(&json!({"k": 1}), &json!("x")));
+        assert!(!element_matches(&json!(5), &json!(5)));
     }
 
     #[test]
@@ -413,11 +444,73 @@ mod tests {
             drop_where: vec![],
         };
         let out = normalize(&input, "", "", &opts);
-        assert_eq!(out, json!({
+        assert_eq!(
+            out,
+            json!({
+                "results": [
+                    {"name": "a", "weight": 0.91},
+                    {"name": "b", "weight": 0.78}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_expected_folds_and_drops_without_path_substitution() {
+        // normalize_expected is the expected-side entry point (zero prior
+        // tests): it strips volatile, folds backslashes, drops matching
+        // elements, rounds, and sorts — but must NOT substitute paths
+        // (expected JSON already carries ${workspace}/${fixture} verbatim,
+        // so a literal path like `C:\ws\basic.rs` survives, only folded).
+        let input = json!({
+            "path": "C:\\ws\\basic.rs",
+            "node_id": 7,
             "results": [
-                {"name": "a", "weight": 0.91},
-                {"name": "b", "weight": 0.78}
+                {"name": "b", "weight": 0.126, "match_reason": "Semantic"},
+                {"name": "a", "weight": 0.111}
             ]
-        }));
+        });
+        let opts = NormalizeOpts {
+            sort_arrays: Some(true),
+            float_decimals: Some(2),
+            drop_where: vec![json!({"match_reason": "Semantic"})],
+            ..NormalizeOpts::default()
+        };
+        let out = normalize_expected(&input, &opts);
+        let expected = json!({
+            "path": "C:/ws/basic.rs",
+            "results": [
+                {"name": "a", "weight": 0.11}
+            ]
+        });
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn normalize_substitutes_paths_and_drops_via_full_pipeline() {
+        // Exercise normalize's substitute_paths branch (non-empty
+        // workspace/fixture) together with the drop_where branch — the
+        // full_pipeline_with_opts test passes empty paths and empty
+        // drop_where, so neither of those two arms of `normalize` fired.
+        let input = json!({
+            "file": "/tmp/ws/basic.rs",
+            "node_id": 3,
+            "results": [
+                {"name": "keep", "match_reason": "SymbolName"},
+                {"name": "drop", "match_reason": "Semantic"}
+            ]
+        });
+        let opts = NormalizeOpts {
+            drop_where: vec![json!({"match_reason": "Semantic"})],
+            ..NormalizeOpts::default()
+        };
+        let out = normalize(&input, "/tmp/ws", "/tmp/ws/basic.rs", &opts);
+        let expected = json!({
+            "file": "${fixture}",
+            "results": [
+                {"name": "keep", "match_reason": "SymbolName"}
+            ]
+        });
+        assert_eq!(out, expected);
     }
 }

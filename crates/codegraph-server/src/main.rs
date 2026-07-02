@@ -489,6 +489,12 @@ async fn run() {
 #[cfg(test)]
 mod crash_breadcrumb_tests {
     use super::{classify_panic, write_crash_breadcrumb};
+    use std::sync::Mutex;
+
+    // Environment variables are process-global: any test in this binary that
+    // mutates HOME/USERPROFILE must hold this lock. (The library's shared
+    // `test_env` lock covers the lib test binary, a separate process.)
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn classify_panic_maps_message_class() {
@@ -529,7 +535,51 @@ mod crash_breadcrumb_tests {
     }
 
     #[test]
+    fn classify_panic_maps_remaining_sites() {
+        // Underscore spelling of the memory crate still resolves to memory.
+        assert_eq!(classify_panic("x", "codegraph_memory::embed").1, "memory");
+        // storage arm: any of rocks / backend / storage in the location.
+        assert_eq!(
+            classify_panic("x", "crates/codegraph-server/src/storage/rocks.rs:1").1,
+            "storage"
+        );
+        assert_eq!(classify_panic("x", "src/backend.rs:9").1, "storage");
+        // parser arm: parser / tree-sitter / tree_sitter.
+        assert_eq!(
+            classify_panic("x", "crates/codegraph-rust/src/parser.rs:1").1,
+            "parser"
+        );
+        assert_eq!(classify_panic("x", "tree-sitter-go/src/lib.rs").1, "parser");
+        assert_eq!(classify_panic("x", "tree_sitter/binding.rs").1, "parser");
+        // Anything off the known map falls back to "other".
+        assert_eq!(classify_panic("x", "src/lib.rs:42").1, "other");
+        assert_eq!(classify_panic("x", "<unknown>").1, "other");
+    }
+
+    #[test]
+    fn classify_panic_maps_alternate_class_triggers() {
+        // rocksdb spelling (no literal "lock") still classifies as rocksdb_lock.
+        assert_eq!(
+            classify_panic("rocksdb corruption detected", "x").0,
+            "rocksdb_lock"
+        );
+        // utf8 arm alternates beyond the "byte index / char boundary" case.
+        assert_eq!(
+            classify_panic("invalid utf-8 sequence", "x").0,
+            "utf8_parse"
+        );
+        assert_eq!(classify_panic("bad utf8 data", "x").0, "utf8_parse");
+        // oom arm alternates beyond "memory allocation".
+        assert_eq!(classify_panic("capacity overflow", "x").0, "oom");
+        assert_eq!(classify_panic("cannot allocate memory", "x").0, "oom");
+        // bounds arm alternates beyond "out of bounds".
+        assert_eq!(classify_panic("value out of range", "x").0, "bounds");
+        assert_eq!(classify_panic("slice index starts at 3", "x").0, "bounds");
+    }
+
+    #[test]
     fn breadcrumb_roundtrip_writes_parseable_json() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Isolate HOME to a temp dir so we never touch the real ~/.codegraph.
         let tmp = std::env::temp_dir().join(format!("cg-crash-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

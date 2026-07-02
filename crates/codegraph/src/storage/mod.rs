@@ -120,4 +120,63 @@ mod tests {
     fn test_trait_object_safe() {
         fn _accept_trait_object(_backend: &dyn StorageBackend) {}
     }
+
+    /// Round-trip the `Put` variant through serde JSON to exercise the derived
+    /// `Serialize`/`Deserialize` impls (never hit elsewhere - `write_batch`
+    /// only constructs and matches on these values, never serializes them).
+    #[test]
+    fn test_batch_operation_put_serde_round_trip() {
+        let op = BatchOperation::Put {
+            key: vec![1, 2, 3],
+            value: vec![4, 5, 6],
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let decoded: BatchOperation = serde_json::from_str(&json).unwrap();
+        match decoded {
+            BatchOperation::Put { key, value } => {
+                assert_eq!(key, vec![1, 2, 3]);
+                assert_eq!(value, vec![4, 5, 6]);
+            }
+            BatchOperation::Delete { .. } => panic!("expected Put variant"),
+        }
+    }
+
+    /// Round-trip the `Delete` variant through serde JSON to exercise the other
+    /// derived enum arm.
+    #[test]
+    fn test_batch_operation_delete_serde_round_trip() {
+        let op = BatchOperation::Delete { key: vec![7, 8, 9] };
+        let json = serde_json::to_string(&op).unwrap();
+        let decoded: BatchOperation = serde_json::from_str(&json).unwrap();
+        match decoded {
+            BatchOperation::Delete { key } => assert_eq!(key, vec![7, 8, 9]),
+            BatchOperation::Put { .. } => panic!("expected Delete variant"),
+        }
+    }
+
+    /// Pin the exact externally-tagged wire format of the `Put` variant. The
+    /// round-trip tests only assert value equality after a decode, so a variant
+    /// rename or an added `#[serde(rename_all)]` would go uncaught even though it
+    /// would break any consumer that persists or transmits these operations. This
+    /// asserts the `"Put"` tag and the bare `key`/`value` field names, plus that
+    /// `Vec<u8>` serializes as a JSON array of numbers (not base64).
+    #[test]
+    fn test_batch_operation_put_exact_wire_format() {
+        let op = BatchOperation::Put {
+            key: vec![1, 2, 3],
+            value: vec![4, 5, 6],
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert_eq!(json, r#"{"Put":{"key":[1,2,3],"value":[4,5,6]}}"#);
+    }
+
+    /// Pin the exact externally-tagged wire format of the `Delete` variant,
+    /// guarding the `"Delete"` tag and its single `key` field name against a
+    /// rename the round-trip test cannot detect.
+    #[test]
+    fn test_batch_operation_delete_exact_wire_format() {
+        let op = BatchOperation::Delete { key: vec![7, 8, 9] };
+        let json = serde_json::to_string(&op).unwrap();
+        assert_eq!(json, r#"{"Delete":{"key":[7,8,9]}}"#);
+    }
 }

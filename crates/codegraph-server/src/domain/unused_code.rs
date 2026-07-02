@@ -571,3 +571,593 @@ fn compute_unused_confidence(name: &str, is_exported: bool, _node: &codegraph::N
     // Private/unexported symbols with no callers — very likely unused
     0.9
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{EdgeType, Node, NodeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn node_with(name: &str, path: &str, is_test: Option<bool>) -> Node {
+        let mut props = PropertyMap::new();
+        props.insert("name", name);
+        props.insert("path", path);
+        if let Some(v) = is_test {
+            props.insert("is_test", v);
+        }
+        Node::new(0, NodeType::Function, props)
+    }
+
+    // ----- Scaffolding for find_unused_code end-to-end tests -----
+
+    fn str_prop(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    /// Add a node carrying the given key/value properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, PropertyValue)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), v.clone());
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    /// Convenience: a Function node with name + path.
+    fn add_fn(graph: &mut CodeGraph, name: &str, path: &str) -> NodeId {
+        add_node(
+            graph,
+            NodeType::Function,
+            &[("name", str_prop(name)), ("path", str_prop(path))],
+        )
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// Wrap a built graph in the Arc<RwLock<>> a QueryEngine owns and build the
+    /// caller indexes so get_callers resolves from Calls edges.
+    async fn engine_for(g: CodeGraph) -> (Arc<RwLock<CodeGraph>>, QueryEngine) {
+        let graph = Arc::new(RwLock::new(g));
+        let engine = QueryEngine::new(graph.clone());
+        engine.build_indexes().await;
+        (graph, engine)
+    }
+
+    fn params(
+        path: Option<&str>,
+        scope: &str,
+        include_tests: bool,
+        confidence: f64,
+    ) -> FindUnusedCodeParams {
+        FindUnusedCodeParams {
+            path: path.map(str::to_string),
+            scope: scope.to_string(),
+            include_tests,
+            confidence,
+        }
+    }
+
+    #[tokio::test]
+    async fn private_uncalled_function_is_a_candidate() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("dead_helper")),
+                ("path", str_prop("src/lib.rs")),
+                ("visibility", str_prop("private")),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/lib.rs"), "file", false, 0.5),
+        )
+        .await;
+
+        assert_eq!(result.total_checked, 1);
+        assert_eq!(result.candidates.len(), 1);
+        let c = &result.candidates[0];
+        assert_eq!(c.name, "dead_helper");
+        assert!(!c.is_public);
+        // Private + no callers -> the highest 0.9 confidence bucket.
+        assert_eq!(c.confidence, 0.9);
+        assert_eq!(result.scope, "file");
+        assert_eq!(result.min_confidence, 0.5);
+    }
+
+    #[tokio::test]
+    async fn function_with_real_caller_is_not_a_candidate() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "used_fn", "src/lib.rs");
+        let caller = add_fn(&mut g, "caller", "src/lib.rs");
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/lib.rs"), "file", false, 0.5),
+        )
+        .await;
+
+        // Both are in scope, but used_fn has a caller and caller has one too? caller is uncalled.
+        let names: Vec<&str> = result.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert!(!names.contains(&"used_fn"));
+        assert!(names.contains(&"caller"));
+    }
+
+    #[tokio::test]
+    async fn function_called_only_by_test_is_skipped_when_tests_excluded() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "helper", "src/lib.rs");
+        let test_caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("test_helper_works")),
+                ("path", str_prop("src/lib.rs")),
+                ("is_test", PropertyValue::Bool(true)),
+            ],
+        );
+        edge(&mut g, test_caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/lib.rs"), "file", false, 0.5),
+        )
+        .await;
+
+        // helper has a caller, but its only caller is a test -> test infra, skipped
+        // (not reported as dead). The test node itself is filtered from the candidate set.
+        assert!(result.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn usage_edge_keeps_symbol_alive() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "referenced_fn", "src/lib.rs");
+        let user = add_fn(&mut g, "user", "other.rs");
+        // A References edge (not Calls) still counts as usage.
+        edge(&mut g, user, target, EdgeType::References);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/lib.rs"), "file", false, 0.5),
+        )
+        .await;
+
+        let names: Vec<&str> = result.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert!(!names.contains(&"referenced_fn"));
+    }
+
+    #[tokio::test]
+    async fn framework_entry_point_and_trait_method_are_skipped() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "main", "src/main.rs");
+        add_fn(&mut g, "fmt", "src/main.rs");
+        add_fn(&mut g, "genuinely_dead", "src/main.rs");
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/main.rs"), "file", false, 0.5),
+        )
+        .await;
+
+        let names: Vec<&str> = result.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert!(!names.contains(&"main"));
+        assert!(!names.contains(&"fmt"));
+        assert_eq!(names, vec!["genuinely_dead"]);
+    }
+
+    #[tokio::test]
+    async fn synthetic_names_are_skipped() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "constructor", "src/x.ts");
+        add_fn(&mut g, "arrow_function", "src/x.ts");
+        add_fn(&mut g, "anonymous", "src/x.ts");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("")), ("path", str_prop("src/x.ts"))],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/x.ts"), "file", false, 0.5),
+        )
+        .await;
+
+        assert!(result.candidates.is_empty());
+        // All four are still counted as checked.
+        assert_eq!(result.total_checked, 4);
+    }
+
+    #[tokio::test]
+    async fn structural_nodes_are_skipped() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::CodeFile,
+            &[
+                ("name", str_prop("mod.rs")),
+                ("path", str_prop("src/mod.rs")),
+            ],
+        );
+        add_node(
+            &mut g,
+            NodeType::Module,
+            &[
+                ("name", str_prop("mymod")),
+                ("path", str_prop("src/mod.rs")),
+            ],
+        );
+        add_fn(&mut g, "dead", "src/mod.rs");
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/mod.rs"), "file", false, 0.5),
+        )
+        .await;
+
+        // File/Module nodes are continue'd past; only the function is a candidate.
+        let names: Vec<&str> = result.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["dead"]);
+    }
+
+    #[tokio::test]
+    async fn exported_symbol_filtered_by_confidence_threshold() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("pub_api")),
+                ("path", str_prop("src/lib.rs")),
+                ("is_public", PropertyValue::Bool(true)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        // Exported uncalled symbol scores 0.5; a 0.9 threshold drops it.
+        let strict = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/lib.rs"), "file", false, 0.9),
+        )
+        .await;
+        assert!(strict.candidates.is_empty());
+        assert_eq!(strict.total_checked, 1);
+
+        // A 0.5 threshold keeps it.
+        let lenient = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/lib.rs"), "file", false, 0.5),
+        )
+        .await;
+        assert_eq!(lenient.candidates.len(), 1);
+        assert!(lenient.candidates[0].is_public);
+        assert_eq!(lenient.candidates[0].confidence, 0.5);
+    }
+
+    #[tokio::test]
+    async fn class_with_called_child_method_is_kept() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", str_prop("Widget")), ("path", str_prop("src/w.rs"))],
+        );
+        let method = add_fn(&mut g, "render", "src/w.rs");
+        edge(&mut g, class, method, EdgeType::Contains);
+        let external = add_fn(&mut g, "external_caller", "other.rs");
+        edge(&mut g, external, method, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/w.rs"), "file", false, 0.5),
+        )
+        .await;
+
+        // The Widget class has a called child method -> not reported dead.
+        let names: Vec<&str> = result.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert!(!names.contains(&"Widget"));
+    }
+
+    #[tokio::test]
+    async fn class_with_active_same_file_function_is_kept() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", str_prop("Config")), ("path", str_prop("src/c.rs"))],
+        );
+        let sibling = add_fn(&mut g, "load", "src/c.rs");
+        let external = add_fn(&mut g, "boot", "main.rs");
+        edge(&mut g, external, sibling, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/c.rs"), "file", false, 0.5),
+        )
+        .await;
+
+        // Config shares its file with a called function -> considered in use.
+        let names: Vec<&str> = result.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert!(!names.contains(&"Config"));
+    }
+
+    #[tokio::test]
+    async fn workspace_scope_excludes_build_output_paths() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "src_dead", "src/lib.rs");
+        add_fn(&mut g, "built_dead", "dist/bundle.js");
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(&guard, &engine, params(None, "workspace", false, 0.5)).await;
+
+        // The build-output node is filtered from the candidate set entirely.
+        assert_eq!(result.total_checked, 1);
+        let names: Vec<&str> = result.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["src_dead"]);
+    }
+
+    #[tokio::test]
+    async fn unknown_scope_without_path_checks_nothing() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "dead", "src/lib.rs");
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_unused_code(&guard, &engine, params(None, "file", false, 0.5)).await;
+
+        // scope "file" with no path resolves to an empty candidate set.
+        assert_eq!(result.total_checked, 0);
+        assert!(result.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn include_tests_true_reports_test_helper_as_dead() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "helper", "src/lib.rs");
+        let test_caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("some_case")),
+                ("path", str_prop("src/lib.rs")),
+                ("is_test", PropertyValue::Bool(true)),
+            ],
+        );
+        edge(&mut g, test_caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        // With include_tests=true, the test caller counts, so helper is alive
+        // and the uncalled test node itself becomes the dead candidate.
+        let result = find_unused_code(
+            &guard,
+            &engine,
+            params(Some("src/lib.rs"), "file", true, 0.5),
+        )
+        .await;
+
+        let names: Vec<&str> = result.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert!(!names.contains(&"helper"));
+        assert!(names.contains(&"some_case"));
+        assert_eq!(result.total_checked, 2);
+    }
+
+    #[test]
+    fn is_test_node_respects_is_test_property() {
+        // The structural marker wins even when name/path look non-test.
+        let n = node_with("do_work", "src/lib.rs", Some(true));
+        assert!(is_test_node(&n));
+
+        // Explicit false with non-test name/path is not a test.
+        let n = node_with("do_work", "src/lib.rs", Some(false));
+        assert!(!is_test_node(&n));
+    }
+
+    #[test]
+    fn is_test_node_detects_by_name() {
+        assert!(is_test_node(&node_with("test_parse", "src/lib.rs", None)));
+        assert!(is_test_node(&node_with("parse_test", "src/lib.rs", None)));
+        assert!(is_test_node(&node_with("TestFixture", "src/lib.rs", None)));
+        assert!(!is_test_node(&node_with("parse", "src/lib.rs", None)));
+    }
+
+    #[test]
+    fn is_test_node_detects_by_path() {
+        assert!(is_test_node(&node_with("parse", "src/tests/mod.rs", None)));
+        assert!(is_test_node(&node_with("parse", "src/foo.test.ts", None)));
+        assert!(is_test_node(&node_with("parse", "src/foo.spec.ts", None)));
+        assert!(is_test_node(&node_with("parse", "pkg\\tests\\x.rs", None)));
+        assert!(is_test_node(&node_with("parse", "src/foo_test.go", None)));
+        assert!(!is_test_node(&node_with("parse", "src/foo.rs", None)));
+    }
+
+    #[test]
+    fn generate_test_path_patterns_covers_conventions() {
+        let patterns = generate_test_path_patterns("/src/foo.ts");
+        assert!(patterns.contains(&"/src/foo.test.ts".to_string()));
+        assert!(patterns.contains(&"/src/foo.spec.ts".to_string()));
+        assert!(patterns.contains(&"/src/foo_test.ts".to_string()));
+        assert!(patterns.contains(&"/src/tests/foo.ts".to_string()));
+        assert!(patterns.contains(&"/src/__tests__/foo.ts".to_string()));
+        assert!(patterns.contains(&"/src/test/foo.ts".to_string()));
+        assert!(patterns.contains(&"/src/tests/foo_test.ts".to_string()));
+    }
+
+    #[test]
+    fn generate_test_path_patterns_handles_missing_extension() {
+        // No extension -> no adjacent/subdir patterns are emitted.
+        assert!(generate_test_path_patterns("/src/Makefile").is_empty());
+        // No file stem at all -> empty.
+        assert!(generate_test_path_patterns("/").is_empty());
+    }
+
+    #[test]
+    fn is_build_output_path_matches_excluded_dirs() {
+        assert!(is_build_output_path("project/node_modules/pkg/index.js"));
+        assert!(is_build_output_path("a/dist/b.js"));
+        assert!(is_build_output_path("target/debug/foo"));
+        assert!(is_build_output_path("win\\build\\out.o"));
+        assert!(!is_build_output_path("src/domain/unused_code.rs"));
+        // Substring within a component must not match.
+        assert!(!is_build_output_path("src/distribution/x.rs"));
+    }
+
+    #[test]
+    fn is_framework_entry_point_recognizes_known_names() {
+        assert!(is_framework_entry_point("main"));
+        assert!(is_framework_entry_point("activate"));
+        assert!(is_framework_entry_point("did_open"));
+        assert!(is_framework_entry_point("provideCompletionItems"));
+        assert!(!is_framework_entry_point("my_helper"));
+    }
+
+    #[test]
+    fn is_trait_impl_method_recognizes_known_names() {
+        assert!(is_trait_impl_method("fmt"));
+        assert!(is_trait_impl_method("serialize"));
+        assert!(is_trait_impl_method("into_iter"));
+        assert!(is_trait_impl_method("toJSON"));
+        assert!(!is_trait_impl_method("business_logic"));
+    }
+
+    #[test]
+    fn compute_unused_confidence_scores_by_pattern() {
+        let dummy = node_with("x", "src/lib.rs", None);
+
+        // Dynamic dispatch patterns -> very low.
+        assert_eq!(
+            compute_unused_confidence("clickHandler", false, &dummy),
+            0.2
+        );
+        assert_eq!(compute_unused_confidence("myListener", false, &dummy), 0.2);
+        // MCP tool builders / serde defaults -> lowest.
+        assert_eq!(compute_unused_confidence("search_tool", false, &dummy), 0.1);
+        assert_eq!(
+            compute_unused_confidence("default_limit", false, &dummy),
+            0.1
+        );
+        // Migration + event handler naming -> low.
+        assert_eq!(compute_unused_confidence("migrate_v2", false, &dummy), 0.2);
+        assert_eq!(compute_unused_confidence("on_click", false, &dummy), 0.2);
+        assert_eq!(compute_unused_confidence("onChange", false, &dummy), 0.2);
+        assert_eq!(
+            compute_unused_confidence("handleSubmit", false, &dummy),
+            0.2
+        );
+        // Exported vs private plain symbols.
+        assert_eq!(compute_unused_confidence("plain", true, &dummy), 0.5);
+        assert_eq!(compute_unused_confidence("plain", false, &dummy), 0.9);
+    }
+
+    #[test]
+    fn has_called_child_methods_true_when_a_contained_method_is_called() {
+        // Class --Contains--> method, and caller --Calls--> method.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(&mut g, NodeType::Class, &[("name", str_prop("Widget"))]);
+        let method = add_fn(&mut g, "render", "src/w.rs");
+        let caller = add_fn(&mut g, "main", "src/w.rs");
+        edge(&mut g, class, method, EdgeType::Contains);
+        edge(&mut g, caller, method, EdgeType::Calls);
+        assert!(has_called_child_methods(&g, class));
+    }
+
+    #[test]
+    fn has_called_child_methods_false_when_contained_method_has_no_caller() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(&mut g, NodeType::Class, &[("name", str_prop("Widget"))]);
+        let method = add_fn(&mut g, "render", "src/w.rs");
+        edge(&mut g, class, method, EdgeType::Contains);
+        assert!(!has_called_child_methods(&g, class));
+    }
+
+    #[test]
+    fn has_called_child_methods_ignores_non_contains_children() {
+        // The child is reached via a Calls edge, not Contains, so even though it
+        // has an incoming caller it is not treated as a contained method.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(&mut g, NodeType::Class, &[("name", str_prop("Widget"))]);
+        let other = add_fn(&mut g, "helper", "src/w.rs");
+        let caller = add_fn(&mut g, "main", "src/w.rs");
+        edge(&mut g, class, other, EdgeType::Calls);
+        edge(&mut g, caller, other, EdgeType::Calls);
+        assert!(!has_called_child_methods(&g, class));
+    }
+
+    #[test]
+    fn has_active_same_file_functions_true_when_a_sibling_has_a_caller() {
+        // Class and an active sibling function share src/a.rs.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", str_prop("Widget")), ("path", str_prop("src/a.rs"))],
+        );
+        let sibling = add_fn(&mut g, "active", "src/a.rs");
+        let caller = add_fn(&mut g, "main", "src/a.rs");
+        edge(&mut g, caller, sibling, EdgeType::Calls);
+        assert!(has_active_same_file_functions(&g, class));
+    }
+
+    #[test]
+    fn has_active_same_file_functions_false_when_siblings_are_uncalled() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", str_prop("Widget")), ("path", str_prop("src/a.rs"))],
+        );
+        add_fn(&mut g, "idle", "src/a.rs");
+        assert!(!has_active_same_file_functions(&g, class));
+    }
+
+    #[test]
+    fn has_active_same_file_functions_false_when_node_has_no_path() {
+        // Empty path short-circuits to false before any query runs.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let class = add_node(&mut g, NodeType::Class, &[("name", str_prop("Widget"))]);
+        let sibling = add_fn(&mut g, "active", "");
+        let caller = add_fn(&mut g, "main", "");
+        edge(&mut g, caller, sibling, EdgeType::Calls);
+        assert!(!has_active_same_file_functions(&g, class));
+    }
+}

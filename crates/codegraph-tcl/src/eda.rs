@@ -421,4 +421,107 @@ mod tests {
         let empty: Vec<String> = vec![];
         assert_eq!(find_file_argument(&empty), "");
     }
+
+    #[test]
+    fn test_classify_eda_from_args_table_lookup_arms() {
+        // DESIGN_READ_COMMANDS arm: file_type from the table, path from find_file_argument.
+        match classify_eda_from_args("read_verilog", vec!["cpu.v".to_string()]) {
+            Some(EdaCommand::DesignFileRead { file_type, path }) => {
+                assert_eq!(file_type, "verilog");
+                assert_eq!(path, "cpu.v");
+            }
+            _ => panic!("expected DesignFileRead"),
+        }
+
+        // Namespace prefix is stripped via base_name before the table lookup.
+        match classify_eda_from_args("sta::read_lef", vec!["tech.lef".to_string()]) {
+            Some(EdaCommand::DesignFileRead { file_type, path }) => {
+                assert_eq!(file_type, "lef");
+                assert_eq!(path, "tech.lef");
+            }
+            _ => panic!("expected DesignFileRead for namespaced command"),
+        }
+
+        // DESIGN_WRITE_COMMANDS arm.
+        match classify_eda_from_args("write_def", vec!["out.def".to_string()]) {
+            Some(EdaCommand::DesignFileWrite { file_type, path }) => {
+                assert_eq!(file_type, "def");
+                assert_eq!(path, "out.def");
+            }
+            _ => panic!("expected DesignFileWrite"),
+        }
+
+        // TOOL_FLOW_COMMANDS arm: retains the full (namespaced) name, category from table.
+        match classify_eda_from_args("compile", vec![]) {
+            Some(EdaCommand::ToolFlowCommand { name, category }) => {
+                assert_eq!(name, "compile");
+                assert_eq!(category, "synthesis");
+            }
+            _ => panic!("expected ToolFlowCommand"),
+        }
+
+        // OBJECT_QUERY_COMMANDS arm.
+        match classify_eda_from_args("get_cells", vec![]) {
+            Some(EdaCommand::ObjectQuery {
+                name,
+                collection_type,
+            }) => {
+                assert_eq!(name, "get_cells");
+                assert_eq!(collection_type, "cell");
+            }
+            _ => panic!("expected ObjectQuery"),
+        }
+    }
+
+    #[test]
+    fn test_classify_eda_from_args_special_and_fallback_arms() {
+        // define_cmd_args: name has surrounding quotes trimmed, usage has braces trimmed.
+        match classify_eda_from_args(
+            "define_cmd_args",
+            vec!["\"my_cmd\"".to_string(), "{-foo bar}".to_string()],
+        ) {
+            Some(EdaCommand::CommandRegistration { name, usage }) => {
+                assert_eq!(name, "my_cmd");
+                assert_eq!(usage, "-foo bar");
+            }
+            _ => panic!("expected CommandRegistration"),
+        }
+
+        // foreach_in_collection: first two args become variable + collection_cmd.
+        match classify_eda_from_args(
+            "foreach_in_collection",
+            vec!["cell".to_string(), "get_cells".to_string()],
+        ) {
+            Some(EdaCommand::CollectionIteration {
+                variable,
+                collection_cmd,
+            }) => {
+                assert_eq!(variable, "cell");
+                assert_eq!(collection_cmd, "get_cells");
+            }
+            _ => panic!("expected CollectionIteration"),
+        }
+
+        // get_attribute / set_attribute share the AttributeAccess arm.
+        match classify_eda_from_args("set_attribute", vec!["obj".to_string(), "attr".to_string()]) {
+            Some(EdaCommand::AttributeAccess { object, attribute }) => {
+                assert_eq!(object, "obj");
+                assert_eq!(attribute, "attr");
+            }
+            _ => panic!("expected AttributeAccess"),
+        }
+
+        // Unknown but OpenROAD-namespaced command falls back to a ToolFlowCommand
+        // in the "openroad" category (keeping the full namespaced name).
+        match classify_eda_from_args("mpl::place_macros", vec![]) {
+            Some(EdaCommand::ToolFlowCommand { name, category }) => {
+                assert_eq!(name, "mpl::place_macros");
+                assert_eq!(category, "openroad");
+            }
+            _ => panic!("expected openroad ToolFlowCommand fallback"),
+        }
+
+        // A plain non-EDA command matches nothing.
+        assert!(classify_eda_from_args("my_proc", vec![]).is_none());
+    }
 }

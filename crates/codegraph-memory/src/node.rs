@@ -620,4 +620,365 @@ mod tests {
         assert_eq!(memory.id, deserialized.id);
         assert_eq!(memory.title, deserialized.title);
     }
+
+    #[test]
+    fn test_memory_id_from_uuid_and_default() {
+        let uuid = uuid::Uuid::nil();
+        let id = MemoryId::from_uuid(uuid);
+        assert_eq!(id.0, uuid);
+        // Default generates a fresh random id, so two defaults differ.
+        assert_ne!(MemoryId::default(), MemoryId::default());
+    }
+
+    #[test]
+    fn test_memory_id_parse_invalid() {
+        let result: Result<MemoryId, _> = "not-a-uuid".parse::<MemoryId>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_memory_kind_discriminant_name() {
+        let arch = MemoryNode::builder()
+            .architectural_decision("d", "r")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(arch.kind.discriminant_name(), "architectural_decision");
+
+        let dbg = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(dbg.kind.discriminant_name(), "debug_context");
+
+        let issue = MemoryNode::builder()
+            .known_issue("d", IssueSeverity::Low)
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(issue.kind.discriminant_name(), "known_issue");
+
+        let conv = MemoryNode::builder()
+            .convention("n", "d")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(conv.kind.discriminant_name(), "convention");
+
+        let proj = MemoryNode::builder()
+            .project_context("topic", "desc")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert_eq!(proj.kind.discriminant_name(), "project_context");
+    }
+
+    #[test]
+    fn test_builder_convention_and_project_context() {
+        let conv = MemoryNode::builder()
+            .convention("naming", "use snake_case")
+            .title("Naming convention")
+            .content("Rust files use snake_case")
+            .build()
+            .unwrap();
+        if let MemoryKind::Convention {
+            name,
+            description,
+            pattern,
+            anti_pattern,
+        } = conv.kind
+        {
+            assert_eq!(name, "naming");
+            assert_eq!(description, "use snake_case");
+            assert!(pattern.is_none());
+            assert!(anti_pattern.is_none());
+        } else {
+            panic!("Expected Convention");
+        }
+
+        let proj = MemoryNode::builder()
+            .project_context("build", "cargo workspace")
+            .title("Build layout")
+            .content("The workspace has many crates")
+            .build()
+            .unwrap();
+        if let MemoryKind::ProjectContext {
+            topic,
+            description,
+            tags,
+        } = proj.kind
+        {
+            assert_eq!(topic, "build");
+            assert_eq!(description, "cargo workspace");
+            assert!(tags.is_empty());
+        } else {
+            panic!("Expected ProjectContext");
+        }
+    }
+
+    #[test]
+    fn test_builder_missing_title_and_content() {
+        let missing_title = MemoryNode::builder()
+            .debug_context("p", "s")
+            .content("content only")
+            .build();
+        assert!(matches!(
+            missing_title,
+            Err(MemoryNodeBuilderError::MissingTitle)
+        ));
+
+        let missing_content = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("title only")
+            .build();
+        assert!(matches!(
+            missing_content,
+            Err(MemoryNodeBuilderError::MissingContent)
+        ));
+    }
+
+    #[test]
+    fn test_builder_source_helpers_and_defaults() {
+        // Default source is UserProvided { author: None } and confidence 1.0.
+        let default_src = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert!(matches!(
+            default_src.source,
+            MemorySource::UserProvided { author: None }
+        ));
+        assert_eq!(default_src.confidence, 1.0);
+
+        let user = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .user_provided(Some("alice".to_string()))
+            .build()
+            .unwrap();
+        assert!(matches!(
+            user.source,
+            MemorySource::UserProvided { author: Some(a) } if a == "alice"
+        ));
+
+        let git = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .from_git("abc123")
+            .build()
+            .unwrap();
+        assert!(matches!(
+            git.source,
+            MemorySource::GitHistory { commit_hash } if commit_hash == "abc123"
+        ));
+    }
+
+    #[test]
+    fn test_builder_at_commit_and_agent_source() {
+        let memory = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .at_commit("deadbeef")
+            .agent_source("claude")
+            .build()
+            .unwrap();
+        assert_eq!(memory.temporal.commit_hash.as_deref(), Some("deadbeef"));
+        assert_eq!(memory.agent_source.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn test_builder_confidence_clamped() {
+        let over = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .confidence(5.0)
+            .build()
+            .unwrap();
+        assert_eq!(over.confidence, 1.0);
+
+        let under = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .confidence(-1.0)
+            .build()
+            .unwrap();
+        assert_eq!(under.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_code_link_relevance_clamped() {
+        let high = CodeLink::new("n", LinkedNodeType::Class).with_relevance(2.5);
+        assert_eq!(high.relevance, 1.0);
+        let low = CodeLink::new("n", LinkedNodeType::Class).with_relevance(-0.5);
+        assert_eq!(low.relevance, 0.0);
+        // Fresh links default to full relevance and no line range.
+        let plain = CodeLink::new("n", LinkedNodeType::Trait);
+        assert_eq!(plain.relevance, 1.0);
+        assert!(plain.line_range.is_none());
+    }
+
+    #[test]
+    fn test_is_current_tracks_temporal() {
+        let mut memory = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .build()
+            .unwrap();
+        assert!(memory.is_current());
+        memory.temporal.invalidate();
+        assert!(!memory.is_current());
+    }
+
+    #[test]
+    fn test_defaults_issue_severity_and_source() {
+        assert_eq!(IssueSeverity::default(), IssueSeverity::Medium);
+        assert!(matches!(
+            MemorySource::default(),
+            MemorySource::UserProvided { author: None }
+        ));
+    }
+
+    #[test]
+    fn test_memory_source_serde_tag() {
+        let json = serde_json::to_value(MemorySource::GitHistory {
+            commit_hash: "abc".to_string(),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "git_history");
+        assert_eq!(json["commit_hash"], "abc");
+    }
+
+    #[test]
+    fn test_builder_direct_setters() {
+        // Exercise the setters that other tests reach only indirectly:
+        // id(), kind(), temporal(), source(), embedding(), tags(), and the
+        // two code-link setters (singular code_link + plural code_links).
+        let explicit_id = MemoryId::from_uuid(uuid::Uuid::nil());
+        let temporal = TemporalMetadata::new_current();
+        let memory = MemoryNode::builder()
+            .id(explicit_id)
+            .kind(MemoryKind::Convention {
+                name: "layout".to_string(),
+                description: "crates live under crates/".to_string(),
+                pattern: Some("crates/*".to_string()),
+                anti_pattern: None,
+            })
+            .title("t")
+            .content("c")
+            .temporal(temporal)
+            .source(MemorySource::ExternalDoc {
+                url: "https://example.com".to_string(),
+            })
+            .embedding(vec![0.1, 0.2, 0.3])
+            .tags(vec!["a".to_string(), "b".to_string()])
+            .code_link(CodeLink::new("n1", LinkedNodeType::Function))
+            .build()
+            .unwrap();
+
+        assert_eq!(memory.id, explicit_id);
+        assert!(matches!(memory.kind, MemoryKind::Convention { .. }));
+        assert!(matches!(
+            memory.source,
+            MemorySource::ExternalDoc { url } if url == "https://example.com"
+        ));
+        assert_eq!(memory.embedding.as_deref(), Some(&[0.1, 0.2, 0.3][..]));
+        assert_eq!(memory.tags, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(memory.code_links.len(), 1);
+        assert_eq!(memory.code_links[0].node_id, "n1");
+
+        // The plural code_links() setter replaces the whole vec rather than appending.
+        let replaced = MemoryNode::builder()
+            .debug_context("p", "s")
+            .title("t")
+            .content("c")
+            .code_link(CodeLink::new("dropped", LinkedNodeType::File))
+            .code_links(vec![
+                CodeLink::new("kept1", LinkedNodeType::Class),
+                CodeLink::new("kept2", LinkedNodeType::Trait),
+            ])
+            .build()
+            .unwrap();
+        assert_eq!(replaced.code_links.len(), 2);
+        assert_eq!(replaced.code_links[0].node_id, "kept1");
+        assert_eq!(replaced.code_links[1].node_id, "kept2");
+    }
+
+    #[test]
+    fn test_builder_missing_kind() {
+        // build() checks kind before title/content, so a builder with only
+        // title+content (no kind) surfaces MissingKind.
+        let result = MemoryNode::builder().title("t").content("c").build();
+        assert!(matches!(result, Err(MemoryNodeBuilderError::MissingKind)));
+    }
+
+    #[test]
+    fn test_linked_node_type_serde_lowercase() {
+        // #[serde(rename_all = "lowercase")] renders variants in lowercase.
+        assert_eq!(
+            serde_json::to_value(LinkedNodeType::Interface).unwrap(),
+            serde_json::json!("interface")
+        );
+        let parsed: LinkedNodeType = serde_json::from_value(serde_json::json!("trait")).unwrap();
+        assert_eq!(parsed, LinkedNodeType::Trait);
+    }
+
+    #[test]
+    fn test_issue_severity_serde_lowercase() {
+        assert_eq!(
+            serde_json::to_value(IssueSeverity::Critical).unwrap(),
+            serde_json::json!("critical")
+        );
+        let parsed: IssueSeverity = serde_json::from_value(serde_json::json!("info")).unwrap();
+        assert_eq!(parsed, IssueSeverity::Info);
+    }
+
+    #[test]
+    fn test_memory_kind_serde_skips_none_and_keeps_populated() {
+        // skip_serializing_if drops None optionals but retains populated ones,
+        // and #[serde(default)] vecs round-trip.
+        let full = MemoryKind::KnownIssue {
+            description: "leaks fds".to_string(),
+            severity: IssueSeverity::High,
+            workaround: Some("restart".to_string()),
+            tracking_id: None,
+        };
+        let json = serde_json::to_value(&full).unwrap();
+        let issue = &json["KnownIssue"];
+        assert_eq!(issue["severity"], "high");
+        assert_eq!(issue["workaround"], "restart");
+        assert!(issue.get("tracking_id").is_none());
+
+        // Round-trip preserves the populated optional and default-empty absent one.
+        let back: MemoryKind = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            MemoryKind::KnownIssue { workaround: Some(w), tracking_id: None, .. } if w == "restart"
+        ));
+    }
+
+    #[test]
+    fn test_code_link_line_range_serde_skips_none() {
+        // line_range is skip_serializing_if None, present otherwise.
+        let none = serde_json::to_value(CodeLink::new("n", LinkedNodeType::Module)).unwrap();
+        assert!(none.get("line_range").is_none());
+
+        let some =
+            serde_json::to_value(CodeLink::new("n", LinkedNodeType::Module).with_line_range(3, 9))
+                .unwrap();
+        assert_eq!(some["line_range"], serde_json::json!([3, 9]));
+    }
 }

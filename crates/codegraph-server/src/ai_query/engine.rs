@@ -392,12 +392,12 @@ impl QueryEngine {
             pos = end;
             chunks_done += 1;
 
-            if chunks_done % 10 == 0 && pos < total {
+            if chunks_done.is_multiple_of(10) && pos < total {
                 tracing::info!("[QueryEngine] Embedded {}/{} symbols", pos, total);
             }
 
             // RAM backpressure: shed batch size under memory pressure.
-            let pressured = chunks_done % EMBED_MEM_CHECK_CHUNKS == 0
+            let pressured = chunks_done.is_multiple_of(EMBED_MEM_CHECK_CHUNKS)
                 && available_memory_mb() < EMBED_LOW_MEM_MB;
             if pressured && chunk_size > 4 {
                 chunk_size = (chunk_size / 2).max(4);
@@ -546,7 +546,7 @@ impl QueryEngine {
             pos = end;
             chunks_done += 1;
 
-            let pressured = chunks_done % EMBED_MEM_CHECK_CHUNKS == 0
+            let pressured = chunks_done.is_multiple_of(EMBED_MEM_CHECK_CHUNKS)
                 && available_memory_mb() < EMBED_LOW_MEM_MB;
             if pressured && chunk_size > 4 {
                 chunk_size = (chunk_size / 2).max(4);
@@ -3962,9 +3962,89 @@ mod tests {
         assert!(results.len() >= 3);
     }
 
+    #[tokio::test]
+    async fn test_detect_entry_type_test_by_path_and_none_fallback() {
+        let (engine, graph) = create_test_engine().await;
+
+        {
+            let mut g = graph.write().await;
+
+            // Non-test *names* that only classify as tests via their file path.
+            // This exercises the path-based TestEntry branch that name-based
+            // tests (test_/_test/Test prefixes) never reach.
+            let by_path = [
+                ("helperA", "/src/__tests__/a.rs"), // "/__tests__/"
+                ("helperB", "/app/foo.spec.rs"),    // ".spec."
+                ("helperC", "/pkg/bar_test.go"),    // "_test."
+                ("helperD", "/lib/test/c.rs"),      // "/test/"
+            ];
+            for (i, (name, path)) in by_path.iter().enumerate() {
+                let mut props = PropertyMap::new();
+                props.insert(
+                    "name".to_string(),
+                    codegraph::PropertyValue::String(name.to_string()),
+                );
+                props.insert(
+                    "path".to_string(),
+                    codegraph::PropertyValue::String(path.to_string()),
+                );
+                props.insert(
+                    "line_start".to_string(),
+                    codegraph::PropertyValue::Int(i as i64 + 1),
+                );
+                g.add_node(NodeType::Function, props)
+                    .expect("Failed to add path-test node");
+            }
+
+            // A plain, non-public function with a non-matching name in a
+            // non-test path: matches no entry-type branch, so detect_entry_type
+            // returns None and it must be absent from the results.
+            let mut plain = PropertyMap::new();
+            plain.insert(
+                "name".to_string(),
+                codegraph::PropertyValue::String("compute".to_string()),
+            );
+            plain.insert(
+                "path".to_string(),
+                codegraph::PropertyValue::String("/src/util.rs".to_string()),
+            );
+            plain.insert("line_start".to_string(), codegraph::PropertyValue::Int(99));
+            // visibility defaults to "public" when unset, which would classify
+            // this as PublicApi; force it private so it reaches the None branch.
+            plain.insert(
+                "visibility".to_string(),
+                codegraph::PropertyValue::String("private".to_string()),
+            );
+            g.add_node(NodeType::Function, plain)
+                .expect("Failed to add plain node");
+        }
+
+        engine.build_indexes().await;
+
+        let tests = engine.find_entry_points(&[EntryType::TestEntry]).await;
+        assert_eq!(
+            tests.len(),
+            4,
+            "all four path-based test files classify as TestEntry"
+        );
+        assert!(tests
+            .iter()
+            .all(|e| matches!(e.entry_type, EntryType::TestEntry)));
+
+        // The None-classified "compute" node appears under no entry type.
+        let all = engine.find_entry_points(&[]).await;
+        assert!(
+            !all.iter().any(|e| e.symbol.name == "compute"),
+            "unclassified function must not surface as an entry point"
+        );
+    }
+
     #[test]
     fn split_identifier_words_handles_camel_and_snake() {
-        assert_eq!(split_identifier_words("authenticate_user"), "authenticate user");
+        assert_eq!(
+            split_identifier_words("authenticate_user"),
+            "authenticate user"
+        );
         assert_eq!(split_identifier_words("getUserById"), "get user by id");
         // The existing tokenizer keeps acronym+word runs joined (HTML|Parser is
         // NOT split) and drops 1-char tokens — known limitations worth revisiting
@@ -3986,12 +4066,314 @@ mod tests {
         // Enabled: split name words are front-loaded for the static embedder.
         let with_split =
             QueryEngine::build_embed_text(&node, 0, "getUserById", false, true, &graph);
-        assert!(with_split.starts_with("get user by id"), "got: {with_split}");
+        assert!(
+            with_split.starts_with("get user by id"),
+            "got: {with_split}"
+        );
 
         // Disabled (default): original transformer-path text is unchanged.
-        let without =
-            QueryEngine::build_embed_text(&node, 0, "getUserById", false, false, &graph);
+        let without = QueryEngine::build_embed_text(&node, 0, "getUserById", false, false, &graph);
         assert!(without.starts_with("getUserById"), "got: {without}");
         assert!(!without.contains("get user by id"));
+    }
+
+    #[test]
+    fn glob_to_anchored_regex_converts_glob_wildcards() {
+        // Plain glob: `*` -> `.*`, `?` -> `.`, both ends anchored, `.` escaped.
+        assert_eq!(QueryEngine::glob_to_anchored_regex("get*"), "^get.*$");
+        assert_eq!(QueryEngine::glob_to_anchored_regex("f?o"), "^f.o$");
+        assert_eq!(
+            QueryEngine::glob_to_anchored_regex("a.b"),
+            r"^a\.b$",
+            "a literal dot must be escaped in glob mode"
+        );
+        // Path separators are escaped too.
+        assert_eq!(QueryEngine::glob_to_anchored_regex("a/b"), r"^a\/b$");
+    }
+
+    #[test]
+    fn glob_to_anchored_regex_preserves_and_anchors_regex() {
+        // `.*` triggers regex mode; an un-anchored pattern is wrapped once.
+        assert_eq!(
+            QueryEngine::glob_to_anchored_regex("get.*User"),
+            "^(?:get.*User)$"
+        );
+        // A fully anchored regex is left untouched.
+        assert_eq!(
+            QueryEngine::glob_to_anchored_regex("^foo\\d+$"),
+            "^foo\\d+$"
+        );
+        // Only a start anchor: append `$`.
+        assert_eq!(QueryEngine::glob_to_anchored_regex("^foo|bar"), "^foo|bar$");
+        // Only an end anchor: prepend `^`.
+        assert_eq!(QueryEngine::glob_to_anchored_regex("foo|bar$"), "^foo|bar$");
+    }
+
+    #[test]
+    fn count_params_from_signature_handles_self_and_generics() {
+        assert_eq!(QueryEngine::count_params_from_signature("fn foo()"), 0);
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(a: i32)"),
+            1
+        );
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(a: i32, b: String)"),
+            2
+        );
+        // A top-level comma inside generics must not inflate the count.
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(m: HashMap<String, i32>)"),
+            1
+        );
+        // self receivers are not counted as parameters.
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(&self, a: i32)"),
+            1
+        );
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(&mut self)"),
+            0
+        );
+        // No parens at all -> 0.
+        assert_eq!(QueryEngine::count_params_from_signature("weird"), 0);
+    }
+
+    #[test]
+    fn extract_return_type_from_signature_rust_and_ts() {
+        // Rust arrow form, with a trailing brace stripped.
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("fn foo(a: i32) -> User {"),
+            "User"
+        );
+        // TypeScript/Java colon-after-paren form.
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("function foo(a: number): boolean"),
+            "boolean"
+        );
+        // No return annotation -> empty string.
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("fn foo(a: i32)"),
+            ""
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_covers_identical_orthogonal_and_zero() {
+        // Identical vectors -> 1.0.
+        assert!((cosine_similarity(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-6);
+        // Orthogonal vectors -> 0.0.
+        assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+        // A zero-norm operand short-circuits to 0.0 (no NaN from divide-by-zero).
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    #[tokio::test]
+    async fn type_matches_normalizes_primitive_aliases() {
+        let (engine, _) = create_test_engine().await;
+        // Primitive alias tables collapse to a shared canonical form.
+        assert!(engine.type_matches("boolean", "bool"));
+        assert!(engine.type_matches("i64", "integer"));
+        assert!(engine.type_matches("&str", "string"));
+        assert!(engine.type_matches("()", "void"));
+        // Generic prefix: bare base matches an instantiated generic.
+        assert!(engine.type_matches("Result<T, E>", "Result"));
+        // Case-insensitive base-type match across generics.
+        assert!(engine.type_matches("myvec<i32>", "MyVec<u8>"));
+        // Genuinely different types do not match.
+        assert!(!engine.type_matches("User", "Account"));
+    }
+
+    #[tokio::test]
+    async fn build_signature_match_reason_joins_all_present_criteria() {
+        let (engine, _) = create_test_engine().await;
+        // Distinct min/max renders a range; every criterion contributes a part
+        // and the parts are comma-joined in field order.
+        let pattern = SignaturePattern::new()
+            .with_name_pattern(".*validate.*")
+            .with_return_type("bool")
+            .with_param_count(1, 3)
+            .with_modifier("async")
+            .with_modifier("public");
+        assert_eq!(
+            engine.build_signature_match_reason(&pattern),
+            "name matches /.*validate.*/, returns bool, 1-3 parameters, modifiers: async, public"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_signature_match_reason_collapses_equal_param_bounds() {
+        let (engine, _) = create_test_engine().await;
+        // min == max drops the range form to a singular "{n} parameters".
+        let pattern = SignaturePattern::new().with_param_count(2, 2);
+        assert_eq!(
+            engine.build_signature_match_reason(&pattern),
+            "2 parameters"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_signature_match_reason_empty_pattern_uses_fallback() {
+        let (engine, _) = create_test_engine().await;
+        // No criteria set -> the parts vec is empty and the fallback string is
+        // returned rather than an empty join.
+        let pattern = SignaturePattern::new();
+        assert_eq!(
+            engine.build_signature_match_reason(&pattern),
+            "Signature match"
+        );
+    }
+
+    #[test]
+    fn count_params_from_signature_handles_unclosed_and_self_variants() {
+        // Unclosed paren never finds a matching ')', so paren_end is None -> 0.
+        assert_eq!(QueryEngine::count_params_from_signature("fn foo(a: i32"), 0);
+        // Whitespace-only parameter list trims to empty -> 0.
+        assert_eq!(QueryEngine::count_params_from_signature("fn foo(   )"), 0);
+        // A bare `self` receiver is subtracted, leaving 0.
+        assert_eq!(QueryEngine::count_params_from_signature("fn foo(self)"), 0);
+        // The `self: Type` receiver form is also subtracted.
+        assert_eq!(
+            QueryEngine::count_params_from_signature("fn foo(self: Box<Self>, a: i32)"),
+            1
+        );
+    }
+
+    #[test]
+    fn extract_return_type_from_signature_edge_forms() {
+        // Arrow present but the type is empty after stripping the brace, so the
+        // arrow branch falls through and the colon branch finds nothing -> "".
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("fn foo() -> {"),
+            ""
+        );
+        // Trailing semicolon is stripped from the arrow return type.
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("fn foo() -> i32;"),
+            "i32"
+        );
+        // Colon after the closing paren with no type after it -> "".
+        assert_eq!(
+            QueryEngine::extract_return_type_from_signature("function foo():"),
+            ""
+        );
+    }
+
+    #[test]
+    fn build_embed_text_covers_all_base_string_arms() {
+        // The sole prior build_embed_text test only exercised the signature-only
+        // base arm. Pin the other three: signature+docstring, docstring-only, and
+        // the bare-name fallback when neither property is present.
+        let graph = CodeGraph::in_memory().unwrap();
+
+        // signature + docstring -> "name: signature — docstring"
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new()
+                .with("signature", "fn f()")
+                .with("doc", "does a thing"),
+        );
+        assert_eq!(
+            QueryEngine::build_embed_text(&node, 0, "f", false, false, &graph),
+            "f: fn f() — does a thing"
+        );
+
+        // docstring only (no signature) -> "name — docstring"
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new().with("doc", "just docs"),
+        );
+        assert_eq!(
+            QueryEngine::build_embed_text(&node, 0, "f", false, false, &graph),
+            "f — just docs"
+        );
+
+        // neither signature nor docstring -> bare name
+        let node = codegraph::Node::new(0, codegraph::NodeType::Function, PropertyMap::new());
+        assert_eq!(
+            QueryEngine::build_embed_text(&node, 0, "f", false, false, &graph),
+            "f"
+        );
+    }
+
+    #[test]
+    fn build_embed_text_full_body_appends_body_prefix_or_falls_back() {
+        let graph = CodeGraph::in_memory().unwrap();
+
+        // full_body=true with a body_prefix longer than the base+10 threshold:
+        // the truncated body is appended after the base on a fresh line.
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new()
+                .with("signature", "fn f()")
+                .with("body_prefix", "fn f() { let x = 42; return x; }"),
+        );
+        let text = QueryEngine::build_embed_text(&node, 0, "f", true, false, &graph);
+        assert!(text.starts_with("f: fn f()\n"), "got: {text}");
+        assert!(text.contains("let x = 42"), "got: {text}");
+
+        // full_body=true but no body_prefix and the node id is absent from the
+        // graph, so get_symbol_source yields None and we fall back to the base.
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new().with("signature", "fn f()"),
+        );
+        assert_eq!(
+            QueryEngine::build_embed_text(&node, 999, "f", true, false, &graph),
+            "f: fn f()"
+        );
+    }
+
+    #[test]
+    fn resolve_edge_types_returns_forward_edge_types() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "a"))
+            .unwrap();
+        let b = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "b"))
+            .unwrap();
+        graph
+            .add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+            .unwrap();
+        graph
+            .add_edge(a, b, EdgeType::Uses, PropertyMap::new())
+            .unwrap();
+
+        // Forward edges a->b are found first, so their types are returned and
+        // the reverse-direction fallback scan is never consulted.
+        let types = QueryEngine::resolve_edge_types(&graph, a, b);
+        assert_eq!(types.len(), 2);
+        assert!(types.contains(&"Calls".to_string()));
+        assert!(types.contains(&"Uses".to_string()));
+    }
+
+    #[test]
+    fn resolve_edge_types_falls_back_to_reverse_then_empty() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "a"))
+            .unwrap();
+        let b = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "b"))
+            .unwrap();
+        // Only a reverse edge b->a exists: the forward scan is empty, so the
+        // fallback branch reports the reverse edge's type.
+        graph
+            .add_edge(b, a, EdgeType::Imports, PropertyMap::new())
+            .unwrap();
+        assert_eq!(
+            QueryEngine::resolve_edge_types(&graph, a, b),
+            vec!["Imports".to_string()]
+        );
+
+        // A pair with no edges in either direction yields an empty vec.
+        let c = graph
+            .add_node(NodeType::Function, PropertyMap::new().with("name", "c"))
+            .unwrap();
+        assert!(QueryEngine::resolve_edge_types(&graph, a, c).is_empty());
     }
 }

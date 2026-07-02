@@ -97,6 +97,34 @@ mod boundary_tests {
     fn zero_max_bytes() {
         assert_eq!(truncate_at_char_boundary("héllo", 0), "");
     }
+
+    #[test]
+    fn body_prefix_short_input_passes_through() {
+        // The public wrapper returns short input unchanged (below the cap).
+        assert_eq!(truncate_body_prefix("FROM python:3.11"), "FROM python:3.11");
+    }
+
+    #[test]
+    fn body_prefix_truncates_at_max_chars_on_boundary() {
+        // Exercises the wrapper's fixed BODY_PREFIX_MAX_CHARS (1024) cap.
+        // Pure ASCII, so the cut lands exactly on the byte limit.
+        let s = "x".repeat(BODY_PREFIX_MAX_CHARS + 50);
+        let out = truncate_body_prefix(&s);
+        assert_eq!(out.len(), BODY_PREFIX_MAX_CHARS);
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn body_prefix_walks_back_off_multibyte_at_cap() {
+        // A 3-byte '中' straddling the 1024-byte cap forces the wrapper to
+        // walk back to the boundary before it (1023), never panicking.
+        let mut s = "x".repeat(BODY_PREFIX_MAX_CHARS - 1);
+        s.push('中'); // occupies bytes 1023..1026
+        s.push_str("tail");
+        let out = truncate_body_prefix(&s);
+        assert_eq!(out.len(), BODY_PREFIX_MAX_CHARS - 1);
+        assert!(out.is_char_boundary(out.len()));
+    }
 }
 
 /// Represents a function parameter
@@ -294,5 +322,100 @@ impl FunctionEntity {
     /// Get the complexity grade (A-F), returning 'A' if not calculated
     pub fn complexity_grade(&self) -> char {
         self.complexity.as_ref().map(|c| c.grade()).unwrap_or('A')
+    }
+}
+
+#[cfg(test)]
+mod entity_tests {
+    use super::*;
+
+    #[test]
+    fn parameter_new_defaults() {
+        let p = Parameter::new("x");
+        assert_eq!(p.name, "x");
+        assert_eq!(p.type_annotation, None);
+        assert_eq!(p.default_value, None);
+        assert!(!p.is_variadic);
+    }
+
+    #[test]
+    fn parameter_builder_chain() {
+        let p = Parameter::new("count")
+            .with_type("usize")
+            .with_default("0")
+            .variadic();
+        assert_eq!(p.type_annotation, Some("usize".to_string()));
+        assert_eq!(p.default_value, Some("0".to_string()));
+        assert!(p.is_variadic);
+    }
+
+    #[test]
+    fn function_new_defaults() {
+        let f = FunctionEntity::new("foo", 3, 9);
+        // signature defaults to the name until overridden
+        assert_eq!(f.signature, "foo");
+        assert_eq!(f.visibility, "public");
+        assert_eq!(f.line_start, 3);
+        assert_eq!(f.line_end, 9);
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.parameters.is_empty());
+        assert_eq!(f.return_type, None);
+        assert_eq!(f.doc_comment, None);
+        assert!(f.attributes.is_empty());
+        assert_eq!(f.parent_class, None);
+        assert!(f.complexity.is_none());
+        assert_eq!(f.body_prefix, None);
+    }
+
+    #[test]
+    fn function_builder_covers_remaining_setters() {
+        let params = vec![Parameter::new("a"), Parameter::new("b")];
+        let f = FunctionEntity::new("m", 1, 2)
+            .static_fn()
+            .abstract_fn()
+            .with_parameters(params.clone())
+            .with_return_type("i32")
+            .with_doc("does m")
+            .with_attributes(vec!["#[inline]".to_string()])
+            .with_parent_class("Widget")
+            .with_body_prefix("fn m() {}");
+        assert!(f.is_static);
+        assert!(f.is_abstract);
+        assert_eq!(f.parameters, params);
+        assert_eq!(f.return_type, Some("i32".to_string()));
+        assert_eq!(f.doc_comment, Some("does m".to_string()));
+        assert_eq!(f.attributes, vec!["#[inline]".to_string()]);
+        assert_eq!(f.parent_class, Some("Widget".to_string()));
+        assert_eq!(f.body_prefix, Some("fn m() {}".to_string()));
+    }
+
+    #[test]
+    fn complexity_accessors_default_when_absent() {
+        let f = FunctionEntity::new("simple", 1, 2);
+        assert_eq!(f.cyclomatic_complexity(), 1);
+        assert_eq!(f.complexity_grade(), 'A');
+    }
+
+    #[test]
+    fn complexity_accessors_read_metrics() {
+        let metrics = ComplexityMetrics::new().with_branches(12);
+        let mut metrics = metrics;
+        metrics.calculate_cyclomatic(); // 1 + 12 = 13 -> grade C
+        let f = FunctionEntity::new("busy", 1, 40).with_complexity(metrics);
+        assert_eq!(f.cyclomatic_complexity(), 13);
+        assert_eq!(f.complexity_grade(), 'C');
+    }
+
+    #[test]
+    fn function_serde_round_trip() {
+        let f = FunctionEntity::new("rt", 1, 5)
+            .async_fn()
+            .with_return_type("()");
+        let json = serde_json::to_string(&f).unwrap();
+        let back: FunctionEntity = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
     }
 }

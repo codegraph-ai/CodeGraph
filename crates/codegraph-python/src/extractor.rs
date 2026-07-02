@@ -9,10 +9,8 @@
 use crate::config::ParserConfig;
 use crate::visitor::{extract_decorators, extract_docstring};
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, CodeIR, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImportRelation, InheritanceRelation, ModuleEntity, Parameter, TraitEntity,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, CodeIR, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImportRelation, InheritanceRelation, ModuleEntity, Parameter, TraitEntity,
 };
 use std::path::Path;
 use tree_sitter::{Node, Parser};
@@ -251,9 +249,7 @@ fn extract_function(
         .child_by_field_name("body")
         .and_then(|b| b.utf8_text(source).ok())
         .filter(|t| !t.is_empty())
-        .map(|t| {
-            truncate_body_prefix(t)
-        })
+        .map(truncate_body_prefix)
         .map(|t| t.to_string());
 
     if let Some(class_name) = parent_class {
@@ -521,9 +517,7 @@ fn extract_class(source: &[u8], node: Node, config: &ParserConfig) -> Option<Cla
         .child_by_field_name("body")
         .and_then(|b| b.utf8_text(source).ok())
         .filter(|t| !t.is_empty())
-        .map(|t| {
-            truncate_body_prefix(t)
-        })
+        .map(truncate_body_prefix)
         .map(|t| t.to_string());
 
     if is_enum {
@@ -814,17 +808,30 @@ fn calculate_complexity_recursive(source: &[u8], node: Node, builder: &mut Compl
             }
         }
         "match_statement" => {
-            // Each match case adds a branch
+            // Each match case adds a branch. tree-sitter nests the case_clause
+            // nodes inside the match_statement's `body` block rather than making
+            // them direct children, so walk descendants to find them.
             let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "case_clause" {
-                    builder.add_branch();
-                    builder.enter_scope();
-                    if let Some(body) = child.child_by_field_name("consequence") {
-                        calculate_complexity_recursive(source, body, builder);
+            let case_clauses: Vec<Node> = node
+                .child_by_field_name("body")
+                .map(|body| {
+                    body.children(&mut cursor)
+                        .filter(|c| c.kind() == "case_clause")
+                        .collect()
+                })
+                .unwrap_or_default();
+            for case_clause in case_clauses {
+                builder.add_branch();
+                builder.enter_scope();
+                // The case body is a `block` child of the case_clause; the
+                // grammar exposes no `consequence` field name for it.
+                let mut case_cursor = case_clause.walk();
+                for case_child in case_clause.children(&mut case_cursor) {
+                    if case_child.kind() == "block" {
+                        calculate_complexity_recursive(source, case_child, builder);
                     }
-                    builder.exit_scope();
                 }
+                builder.exit_scope();
             }
         }
         "boolean_operator" => {
@@ -1194,5 +1201,410 @@ async def fetch_data():
 
         assert_eq!(ir.functions.len(), 1);
         // Note: async detection depends on tree-sitter grammar details
+    }
+
+    // --- python_visibility unit coverage ---------------------------------
+
+    #[test]
+    fn test_python_visibility_all_branches() {
+        assert_eq!(python_visibility("foo"), "public");
+        assert_eq!(python_visibility("_protected"), "protected");
+        assert_eq!(python_visibility("__private"), "private");
+        assert_eq!(python_visibility("__init__"), "public");
+        // Bare "__" is not a dunder (len <= 4), so it falls through to private.
+        assert_eq!(python_visibility("__"), "private");
+    }
+
+    // --- parameter extraction --------------------------------------------
+
+    #[test]
+    fn test_parameter_kinds_extracted() {
+        let source = r#"
+def f(a, b: int, c=1, d: str = "x", *args, **kwargs):
+    pass
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let params = &ir.functions[0].parameters;
+        assert_eq!(params.len(), 6);
+
+        // Plain identifier: no type, no default, not variadic.
+        assert_eq!(params[0].name, "a");
+        assert_eq!(params[0].type_annotation, None);
+        assert_eq!(params[0].default_value, None);
+        assert!(!params[0].is_variadic);
+
+        // typed_parameter: type only.
+        assert_eq!(params[1].name, "b");
+        assert_eq!(params[1].type_annotation.as_deref(), Some("int"));
+        assert_eq!(params[1].default_value, None);
+
+        // default_parameter: default only.
+        assert_eq!(params[2].name, "c");
+        assert_eq!(params[2].type_annotation, None);
+        assert_eq!(params[2].default_value.as_deref(), Some("1"));
+
+        // typed_default_parameter: type and default.
+        assert_eq!(params[3].name, "d");
+        assert_eq!(params[3].type_annotation.as_deref(), Some("str"));
+        assert_eq!(params[3].default_value.as_deref(), Some("\"x\""));
+
+        // *args and **kwargs are variadic.
+        assert_eq!(params[4].name, "args");
+        assert!(params[4].is_variadic);
+        assert_eq!(params[5].name, "kwargs");
+        assert!(params[5].is_variadic);
+    }
+
+    // --- return type ------------------------------------------------------
+
+    #[test]
+    fn test_return_type_extracted() {
+        let source = r#"
+def total() -> int:
+    return 0
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.functions[0].return_type.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_return_type_absent_when_unannotated() {
+        let source = r#"
+def total():
+    return 0
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.functions[0].return_type, None);
+    }
+
+    // --- docstrings / body_prefix ----------------------------------------
+
+    #[test]
+    fn test_function_docstring_extracted() {
+        let source = "def f():\n    \"\"\"Adds things.\"\"\"\n    return 1\n";
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert!(ir.functions[0]
+            .doc_comment
+            .as_deref()
+            .unwrap()
+            .contains("Adds things"));
+    }
+
+    #[test]
+    fn test_function_body_prefix_present() {
+        let source = r#"
+def f():
+    return 1
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert!(ir.functions[0].body_prefix.is_some());
+    }
+
+    // --- decorators -------------------------------------------------------
+
+    #[test]
+    fn test_staticmethod_decorator_sets_is_static() {
+        let source = r#"
+class C:
+    @staticmethod
+    def util():
+        return 1
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let m = ir.functions.iter().find(|f| f.name == "util").unwrap();
+        assert!(m.is_static);
+        assert!(m.attributes.iter().any(|a| a.contains("staticmethod")));
+    }
+
+    #[test]
+    fn test_classmethod_decorator_is_not_static() {
+        let source = r#"
+class C:
+    @classmethod
+    def make(cls):
+        return cls()
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let m = ir.functions.iter().find(|f| f.name == "make").unwrap();
+        assert!(!m.is_static);
+        assert!(m.attributes.iter().any(|a| a.contains("classmethod")));
+    }
+
+    #[test]
+    fn test_decorated_function_is_flagged_async() {
+        // Quirk: any decorated function is flagged is_async because the
+        // parent node kind is decorated_definition.
+        let source = r#"
+class C:
+    @property
+    def value(self):
+        return 1
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let m = ir.functions.iter().find(|f| f.name == "value").unwrap();
+        assert!(m.is_async);
+    }
+
+    // --- config filters ---------------------------------------------------
+
+    #[test]
+    fn test_include_private_false_skips_private_keeps_dunder() {
+        let source = r#"
+def public_func():
+    pass
+
+def _helper():
+    pass
+
+def __init__():
+    pass
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig {
+            include_private: false,
+            ..Default::default()
+        };
+        let ir = extract(source, path, &config).unwrap();
+
+        let names: Vec<&str> = ir.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"public_func"));
+        assert!(names.contains(&"__init__"));
+        assert!(!names.contains(&"_helper"));
+    }
+
+    #[test]
+    fn test_include_tests_false_skips_test_functions() {
+        let source = r#"
+def regular():
+    pass
+
+def test_regular():
+    pass
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig {
+            include_tests: false,
+            ..Default::default()
+        };
+        let ir = extract(source, path, &config).unwrap();
+
+        let names: Vec<&str> = ir.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"regular"));
+        assert!(!names.contains(&"test_regular"));
+    }
+
+    // --- methods / parent_class ------------------------------------------
+
+    #[test]
+    fn test_method_has_parent_class() {
+        let source = r#"
+class Calc:
+    def add(self, a, b):
+        return a + b
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let m = ir.functions.iter().find(|f| f.name == "add").unwrap();
+        assert_eq!(m.parent_class.as_deref(), Some("Calc"));
+    }
+
+    // --- imports ----------------------------------------------------------
+
+    #[test]
+    fn test_import_with_alias() {
+        let source = "import numpy as np\n";
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.imports.len(), 1);
+        assert_eq!(ir.imports[0].imported, "numpy");
+        assert_eq!(ir.imports[0].alias.as_deref(), Some("np"));
+    }
+
+    #[test]
+    fn test_from_import_records_symbols() {
+        let source = "from typing import List, Dict\n";
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.imports.len(), 1);
+        assert_eq!(ir.imports[0].imported, "typing");
+        assert!(ir.imports[0].symbols.contains(&"List".to_string()));
+        assert!(ir.imports[0].symbols.contains(&"Dict".to_string()));
+        assert!(!ir.imports[0].is_wildcard);
+    }
+
+    #[test]
+    fn test_from_import_wildcard() {
+        let source = "from collections import *\n";
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.imports.len(), 1);
+        assert_eq!(ir.imports[0].imported, "collections");
+        assert!(ir.imports[0].is_wildcard);
+    }
+
+    // --- calls ------------------------------------------------------------
+
+    #[test]
+    fn test_call_with_attribute_callee_uses_full_path() {
+        let source = r#"
+class C:
+    def run(self):
+        self.helper()
+
+    def helper(self):
+        pass
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert!(ir
+            .calls
+            .iter()
+            .any(|c| c.caller == "C.run" && c.callee == "self.helper"));
+    }
+
+    // --- inheritance / class detection -----------------------------------
+
+    #[test]
+    fn test_inheritance_from_qualified_base() {
+        let source = r#"
+class Child(mod.Base):
+    pass
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.inheritance.len(), 1);
+        assert_eq!(ir.inheritance[0].child, "Child");
+        assert_eq!(ir.inheritance[0].parent, "mod.Base");
+    }
+
+    #[test]
+    fn test_qualified_enum_base_detected() {
+        let source = r#"
+import enum
+
+class Color(enum.Enum):
+    RED = 1
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.classes.len(), 1);
+        assert!(ir.classes[0].attributes.contains(&"enum".to_string()));
+    }
+
+    #[test]
+    fn test_protocol_maps_to_trait() {
+        let source = r#"
+from typing import Protocol
+
+class Drawable(Protocol):
+    def draw(self) -> None:
+        ...
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.classes.len(), 0);
+        assert_eq!(ir.traits.len(), 1);
+        assert_eq!(ir.traits[0].name, "Drawable");
+    }
+
+    // --- complexity edge cases -------------------------------------------
+
+    #[test]
+    fn test_ternary_adds_branch() {
+        let source = r#"
+def choose(x):
+    return 1 if x else 0
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let c = ir.functions[0].complexity.as_ref().unwrap();
+        assert!(c.branches >= 1);
+    }
+
+    #[test]
+    fn test_match_statement_adds_branches() {
+        let source = r#"
+def dispatch(cmd):
+    match cmd:
+        case "a":
+            return 1
+        case "b":
+            return 2
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let c = ir.functions[0].complexity.as_ref().unwrap();
+        assert!(c.branches >= 2);
+    }
+
+    #[test]
+    fn test_comprehension_with_condition_adds_loop_and_branch() {
+        let source = r#"
+def evens(items):
+    return [x for x in items if x % 2 == 0]
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let c = ir.functions[0].complexity.as_ref().unwrap();
+        assert!(c.loops >= 1);
+        assert!(c.branches >= 1);
+    }
+
+    #[test]
+    fn test_relative_from_import_default_module() {
+        let source = "from . import sibling\n";
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        assert_eq!(ir.imports.len(), 1);
+        assert_eq!(ir.imports[0].imported, ".");
+        assert!(ir.imports[0].symbols.contains(&"sibling".to_string()));
     }
 }

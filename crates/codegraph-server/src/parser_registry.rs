@@ -694,6 +694,12 @@ mod tests {
             .is_some());
         #[cfg(feature = "extra-languages")]
         assert!(registry.parser_for_path(&PathBuf::from("test.R")).is_some());
+        // `.pl` resolves through the perl entry appended to the fan-out; the
+        // other extra extensions above already cover their appended entries.
+        #[cfg(feature = "extra-languages")]
+        assert!(registry
+            .parser_for_path(&PathBuf::from("test.pl"))
+            .is_some());
         assert!(registry
             .parser_for_path(&PathBuf::from("test.scala"))
             .is_some());
@@ -774,11 +780,38 @@ mod tests {
         let names: Vec<&str> = metrics.iter().map(|(n, _)| *n).collect();
         #[cfg_attr(not(feature = "extra-languages"), allow(unused_mut))]
         let mut expected = vec![
-            "bash", "c", "clojure", "cpp", "css", "csharp", "dockerfile",
-            "elixir", "elm", "erlang", "go", "groovy", "haskell", "hcl", "java",
-            "julia", "kotlin", "lua", "objc", "ocaml", "php", "python", "ruby",
-            "rust", "scala", "solidity", "swift", "tcl", "toml", "typescript",
-            "verilog", "yaml",
+            "bash",
+            "c",
+            "clojure",
+            "cpp",
+            "css",
+            "csharp",
+            "dockerfile",
+            "elixir",
+            "elm",
+            "erlang",
+            "go",
+            "groovy",
+            "haskell",
+            "hcl",
+            "java",
+            "julia",
+            "kotlin",
+            "lua",
+            "objc",
+            "ocaml",
+            "php",
+            "python",
+            "ruby",
+            "rust",
+            "scala",
+            "solidity",
+            "swift",
+            "tcl",
+            "toml",
+            "typescript",
+            "verilog",
+            "yaml",
         ];
         // Gated grammars are appended after the base set (see `all_metrics`).
         #[cfg(feature = "extra-languages")]
@@ -912,6 +945,135 @@ mod tests {
             Some("scala")
         );
         assert_eq!(registry.language_for_path(&PathBuf::from("test.txt")), None);
+    }
+
+    #[test]
+    fn test_get_parser_additional_languages() {
+        let registry = ParserRegistry::new();
+        // Bash aliases all resolve to the same parser.
+        assert!(registry.get_parser("bash").is_some());
+        assert!(registry.get_parser("shell").is_some());
+        assert!(registry.get_parser("sh").is_some());
+        // Languages/aliases not exercised by the case-insensitive or js-variant tests.
+        assert!(registry.get_parser("clojure").is_some());
+        assert!(registry.get_parser("css").is_some());
+        assert!(registry.get_parser("dockerfile").is_some());
+        assert!(registry.get_parser("containerfile").is_some());
+        assert!(registry.get_parser("elixir").is_some());
+        assert!(registry.get_parser("elm").is_some());
+        assert!(registry.get_parser("erlang").is_some());
+        assert!(registry.get_parser("haskell").is_some());
+        assert!(registry.get_parser("hcl").is_some());
+        assert!(registry.get_parser("terraform").is_some());
+        assert!(registry.get_parser("julia").is_some());
+        assert!(registry.get_parser("objc").is_some());
+        assert!(registry.get_parser("objective-c").is_some());
+        assert!(registry.get_parser("objectivec").is_some());
+        assert!(registry.get_parser("ocaml").is_some());
+        assert!(registry.get_parser("solidity").is_some());
+        assert!(registry.get_parser("sol").is_some());
+        assert!(registry.get_parser("toml").is_some());
+        assert!(registry.get_parser("yaml").is_some());
+        assert!(registry.get_parser("verilog").is_some());
+        assert!(registry.get_parser("systemverilog").is_some());
+        #[cfg(feature = "extra-languages")]
+        {
+            assert!(registry.get_parser("perl").is_some());
+            assert!(registry.get_parser("r").is_some());
+        }
+    }
+
+    #[test]
+    fn test_language_for_path_additional_languages() {
+        let registry = ParserRegistry::new();
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("script.sh")),
+            Some("bash")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("core.clj")),
+            Some("clojure")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("styles.css")),
+            Some("css")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("Dockerfile")),
+            Some("dockerfile")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("app.ex")),
+            Some("elixir")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("Main.elm")),
+            Some("elm")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("mod.erl")),
+            Some("erlang")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("Lib.hs")),
+            Some("haskell")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("main.tf")),
+            Some("hcl")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("calc.jl")),
+            Some("julia")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("View.m")),
+            Some("objc")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("parser.ml")),
+            Some("ocaml")
+        );
+        // Perl is the only gated grammar whose path-resolution arm
+        // (`extra_language_for_path`'s perl branch) was never exercised; every
+        // other extra-language extension already has a `language_for_path` case.
+        #[cfg(feature = "extra-languages")]
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("script.pl")),
+            Some("perl")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("Token.sol")),
+            Some("solidity")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("Cargo.toml")),
+            Some("toml")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("config.yaml")),
+            Some("yaml")
+        );
+    }
+
+    #[test]
+    fn test_language_for_path_cpp_extension_variants() {
+        let registry = ParserRegistry::new();
+        // `.cxx`/`.hh`/`.hxx` are claimed only by the C++ parser (not C), so they
+        // resolve to "cpp" through the plain cpp fallback branch rather than the
+        // C-vs-C++ header disambiguation path (which only fires for `.h`).
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("engine.cxx")),
+            Some("cpp")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("engine.hh")),
+            Some("cpp")
+        );
+        assert_eq!(
+            registry.language_for_path(&PathBuf::from("engine.hxx")),
+            Some("cpp")
+        );
     }
 
     #[test]

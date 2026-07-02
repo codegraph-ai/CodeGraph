@@ -4,9 +4,8 @@
 //! AST visitor for extracting Go entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImportRelation, Parameter, TraitEntity, TypeReference, BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImportRelation, Parameter, TraitEntity, TypeReference,
 };
 use tree_sitter::Node;
 
@@ -118,9 +117,7 @@ impl<'a> GoVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -199,9 +196,7 @@ impl<'a> GoVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -524,9 +519,7 @@ impl<'a> GoVisitor<'a> {
                                 .utf8_text(self.source)
                                 .ok()
                                 .filter(|t| !t.is_empty())
-                                .map(|t| {
-                                    truncate_body_prefix(t)
-                                })
+                                .map(truncate_body_prefix)
                                 .map(|t| t.to_string());
 
                             let struct_entity = ClassEntity {
@@ -682,7 +675,9 @@ mod tests {
 
         let source = b"package main\nfunc greet(name string) string { return \"Hello\" }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -698,7 +693,9 @@ mod tests {
 
         let source = b"package main\ntype Person struct { Name string }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -714,7 +711,9 @@ mod tests {
 
         let source = b"package main\ntype Reader interface { Read() error }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -730,7 +729,9 @@ mod tests {
 
         let source = b"package main\nfunc (p Person) String() string { return \"\" }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -747,7 +748,9 @@ mod tests {
 
         let source = b"package main\nimport \"fmt\"";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -762,7 +765,9 @@ mod tests {
 
         let source = b"package main\ntype User struct {}\ntype Admin struct {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -780,7 +785,9 @@ mod tests {
 
         let source = b"package main\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"io\"\n)";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -803,7 +810,9 @@ mod tests {
 
         let source = b"package main\nimport f \"fmt\"";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -821,7 +830,9 @@ mod tests {
 
         let source = b"package main\nimport . \"fmt\"";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -839,7 +850,9 @@ mod tests {
 
         let source = b"package main\nimport _ \"database/sql\"";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -857,7 +870,9 @@ mod tests {
 
         let source = b"package main\nimport (\n\tf \"fmt\"\n\t. \"os\"\n\t_ \"encoding/json\"\n)";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -887,7 +902,9 @@ mod tests {
 
         let source = b"package main\nfunc caller() {\n\tcallee()\n\tfmt.Println(\"hello\")\n}\nfunc callee() {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -906,7 +923,9 @@ mod tests {
 
         let source = b"package main\ntype Foo struct{}\nfunc (f Foo) Method() {\n\thelper()\n}\nfunc helper() {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -923,7 +942,9 @@ mod tests {
 
         let source = b"package main\nfunc standalone() {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -938,7 +959,9 @@ mod tests {
 
         let source = b"package main\nfunc add(a int, b int) int { return a + b }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -959,7 +982,9 @@ mod tests {
 
         let source = b"package main\nfunc sum(nums ...int) int { return 0 }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -980,7 +1005,9 @@ mod tests {
 
         let source = b"package main\nfunc divide(a, b float64) (float64, error) { return 0, nil }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1003,7 +1030,9 @@ mod tests {
 
         let source = b"package main\ntype Foo struct{}\nfunc (f *Foo) Bar() string { return \"\" }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1024,7 +1053,9 @@ mod tests {
         // A function with no branches — CC should be 1
         let source = b"package main\nfunc simple(x int) int { return x + 1 }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1047,7 +1078,9 @@ mod tests {
         // if adds 1 branch, else adds 1 branch, for adds 1 loop → CC = 1 + 3 = 4
         let source = b"package main\nfunc process(n int) int {\n\tif n > 0 {\n\t\treturn n\n\t} else {\n\t\treturn -n\n\t}\n\tfor i := 0; i < n; i++ {}\n\treturn 0\n}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1089,7 +1122,9 @@ func handle(x int, ch chan int) {
     }
 }"#;
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1114,7 +1149,9 @@ func handle(x int, ch chan int) {
         let source =
             b"package main\ntype Config struct{}\nfunc setup(cfg Config) error { return nil }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1145,7 +1182,9 @@ func handle(x int, ch chan int) {
         let source =
             b"package main\ntype Response struct{}\nfunc fetch() Response { return Response{} }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1171,7 +1210,9 @@ func handle(x int, ch chan int) {
         let source =
             b"package main\ntype Foo struct{}\ntype Bar struct{}\nfunc (f Foo) Do(b Bar) {}";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1196,7 +1237,9 @@ func handle(x int, ch chan int) {
 
         let source = b"package main\ntype Node struct{}\nfunc process(n *Node) *Node { return n }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1220,7 +1263,9 @@ func handle(x int, ch chan int) {
 
         let source = b"package main\nfunc add(a int, b int) int { return a + b }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1240,7 +1285,9 @@ func handle(x int, ch chan int) {
         // && and || each add a logical operator count
         let source = b"package main\nfunc check(a, b, c bool) bool { return a && b || c }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_go::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let mut visitor = GoVisitor::new(source);
@@ -1252,6 +1299,340 @@ func handle(x int, ch chan int) {
             complexity.logical_operators >= 2,
             "&& and || should each count, got {}",
             complexity.logical_operators
+        );
+    }
+
+    // --- Helper to parse and run the visitor over Go source ---
+    fn parse_and_visit(source: &[u8]) -> GoVisitor<'_> {
+        use tree_sitter::Parser;
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut visitor = GoVisitor::new(source);
+        visitor.visit_node(tree.root_node());
+        visitor
+    }
+
+    #[test]
+    fn test_function_line_offset_by_blank_lines() {
+        // Two leading blank lines push the func to line 3 (1-indexed).
+        let source = b"package main\n\n\nfunc greet() {\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].line_start, 4);
+        assert_eq!(visitor.functions[0].line_end, 5);
+    }
+
+    #[test]
+    fn test_function_body_prefix_truncated() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // Build an oversized body so body_prefix is truncated to the cap.
+        let filler = "a := 0\n".repeat(400);
+        let source = format!("package main\nfunc big() {{\n{filler}}}");
+        let visitor = parse_and_visit(source.as_bytes());
+        assert_eq!(visitor.functions.len(), 1);
+        let body_prefix = visitor.functions[0].body_prefix.as_ref().unwrap();
+        assert_eq!(body_prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_benchmark_prefix_is_test() {
+        // Both Test* and Benchmark* names flag is_test.
+        let source = b"package main\nfunc BenchmarkFoo() {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(
+            visitor.functions[0].is_test,
+            "Benchmark-prefixed function should be flagged is_test"
+        );
+    }
+
+    #[test]
+    fn test_private_function_visibility() {
+        // Lowercase first letter → unexported → private visibility.
+        let source = b"package main\nfunc helper() {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_function_default_flags() {
+        // Go plain function: not async/static/abstract, no doc, no parent.
+        let source = b"package main\nfunc plain() {}";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert!(!f.is_async);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(f.doc_comment.is_none());
+        assert!(f.parent_class.is_none());
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_call_relation_default_metadata() {
+        // A direct call records default metadata and the call-site line.
+        let source = b"package main\nfunc caller() {\n\tcallee()\n}\nfunc callee() {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.calls.len(), 1);
+        let call = &visitor.calls[0];
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+        // callee() is on line 3 (1-indexed).
+        assert_eq!(call.call_site_line, 3);
+    }
+
+    #[test]
+    fn test_nested_call_in_if_attributed_to_function() {
+        // A call inside an if-body is still attributed to the enclosing function.
+        let source = b"package main\nfunc outer(x int) {\n\tif x > 0 {\n\t\tinner()\n\t}\n}\nfunc inner() {}";
+        let visitor = parse_and_visit(source);
+        let inner: Vec<_> = visitor
+            .calls
+            .iter()
+            .filter(|c| c.callee == "inner")
+            .collect();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].caller, "outer");
+    }
+
+    #[test]
+    fn test_defer_statement_raises_complexity() {
+        // Go uses defer as an exception-handler equivalent, raising complexity.
+        let source = b"package main\nfunc f() {\n\tdefer cleanup()\n}\nfunc cleanup() {}";
+        let visitor = parse_and_visit(source);
+        let f = visitor.functions.iter().find(|f| f.name == "f").unwrap();
+        let complexity = f.complexity.as_ref().unwrap();
+        assert_eq!(
+            complexity.exception_handlers, 1,
+            "defer should count as one exception handler"
+        );
+    }
+
+    #[test]
+    fn test_struct_body_prefix_present() {
+        // Struct definitions capture their type body in body_prefix.
+        let source = b"package main\ntype Point struct {\n\tX int\n\tY int\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.structs.len(), 1);
+        let body_prefix = visitor.structs[0].body_prefix.as_ref().unwrap();
+        assert!(body_prefix.contains("X int"));
+        assert!(body_prefix.contains("Y int"));
+    }
+
+    #[test]
+    fn test_multiple_names_one_param_declaration() {
+        // `a, b int` collapses to two separate parameters sharing the type.
+        let source = b"package main\nfunc add(a, b int) int { return a + b }";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.parameters.len(), 2);
+        assert_eq!(f.parameters[0].name, "a");
+        assert_eq!(f.parameters[1].name, "b");
+        assert_eq!(f.parameters[0].type_annotation.as_deref(), Some("int"));
+        assert_eq!(f.parameters[1].type_annotation.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_function_no_return_type_is_none() {
+        // A function with no result clause has return_type None.
+        let source = b"package main\nfunc noop() {}";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].return_type.is_none());
+    }
+
+    #[test]
+    fn test_type_ref_qualified_type_takes_field() {
+        // A qualified type like io.Reader records the field portion (Reader).
+        let source = b"package main\nfunc wrap(r io.Reader) {}";
+        let visitor = parse_and_visit(source);
+        let refs: Vec<_> = visitor
+            .type_references
+            .iter()
+            .filter(|r| r.referrer == "wrap")
+            .collect();
+        assert!(
+            refs.iter().any(|r| r.type_name == "Reader"),
+            "wrap should reference Reader from io.Reader, got: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn test_interface_line_numbers() {
+        // An interface after a blank line reports 1-indexed line bounds.
+        let source = b"package main\n\ntype Closer interface {\n\tClose() error\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.interfaces.len(), 1);
+        assert_eq!(visitor.interfaces[0].line_start, 3);
+        assert_eq!(visitor.interfaces[0].line_end, 5);
+    }
+
+    #[test]
+    fn test_struct_fields_always_empty() {
+        // Latent gap: struct fields are never populated even when declared.
+        let source = b"package main\ntype Point struct {\n\tX int\n\tY string\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.structs.len(), 1);
+        assert!(
+            visitor.structs[0].fields.is_empty(),
+            "GoVisitor never extracts struct fields (hardcoded empty)"
+        );
+    }
+
+    #[test]
+    fn test_struct_methods_and_bases_always_empty() {
+        // Latent gap: methods, base_classes, and type_parameters are never
+        // populated on a struct entity regardless of the source.
+        let source = b"package main\ntype T[K comparable] struct {\n\tK K\n}";
+        let visitor = parse_and_visit(source);
+        let s = &visitor.structs[0];
+        assert!(s.methods.is_empty());
+        assert!(s.base_classes.is_empty());
+        assert!(s.implemented_traits.is_empty());
+        assert!(s.type_parameters.is_empty());
+        assert!(!s.is_interface);
+        assert!(!s.is_abstract);
+    }
+
+    #[test]
+    fn test_struct_visibility_always_public() {
+        // Pin: struct visibility is hardcoded "public", ignoring Go's
+        // export rule (an unexported lowercase struct still reads as public).
+        let source = b"package main\ntype point struct {}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.structs.len(), 1);
+        assert_eq!(visitor.structs[0].visibility, "public");
+    }
+
+    #[test]
+    fn test_struct_body_prefix_truncated() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // An oversized struct body is truncated to the cap.
+        let fields = (0..400)
+            .map(|i| format!("\tField{i} int\n"))
+            .collect::<String>();
+        let source = format!("package main\ntype Big struct {{\n{fields}}}");
+        let visitor = parse_and_visit(source.as_bytes());
+        assert_eq!(visitor.structs.len(), 1);
+        let body_prefix = visitor.structs[0].body_prefix.as_ref().unwrap();
+        assert_eq!(body_prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_interface_required_methods_always_empty() {
+        // Latent gap: interface methods are never captured as required_methods.
+        let source =
+            b"package main\ntype Writer interface {\n\tWrite(p []byte) (int, error)\n\tClose() error\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.interfaces.len(), 1);
+        assert!(
+            visitor.interfaces[0].required_methods.is_empty(),
+            "GoVisitor never populates interface required_methods (hardcoded empty)"
+        );
+    }
+
+    #[test]
+    fn test_interface_embedding_parent_traits_empty() {
+        // Latent gap: an embedded interface is never recorded as a parent trait.
+        let source = b"package main\ntype ReadCloser interface {\n\tReader\n\tClose() error\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.interfaces.len(), 1);
+        assert!(
+            visitor.interfaces[0].parent_traits.is_empty(),
+            "embedded interfaces are not recorded as parent_traits"
+        );
+    }
+
+    #[test]
+    fn test_type_alias_produces_no_entity() {
+        // Only struct_type/interface_type are handled; a named basic type
+        // like `type ID int` yields neither a struct nor an interface.
+        let source = b"package main\ntype ID int";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.structs.is_empty());
+        assert!(visitor.interfaces.is_empty());
+    }
+
+    #[test]
+    fn test_unnamed_parameter_has_empty_name() {
+        // A type-only parameter (`func f(int)`) yields one param with an
+        // empty name but a preserved type annotation.
+        let source = b"package main\nfunc f(int) {}";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.parameters.len(), 1);
+        assert_eq!(f.parameters[0].name, "");
+        assert_eq!(f.parameters[0].type_annotation.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_type_switch_raises_complexity() {
+        // A type switch's cases each add a branch, raising complexity.
+        let source = br#"package main
+func classify(x interface{}) {
+    switch x.(type) {
+    case int:
+        return
+    case string:
+        return
+    default:
+        return
+    }
+}"#;
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        let complexity = f.complexity.as_ref().unwrap();
+        assert!(
+            complexity.branches >= 3,
+            "type switch with 3 cases should add >= 3 branches, got {}",
+            complexity.branches
+        );
+    }
+
+    #[test]
+    fn test_return_type_qualified_type_ref() {
+        // A qualified return type (io.Writer) records the field portion.
+        let source = b"package main\nfunc open() io.Writer { return nil }";
+        let visitor = parse_and_visit(source);
+        let refs: Vec<_> = visitor
+            .type_references
+            .iter()
+            .filter(|r| r.referrer == "open")
+            .collect();
+        assert!(
+            refs.iter().any(|r| r.type_name == "Writer"),
+            "open should reference Writer from io.Writer, got: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn test_method_is_test_always_false() {
+        // Pin: is_test is hardcoded false for methods, even a Test-prefixed
+        // receiver method (Go test functions are never methods anyway).
+        let source = b"package main\ntype S struct{}\nfunc (s S) TestThing() {}";
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "TestThing")
+            .unwrap();
+        assert!(!m.is_test, "method is_test is always false");
+        assert_eq!(m.parent_class.as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn test_call_in_func_literal_dropped() {
+        // Latent gap: a call inside a top-level func literal has no enclosing
+        // named function, so current_function is None and the call is dropped.
+        let source = b"package main\nvar f = func() {\n\thelper()\n}\nfunc helper() {}";
+        let visitor = parse_and_visit(source);
+        assert!(
+            !visitor.calls.iter().any(|c| c.callee == "helper"),
+            "call inside a top-level func literal should be dropped (no caller)"
         );
     }
 }

@@ -124,11 +124,61 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_zero_max_file_size() {
+        // The max_file_size == 0 guard (distinct from the num_threads guard)
+        // returns its own error message.
+        let config = ParserConfig {
+            max_file_size: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "max_file_size must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_file_extensions() {
+        // An empty extension list is invalid - nothing would ever be parsed.
+        let mut config = ParserConfig::default();
+        config.file_extensions.clear();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "file_extensions cannot be empty"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_num_threads_message() {
+        // The num_threads == 0 guard returns its own distinct message. The
+        // pre-existing test_validate only asserted `.is_err()` here, leaving the
+        // exact wording unpinned (unlike the max_file_size / file_extensions
+        // guards, whose messages are asserted verbatim above).
+        let config = ParserConfig {
+            num_threads: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "num_threads must be greater than 0"
+        );
+    }
+
+    #[test]
     fn test_should_parse_extension() {
         let config = ParserConfig::default();
         assert!(config.should_parse_extension(".py"));
         assert!(config.should_parse_extension("py"));
         assert!(!config.should_parse_extension(".rs"));
+    }
+
+    #[test]
+    fn test_should_parse_extension_is_case_sensitive() {
+        // Matching is a byte-for-byte `==` after trimming the leading dot, so an
+        // uppercase extension does NOT match the lowercase ".py" default.
+        let config = ParserConfig::default();
+        assert!(!config.should_parse_extension("PY"));
+        assert!(!config.should_parse_extension(".PY"));
     }
 
     #[test]
@@ -138,5 +188,28 @@ mod tests {
         assert!(config.should_exclude_dir(".venv"));
         assert!(config.should_exclude_dir("mypackage.egg-info"));
         assert!(!config.should_exclude_dir("src"));
+    }
+
+    #[test]
+    fn test_should_exclude_dir_glob_matches_substring_not_just_suffix() {
+        // The `*.egg-info` pattern strips the '*' to ".egg-info" and uses
+        // `contains`, so it matches the fragment anywhere in the name - not just
+        // as a trailing suffix. A dir with trailing characters after the fragment
+        // still matches.
+        let config = ParserConfig::default();
+        assert!(config.should_exclude_dir("foo.egg-info.bak"));
+        // The leading dot is part of the fragment: a bare "egg-info" (no dot)
+        // does not contain ".egg-info" and is therefore not excluded.
+        assert!(!config.should_exclude_dir("egg-info"));
+    }
+
+    #[test]
+    fn test_should_exclude_dir_non_glob_requires_exact_match() {
+        // Non-glob entries (no '*') use `==`, so a partial or decorated name is
+        // not excluded even though it shares a prefix with an excluded dir.
+        let config = ParserConfig::default();
+        assert!(!config.should_exclude_dir("build/"));
+        assert!(!config.should_exclude_dir("mybuild"));
+        assert!(!config.should_exclude_dir("__pycache__2"));
     }
 }

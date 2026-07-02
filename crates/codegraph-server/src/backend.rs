@@ -1058,7 +1058,6 @@ impl LanguageServer for CodeGraphBackend {
 
         let folders = self.workspace_folders.read().await.clone();
         let config = self.config.read().await.clone();
-        let mut total_indexed = 0;
         let mut files_parsed = 0usize;
 
         // Try to load persisted graph from previous session (RocksDB).
@@ -1137,7 +1136,6 @@ impl LanguageServer for CodeGraphBackend {
                 .indexer
                 .index_workspace(&self.graph, &paths_to_index, &idx_config)
                 .await;
-            total_indexed = result.total_files;
             files_parsed = result.files_parsed;
 
             if result.files_parsed > 0 {
@@ -4139,6 +4137,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_find_node_at_position_fallback_skips_col_before_start() {
+        use codegraph::PropertyValue;
+        let backend = create_test_backend();
+        let path = Path::new("/test/file.rs");
+
+        // Node spans lines 5..25 but starts at column 8 on its first line.
+        let func_id = {
+            let mut g = backend.graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert("name".to_string(), PropertyValue::String("f".to_string()));
+            props.insert(
+                "path".to_string(),
+                PropertyValue::String("/test/file.rs".to_string()),
+            );
+            props.insert("line_start".to_string(), PropertyValue::Int(5));
+            props.insert("line_end".to_string(), PropertyValue::Int(25));
+            props.insert("col_start".to_string(), PropertyValue::Int(8));
+            props.insert("col_end".to_string(), PropertyValue::Int(50));
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+        // Index the node over lines 10..20 so the exact-match lookup misses line 5
+        // and we fall through to the graph-scan branch.
+        add_func_to_index(&backend, path, func_id, "f", 10, 20);
+
+        let graph = backend.graph.read().await;
+        // Line 5 (position.line + 1), column 3 < col_start (8) -> the col-before-start
+        // `continue` fires, leaving no match.
+        let position = Position {
+            line: 4,
+            character: 3,
+        };
+        let result = backend.find_node_at_position(&graph, path, position);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_find_node_at_position_fallback_skips_col_after_end() {
+        use codegraph::PropertyValue;
+        let backend = create_test_backend();
+        let path = Path::new("/test/file.rs");
+
+        // Node spans lines 5..25 and ends at column 50 on its last line.
+        let func_id = {
+            let mut g = backend.graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert("name".to_string(), PropertyValue::String("f".to_string()));
+            props.insert(
+                "path".to_string(),
+                PropertyValue::String("/test/file.rs".to_string()),
+            );
+            props.insert("line_start".to_string(), PropertyValue::Int(5));
+            props.insert("line_end".to_string(), PropertyValue::Int(25));
+            props.insert("col_start".to_string(), PropertyValue::Int(0));
+            props.insert("col_end".to_string(), PropertyValue::Int(50));
+            g.add_node(NodeType::Function, props).unwrap()
+        };
+        // Index over lines 10..20 so line 25 misses the exact-match lookup.
+        add_func_to_index(&backend, path, func_id, "f", 10, 20);
+
+        let graph = backend.graph.read().await;
+        // Line 25 (position.line + 1), column 60 > col_end (50) -> the col-after-end
+        // `continue` fires, leaving no match.
+        let position = Position {
+            line: 24,
+            character: 60,
+        };
+        let result = backend.find_node_at_position(&graph, path, position);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn test_find_nearest_node_exact_match() {
         let (backend, func_id, _) = create_backend_with_nodes().await;
 
@@ -4437,5 +4508,190 @@ mod tests {
         backend.symbol_index.remove_file(path);
         let file_symbols = backend.symbol_index.get_file_symbols(path);
         assert!(file_symbols.is_empty());
+    }
+
+    #[test]
+    fn test_index_config_from_lsp_merges_patterns_and_scales_size() {
+        // A pattern that is already in the hardened defaults and one that is not.
+        let config = CodeGraphConfig {
+            max_file_size_kb: 2048,
+            exclude_patterns: vec!["*.custom_marker".to_string(), "*.lock".to_string()],
+            ..CodeGraphConfig::default()
+        };
+
+        let idx = CodeGraphBackend::index_config_from_lsp(&config);
+
+        // kb -> bytes scaling
+        assert_eq!(idx.max_file_size_bytes, 2048 * 1024);
+
+        // The hardened default patterns are preserved (merge, not replace).
+        let defaults = crate::indexer::IndexConfig::default_exclude_patterns();
+        assert!(idx.exclude_patterns.len() >= defaults.len());
+        for d in &defaults {
+            assert!(idx.exclude_patterns.contains(d));
+        }
+
+        // The novel user pattern is appended exactly once.
+        assert_eq!(
+            idx.exclude_patterns
+                .iter()
+                .filter(|p| p.as_str() == "*.custom_marker")
+                .count(),
+            1
+        );
+
+        // A user pattern that duplicates a default is not added twice.
+        if defaults.iter().any(|p| p == "*.lock") {
+            assert_eq!(
+                idx.exclude_patterns
+                    .iter()
+                    .filter(|p| p.as_str() == "*.lock")
+                    .count(),
+                1
+            );
+        }
+
+        // Default exclude dirs are carried through.
+        assert_eq!(
+            idx.exclude_dirs,
+            crate::indexer::IndexConfig::default_exclude_dirs()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_definition_for_reference_follows_calls_edge() {
+        // func2 --Calls--> func1 in the shared fixture.
+        let (backend, func1_id, func2_id) = create_backend_with_nodes().await;
+        let graph = backend.graph.read().await;
+
+        let result = backend.find_definition_for_reference(&graph, func2_id);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(func1_id));
+    }
+
+    #[tokio::test]
+    async fn test_find_definition_for_reference_no_outgoing_edge() {
+        // func1 is the callee; it has no outgoing Calls/References/Imports edge.
+        let (backend, func1_id, _func2_id) = create_backend_with_nodes().await;
+        let graph = backend.graph.read().await;
+
+        let result = backend.find_definition_for_reference(&graph, func1_id);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_node_to_location_fallback_to_symbol_index_path() {
+        use codegraph::PropertyValue;
+        let backend = create_test_backend();
+
+        // Node carries line info but NO path property, so node_to_location must
+        // resolve the file from the symbol index reverse lookup.
+        let node_id = {
+            let mut graph = backend.graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert(
+                "name".to_string(),
+                PropertyValue::String("orphan".to_string()),
+            );
+            props.insert("line_start".to_string(), PropertyValue::Int(7));
+            props.insert("line_end".to_string(), PropertyValue::Int(9));
+            graph.add_node(NodeType::Function, props).unwrap()
+        };
+
+        let path = Path::new("/test/orphan.rs");
+        add_func_to_index(&backend, path, node_id, "orphan", 7, 9);
+
+        let graph = backend.graph.read().await;
+        let result = backend.node_to_location(&graph, node_id);
+        assert!(result.is_ok());
+        let location = result.unwrap();
+        assert!(location.uri.to_string().contains("orphan.rs"));
+        // 1-indexed 7/9 -> 0-indexed 6/8
+        assert_eq!(location.range.start.line, 6);
+        assert_eq!(location.range.end.line, 8);
+    }
+
+    #[tokio::test]
+    async fn test_node_to_location_zero_end_line_defaults_to_start() {
+        use codegraph::PropertyValue;
+        let backend = create_test_backend();
+
+        let node_id = {
+            let mut graph = backend.graph.write().await;
+            let mut props = PropertyMap::new();
+            props.insert(
+                "name".to_string(),
+                PropertyValue::String("single_line".to_string()),
+            );
+            props.insert(
+                "path".to_string(),
+                PropertyValue::String("/test/one.rs".to_string()),
+            );
+            props.insert("line_start".to_string(), PropertyValue::Int(5));
+            props.insert("line_end".to_string(), PropertyValue::Int(0));
+            graph.add_node(NodeType::Function, props).unwrap()
+        };
+
+        let graph = backend.graph.read().await;
+        let location = backend.node_to_location(&graph, node_id).unwrap();
+        // end_line == 0 falls back to start_line, both 0-indexed to 4.
+        assert_eq!(location.range.start.line, 4);
+        assert_eq!(location.range.end.line, 4);
+    }
+
+    #[tokio::test]
+    async fn test_find_nearest_node_prefers_forward_symbol() {
+        use codegraph::PropertyValue;
+        let backend = create_test_backend();
+        let path = Path::new("/test/near.rs");
+
+        let (before_id, after_id) = {
+            let mut graph = backend.graph.write().await;
+            let mut p1 = PropertyMap::new();
+            p1.insert("name".to_string(), PropertyValue::String("before".into()));
+            p1.insert("line_start".to_string(), PropertyValue::Int(10));
+            p1.insert("line_end".to_string(), PropertyValue::Int(12));
+            let before = graph.add_node(NodeType::Function, p1).unwrap();
+
+            let mut p2 = PropertyMap::new();
+            p2.insert("name".to_string(), PropertyValue::String("after".into()));
+            p2.insert("line_start".to_string(), PropertyValue::Int(30));
+            p2.insert("line_end".to_string(), PropertyValue::Int(32));
+            let after = graph.add_node(NodeType::Function, p2).unwrap();
+            (before, after)
+        };
+
+        add_func_to_index(&backend, path, before_id, "before", 10, 12);
+        add_func_to_index(&backend, path, after_id, "after", 30, 32);
+
+        // Cursor at line 21 (0-indexed 20): distance 9 to `after` (start 30)
+        // versus 9 + 1000 backward penalty to `before` (end 12), so the forward
+        // symbol wins.
+        let graph = backend.graph.read().await;
+        let position = Position {
+            line: 20,
+            character: 0,
+        };
+        let (node_id, was_fallback) = backend
+            .find_nearest_node(&graph, path, position)
+            .unwrap()
+            .unwrap();
+        assert_eq!(node_id, after_id);
+        assert!(was_fallback);
+    }
+
+    #[tokio::test]
+    async fn test_find_nearest_node_empty_file_returns_none() {
+        let backend = create_test_backend();
+        let graph = backend.graph.read().await;
+        let path = Path::new("/test/nonexistent.rs");
+        let position = Position {
+            line: 3,
+            character: 0,
+        };
+        let result = backend.find_nearest_node(&graph, path, position);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }

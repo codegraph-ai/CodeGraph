@@ -277,6 +277,59 @@ type (
     }
 
     #[test]
+    fn test_extract_module_metadata_full() {
+        let source = "package main\n\nfunc test() {}\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("widget.go"), &config).unwrap();
+
+        let module = ir.module.expect("module metadata should be present");
+        assert_eq!(module.name, "widget");
+        assert_eq!(module.path, "widget.go");
+        assert_eq!(module.language, "go");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_extract_unknown_module_fallback() {
+        let source = "package main\n";
+        let config = ParserConfig::default();
+        // An empty path has no file_stem, so the module name falls back to "unknown".
+        let ir = extract(source, Path::new(""), &config).unwrap();
+
+        let module = ir.module.expect("module metadata should be present");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_extract_empty_source() {
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new("empty.go"), &config).unwrap();
+
+        let module = ir.module.expect("module metadata should be present");
+        assert_eq!(module.line_count, 0);
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_extract_line_count_tracks_blank_lines() {
+        // line_count derives from source.lines().count(), independent of entity count.
+        let source = "package main\n\n\n\nfunc a() {}\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("blanks.go"), &config).unwrap();
+
+        let module = ir.module.expect("module metadata should be present");
+        assert_eq!(module.line_count, source.lines().count());
+        assert_eq!(module.line_count, 5);
+        assert_eq!(ir.functions.len(), 1);
+    }
+
+    #[test]
     fn test_extract_variadic_function() {
         let source = r#"
 package main

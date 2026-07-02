@@ -590,4 +590,389 @@ mod tests {
         assert_eq!(visitor.classes.len(), 1);
         assert_eq!(visitor.classes[0].name, "Dog");
     }
+
+    #[test]
+    fn test_empty_source_extracts_nothing() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = b"(defn greet [name] (str \"hi\" name))";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.visibility, "public");
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 1);
+        assert!(!f.is_async);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(!f.is_test);
+        assert!(f.return_type.is_none());
+        // No enclosing (ns ...) form, so no parent namespace.
+        assert!(f.parent_class.is_none());
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_function_signature_format() {
+        let source = b"(defn add [x y] (+ x y))";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "(defn add [x y])");
+    }
+
+    #[test]
+    fn test_private_signature_uses_defn_dash() {
+        let source = b"(defn- helper [x] (* x 2))";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].signature, "(defn- helper [x])");
+    }
+
+    #[test]
+    fn test_parameter_extraction() {
+        let source = b"(defn add [x y z] (+ x y z))";
+        let visitor = parse_and_visit(source);
+        let names: Vec<&str> = visitor.functions[0]
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["x", "y", "z"]);
+    }
+
+    #[test]
+    fn test_variadic_ampersand_excluded_from_params() {
+        let source = b"(defn f [x & rest] (count rest))";
+        let visitor = parse_and_visit(source);
+        let names: Vec<&str> = visitor.functions[0]
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["x", "rest"]);
+    }
+
+    #[test]
+    fn test_docstring_extraction() {
+        let source = b"(defn greet \"Greets someone\" [name] (str name))";
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor.functions[0].doc_comment.as_deref(),
+            Some("\"Greets someone\"")
+        );
+    }
+
+    #[test]
+    fn test_no_docstring_leaves_doc_none() {
+        let source = b"(defn greet [name] (str name))";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn test_is_test_prefix_and_suffix() {
+        let src_prefix = b"(defn test-adds [] (+ 1 2))";
+        assert!(parse_and_visit(src_prefix).functions[0].is_test);
+        let src_suffix = b"(defn adds-test [] (+ 1 2))";
+        assert!(parse_and_visit(src_suffix).functions[0].is_test);
+        let src_plain = b"(defn adds [] (+ 1 2))";
+        assert!(!parse_and_visit(src_plain).functions[0].is_test);
+    }
+
+    #[test]
+    fn test_body_prefix_present() {
+        let source = b"(defn greet [name] (str \"Hello, \" name))";
+        let visitor = parse_and_visit(source);
+        let bp = visitor.functions[0].body_prefix.as_deref().unwrap();
+        assert!(bp.contains("str"));
+    }
+
+    #[test]
+    fn test_baseline_complexity_is_one() {
+        let source = b"(defn add [x y] (+ x y))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert_eq!(c.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_branch_raises_complexity() {
+        let source = b"(defn f [x] (if (pos? x) 1 -1))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_case_raises_complexity() {
+        let source = b"(defn f [x] (case x 1 :one 2 :two :other))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_loop_form_raises_complexity() {
+        let source = b"(defn f [xs] (doseq [x xs] (println x)))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_ns_sets_parent_class_on_later_function() {
+        let source = b"(ns my.app)\n(defn greet [name] (str name))";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].parent_class.as_deref(), Some("my.app"));
+    }
+
+    #[test]
+    fn test_ns_import_importer_is_main() {
+        // current_namespace is set only AFTER the ns clauses are processed,
+        // so imports pulled from the ns form record importer "main".
+        let source = b"(ns my.app (:require [clojure.string :as str]))";
+        let visitor = parse_and_visit(source);
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "clojure.string")
+            .unwrap();
+        assert_eq!(imp.importer, "main");
+        assert!(imp.symbols.is_empty());
+        assert!(imp.alias.is_none());
+        assert!(!imp.is_wildcard);
+    }
+
+    #[test]
+    fn test_ns_use_import() {
+        let source = b"(ns my.app (:use [clojure.set]))";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.imports.iter().any(|i| i.imported == "clojure.set"));
+    }
+
+    #[test]
+    fn test_java_import_group_qualifies_class() {
+        let source = b"(ns my.app (:import (java.util Date)))";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor
+                .imports
+                .iter()
+                .any(|i| i.imported == "java.util.Date"),
+            "found: {:?}",
+            visitor
+                .imports
+                .iter()
+                .map(|i| &i.imported)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_standalone_import_form() {
+        // Standalone (import ...) with a bare symbol child (no reader quote) is
+        // handled by visit_import_form -> extract_ns_imports.
+        let source = b"(import java.util.Date)";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor
+                .imports
+                .iter()
+                .any(|i| i.imported == "java.util.Date"),
+            "found: {:?}",
+            visitor
+                .imports
+                .iter()
+                .map(|i| &i.imported)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_duplicate_import_deduped() {
+        let source =
+            b"(ns my.app (:require [clojure.string :as str] [clojure.string :refer [join]]))";
+        let visitor = parse_and_visit(source);
+        assert_eq!(
+            visitor
+                .imports
+                .iter()
+                .filter(|i| i.imported == "clojure.string")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_call_tracking_in_body() {
+        let source = b"(defn f [x] (helper x))";
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "f" && c.callee == "helper"));
+    }
+
+    #[test]
+    fn test_special_forms_excluded_from_calls() {
+        let source = b"(defn f [x] (if x (do (println x)) nil))";
+        let visitor = parse_and_visit(source);
+        // if/do are special forms; only println is a tracked call.
+        assert!(visitor.calls.iter().all(|c| c.callee != "if"));
+        assert!(visitor.calls.iter().all(|c| c.callee != "do"));
+        assert!(visitor.calls.iter().any(|c| c.callee == "println"));
+    }
+
+    #[test]
+    fn test_defprotocol_is_interface_and_abstract() {
+        let source = b"(defprotocol Animal (speak [this]))";
+        let visitor = parse_and_visit(source);
+        let c = &visitor.classes[0];
+        assert!(c.is_abstract);
+        assert!(c.is_interface);
+        assert_eq!(c.attributes, vec!["defprotocol".to_string()]);
+    }
+
+    #[test]
+    fn test_defrecord_not_interface_not_abstract() {
+        let source = b"(defrecord Dog [name breed])";
+        let visitor = parse_and_visit(source);
+        let c = &visitor.classes[0];
+        assert!(!c.is_abstract);
+        assert!(!c.is_interface);
+        assert_eq!(c.attributes, vec!["defrecord".to_string()]);
+    }
+
+    #[test]
+    fn test_deftype_maps_to_class() {
+        let source = b"(deftype Point [x y])";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.classes[0].name, "Point");
+        assert_eq!(visitor.classes[0].attributes, vec!["deftype".to_string()]);
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = b"(defn a [] 1)\n(defn b [] 2)\n(defn c [] 3)";
+        let visitor = parse_and_visit(source);
+        let names: Vec<&str> = visitor.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_to_max() {
+        use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
+        // A single body form whose text far exceeds the cap.
+        let big = "a".repeat(BODY_PREFIX_MAX_CHARS + 200);
+        let source = format!("(defn f [] (str \"{big}\"))");
+        let visitor = parse_and_visit(source.as_bytes());
+        let bp = visitor.functions[0].body_prefix.as_deref().unwrap();
+        assert_eq!(bp.chars().count(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_leading_blank_lines_offset_line_start() {
+        let source = b"\n\n(defn f [] 1)";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].line_start, 3);
+    }
+
+    #[test]
+    fn test_and_raises_complexity() {
+        // `and` is counted as a logical operator, not a branch.
+        let source = b"(defn f [x] (and x true))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_or_raises_complexity() {
+        let source = b"(defn f [x] (or x false))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_try_catch_raises_complexity() {
+        // try and catch each add an exception handler.
+        let source = b"(defn f [] (try (foo) (catch Exception e nil)))";
+        let visitor = parse_and_visit(source);
+        let c = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_call_metadata_defaults() {
+        let source = b"(defn f [x] (helper x))";
+        let visitor = parse_and_visit(source);
+        let call = visitor.calls.iter().find(|c| c.callee == "helper").unwrap();
+        assert!(call.is_direct);
+        assert!(call.struct_type.is_none());
+        assert!(call.field_name.is_none());
+        assert_eq!(call.call_site_line, 1);
+    }
+
+    #[test]
+    fn test_nested_call_attributed_to_enclosing_function() {
+        // A call nested inside an `if` is still attributed to the enclosing defn.
+        let source = b"(defn f [x] (if x (helper x) nil))";
+        let visitor = parse_and_visit(source);
+        assert!(visitor
+            .calls
+            .iter()
+            .any(|c| c.caller == "f" && c.callee == "helper"));
+    }
+
+    #[test]
+    fn test_let_excluded_from_calls() {
+        let source = b"(defn f [] (let [x 1] (println x)))";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.calls.iter().all(|c| c.callee != "let"));
+        assert!(visitor.calls.iter().any(|c| c.callee == "println"));
+    }
+
+    #[test]
+    fn test_variadic_rest_param_not_flagged_variadic() {
+        // The `&` marker is dropped and `rest` is captured, but extract_params_from_vec
+        // uses Parameter::new so it is never flagged is_variadic.
+        let source = b"(defn f [x & rest] (count rest))";
+        let visitor = parse_and_visit(source);
+        let rest = visitor.functions[0]
+            .parameters
+            .iter()
+            .find(|p| p.name == "rest")
+            .unwrap();
+        assert!(!rest.is_variadic);
+    }
+
+    #[test]
+    fn test_second_function_line_start_follows_first() {
+        let source = b"(defn a [] 1)\n(defn b [] 2)";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions[0].line_end, 1);
+        assert_eq!(visitor.functions[1].line_start, 2);
+    }
+
+    #[test]
+    fn test_multiline_function_line_end_spans_body() {
+        let source = b"(defn f [x]\n  (println x)\n  (inc x))";
+        let visitor = parse_and_visit(source);
+        let f = &visitor.functions[0];
+        assert_eq!(f.line_start, 1);
+        assert_eq!(f.line_end, 3);
+    }
+
+    #[test]
+    fn test_deftype_fields_not_extracted() {
+        // deftype/defrecord map to a ClassEntity but their field vector is left empty.
+        let source = b"(deftype Point [x y])";
+        let visitor = parse_and_visit(source);
+        assert!(visitor.classes[0].fields.is_empty());
+    }
 }

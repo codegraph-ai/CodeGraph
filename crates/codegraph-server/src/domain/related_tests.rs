@@ -140,3 +140,324 @@ pub(crate) async fn find_related_tests(
 
     FindRelatedTestsResult { tests }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{EdgeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// Add a node carrying the given key/value string properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, &str)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), PropertyValue::String(v.to_string()));
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// Wrap a built graph in the Arc<RwLock<>> a QueryEngine owns, build call
+    /// indexes, and hand back both so callers can also grab a read guard for the
+    /// `&CodeGraph` argument find_related_tests expects.
+    async fn engine_for(g: CodeGraph) -> (Arc<RwLock<CodeGraph>>, QueryEngine) {
+        let graph = Arc::new(RwLock::new(g));
+        let engine = QueryEngine::new(graph.clone());
+        engine.build_indexes().await;
+        (graph, engine)
+    }
+
+    fn params(path: &str, target: Option<NodeId>, limit: usize) -> FindRelatedTestsParams {
+        FindRelatedTestsParams {
+            path: path.to_string(),
+            target_node_id: target,
+            limit,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_graph_returns_no_tests() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+        let result = find_related_tests(&guard, &engine, params("/src/foo.rs", None, 10)).await;
+        assert!(result.tests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stage1_test_entry_calling_target_is_reported() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", "target")]);
+        let test_fn = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_target"), ("path", "/src/foo_test.rs")],
+        );
+        edge(&mut g, test_fn, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result =
+            find_related_tests(&guard, &engine, params("/src/foo.rs", Some(target), 10)).await;
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].node_id, test_fn);
+        assert_eq!(result.tests[0].relationship, "calls_target");
+        assert_eq!(result.tests[0].path, "/src/foo_test.rs");
+    }
+
+    #[tokio::test]
+    async fn stage1_test_entry_not_calling_target_is_ignored() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", "target")]);
+        // A test entry that calls something else, never the target.
+        let other = add_node(&mut g, NodeType::Function, &[("name", "helper")]);
+        let test_fn = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_unrelated"), ("path", "/src/other.rs")],
+        );
+        edge(&mut g, test_fn, other, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result =
+            find_related_tests(&guard, &engine, params("/src/foo.rs", Some(target), 10)).await;
+        assert!(result.tests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stage2_same_file_test_function_is_reported() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_thing"), ("path", "/src/foo.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_related_tests(&guard, &engine, params("/src/foo.rs", None, 10)).await;
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].relationship, "same_file");
+        assert_eq!(result.tests[0].name, "test_thing");
+    }
+
+    #[tokio::test]
+    async fn stage2_non_function_in_same_file_is_excluded() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // A test-named node that is not a Function must not be collected.
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", "TestFixture"), ("path", "/src/foo.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_related_tests(&guard, &engine, params("/src/foo.rs", None, 10)).await;
+        assert!(result.tests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stage3_adjacent_test_file_is_reported() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No node lives in /src/foo.rs, but a generated pattern (/src/foo_test.rs)
+        // holds a test function, so stage 3 should surface it.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_adjacent"), ("path", "/src/foo_test.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_related_tests(&guard, &engine, params("/src/foo.rs", None, 10)).await;
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].relationship, "adjacent_file");
+        assert_eq!(result.tests[0].path, "/src/foo_test.rs");
+    }
+
+    #[tokio::test]
+    async fn limit_truncates_same_file_results() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_one"), ("path", "/src/foo.rs")],
+        );
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_two"), ("path", "/src/foo.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_related_tests(&guard, &engine, params("/src/foo.rs", None, 1)).await;
+        assert_eq!(result.tests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn target_is_excluded_from_same_file_results() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // The target itself is a test-named function in the scanned file; because
+        // it is seeded into `seen`, stage 2 must skip it and only return the sibling.
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_target"), ("path", "/src/foo.rs")],
+        );
+        let sibling = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_sibling"), ("path", "/src/foo.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result =
+            find_related_tests(&guard, &engine, params("/src/foo.rs", Some(target), 10)).await;
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].node_id, sibling);
+        assert_eq!(result.tests[0].relationship, "same_file");
+    }
+
+    #[tokio::test]
+    async fn stage2_non_test_function_in_same_file_is_excluded() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // A plain (non-test-named, non-test-path) function must fail is_test_node.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "helper"), ("path", "/src/foo.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_related_tests(&guard, &engine, params("/src/foo.rs", None, 10)).await;
+        assert!(result.tests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stage1_calls_target_takes_precedence_over_same_file() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // A single test function both calls the target and lives in the queried
+        // file. Stage 1 claims it (and seeds `seen`), so stage 2 must not re-add
+        // it: exactly one entry, tagged calls_target.
+        let target = add_node(&mut g, NodeType::Function, &[("name", "target")]);
+        let test_fn = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_both"), ("path", "/src/foo.rs")],
+        );
+        edge(&mut g, test_fn, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result =
+            find_related_tests(&guard, &engine, params("/src/foo.rs", Some(target), 10)).await;
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].node_id, test_fn);
+        assert_eq!(result.tests[0].relationship, "calls_target");
+    }
+
+    #[tokio::test]
+    async fn stage1_transitive_callee_within_depth_is_reported() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // test -> mid -> target is two hops, inside the depth-3 callee traversal.
+        let target = add_node(&mut g, NodeType::Function, &[("name", "target")]);
+        let mid = add_node(&mut g, NodeType::Function, &[("name", "mid")]);
+        let test_fn = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_chain"), ("path", "/src/chain_test.rs")],
+        );
+        edge(&mut g, test_fn, mid, EdgeType::Calls);
+        edge(&mut g, mid, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result =
+            find_related_tests(&guard, &engine, params("/src/foo.rs", Some(target), 10)).await;
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].node_id, test_fn);
+        assert_eq!(result.tests[0].relationship, "calls_target");
+    }
+
+    #[tokio::test]
+    async fn stage2_test_detected_by_path_not_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // A plainly-named function in a /tests/ path is a test via is_test_node's
+        // path heuristic, so stage 2 surfaces it same-file.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "renderWidget"), ("path", "/src/tests/foo.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result =
+            find_related_tests(&guard, &engine, params("/src/tests/foo.rs", None, 10)).await;
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].relationship, "same_file");
+        assert_eq!(result.tests[0].name, "renderWidget");
+    }
+
+    #[tokio::test]
+    async fn stage3_non_function_in_adjacent_file_is_excluded() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // /src/foo.test.ts matches a generated pattern for /src/foo.ts, but the
+        // node there is a Class, so the node_type guard drops it.
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", "FooSuite"), ("path", "/src/foo.test.ts")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_related_tests(&guard, &engine, params("/src/foo.ts", None, 10)).await;
+        assert!(result.tests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stage3_spec_pattern_is_matched() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Source /src/foo.ts has no local tests; a .spec.ts sibling holds one.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_spec"), ("path", "/src/foo.spec.ts")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_related_tests(&guard, &engine, params("/src/foo.ts", None, 10)).await;
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].relationship, "adjacent_file");
+        assert_eq!(result.tests[0].path, "/src/foo.spec.ts");
+    }
+
+    #[tokio::test]
+    async fn limit_zero_returns_no_tests() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // With limit 0 every stage's capacity guard trips immediately.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", "test_thing"), ("path", "/src/foo.rs")],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let guard = graph.read().await;
+
+        let result = find_related_tests(&guard, &engine, params("/src/foo.rs", None, 0)).await;
+        assert!(result.tests.is_empty());
+    }
+}

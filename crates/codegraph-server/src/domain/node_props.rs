@@ -117,3 +117,171 @@ pub(crate) fn is_public(node: &Node) -> bool {
 pub(crate) fn is_test(node: &Node) -> bool {
     node.properties.get_bool("is_test").unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{Node, NodeType};
+
+    fn node(props: PropertyMap) -> Node {
+        Node::new(0, NodeType::Function, props)
+    }
+
+    fn props(pairs: &[(&str, i64)]) -> PropertyMap {
+        let mut p = PropertyMap::new();
+        for (k, v) in pairs {
+            p.insert(*k, *v);
+        }
+        p
+    }
+
+    #[test]
+    fn line_start_prefers_line_start_then_start_line_then_zero() {
+        // line_start wins over start_line when both present.
+        assert_eq!(
+            line_start(&node(props(&[("line_start", 5), ("start_line", 9)]))),
+            5
+        );
+        // falls back to start_line when line_start absent.
+        assert_eq!(line_start(&node(props(&[("start_line", 9)]))), 9);
+        // absent -> 0.
+        assert_eq!(line_start(&node(props(&[]))), 0);
+    }
+
+    #[test]
+    fn line_end_prefers_line_end_then_end_line_then_zero() {
+        assert_eq!(
+            line_end(&node(props(&[("line_end", 12), ("end_line", 20)]))),
+            12
+        );
+        assert_eq!(line_end(&node(props(&[("end_line", 20)]))), 20);
+        assert_eq!(line_end(&node(props(&[]))), 0);
+    }
+
+    #[test]
+    fn line_opt_accessors_return_none_when_absent() {
+        assert_eq!(line_start_opt(&node(props(&[]))), None);
+        assert_eq!(line_end_opt(&node(props(&[]))), None);
+        assert_eq!(line_start_opt(&node(props(&[("start_line", 3)]))), Some(3));
+        assert_eq!(line_end_opt(&node(props(&[("line_end", 7)]))), Some(7));
+    }
+
+    #[test]
+    fn line_from_props_prefers_line_key_then_falls_back_then_zero() {
+        // line_start_from_props: line_start wins over start_line.
+        assert_eq!(
+            line_start_from_props(&props(&[("line_start", 5), ("start_line", 9)])),
+            5
+        );
+        // falls back to start_line when line_start absent.
+        assert_eq!(line_start_from_props(&props(&[("start_line", 9)])), 9);
+        // absent -> 0.
+        assert_eq!(line_start_from_props(&props(&[])), 0);
+
+        // line_end_from_props mirrors the same precedence.
+        assert_eq!(
+            line_end_from_props(&props(&[("line_end", 12), ("end_line", 20)])),
+            12
+        );
+        assert_eq!(line_end_from_props(&props(&[("end_line", 20)])), 20);
+        assert_eq!(line_end_from_props(&props(&[])), 0);
+    }
+
+    #[test]
+    fn line_opt_from_props_returns_none_when_absent() {
+        // Absent -> None (distinct from the u32 accessors that default to 0).
+        assert_eq!(line_start_opt_from_props(&props(&[])), None);
+        assert_eq!(line_end_opt_from_props(&props(&[])), None);
+        // Present via the *_line fallback keys still resolves to Some.
+        assert_eq!(
+            line_start_opt_from_props(&props(&[("start_line", 3)])),
+            Some(3)
+        );
+        assert_eq!(line_end_opt_from_props(&props(&[("line_end", 7)])), Some(7));
+    }
+
+    #[test]
+    fn col_start_defaults_to_zero_col_end_defaults_to_ten_thousand() {
+        assert_eq!(col_start_from_props(&props(&[("col_start", 4)])), 4);
+        assert_eq!(col_start_from_props(&props(&[("start_col", 6)])), 6);
+        assert_eq!(col_start_from_props(&props(&[])), 0);
+
+        assert_eq!(col_end_from_props(&props(&[("col_end", 8)])), 8);
+        assert_eq!(col_end_from_props(&props(&[("end_col", 11)])), 11);
+        // col_end has an unusual 10000 default rather than 0.
+        assert_eq!(col_end_from_props(&props(&[])), 10000);
+    }
+
+    #[test]
+    fn string_accessors_have_expected_defaults() {
+        let mut p = PropertyMap::new();
+        p.insert("name", "do_work");
+        p.insert("path", "src/lib.rs");
+        p.insert("language", "rust");
+        p.insert("visibility", "private");
+        let n = node(p);
+        assert_eq!(name(&n), "do_work");
+        assert_eq!(path(&n), "src/lib.rs");
+        assert_eq!(language(&n), "rust");
+        assert_eq!(visibility(&n), "private");
+
+        let empty = node(PropertyMap::new());
+        assert_eq!(name(&empty), "");
+        assert_eq!(path(&empty), "");
+        assert_eq!(language(&empty), "");
+        // visibility defaults to "public", not "".
+        assert_eq!(visibility(&empty), "public");
+    }
+
+    #[test]
+    fn is_public_checks_is_public_then_exported_then_visibility() {
+        let mut p = PropertyMap::new();
+        p.insert("is_public", true);
+        assert!(is_public(&node(p)));
+
+        let mut p = PropertyMap::new();
+        p.insert("exported", true);
+        assert!(is_public(&node(p)));
+
+        // is_public wins over a private visibility fallback.
+        let mut p = PropertyMap::new();
+        p.insert("is_public", false);
+        p.insert("visibility", "public");
+        assert!(!is_public(&node(p)));
+
+        // no bools -> falls back to visibility string.
+        let mut p = PropertyMap::new();
+        p.insert("visibility", "pub");
+        assert!(is_public(&node(p)));
+
+        let mut p = PropertyMap::new();
+        p.insert("visibility", "private");
+        assert!(!is_public(&node(p)));
+
+        // absent visibility defaults to "public" -> public.
+        assert!(is_public(&node(PropertyMap::new())));
+    }
+
+    #[test]
+    fn is_test_reads_structural_marker_and_defaults_false() {
+        let mut p = PropertyMap::new();
+        p.insert("is_test", true);
+        assert!(is_test(&node(p)));
+
+        let mut p = PropertyMap::new();
+        p.insert("is_test", false);
+        assert!(!is_test(&node(p)));
+
+        // absent -> false.
+        assert!(!is_test(&node(PropertyMap::new())));
+    }
+
+    #[test]
+    fn get_int_parses_string_backed_numeric_props() {
+        // get_int accepts a String that parses as an integer, so a
+        // string-typed line_start still resolves through the accessor.
+        let mut p = PropertyMap::new();
+        p.insert("line_start", "42");
+        assert_eq!(line_start(&node(p)), 42);
+    }
+}

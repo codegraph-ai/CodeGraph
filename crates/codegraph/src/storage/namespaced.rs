@@ -215,4 +215,110 @@ mod tests {
         let backend = create_namespaced();
         assert_eq!(backend.namespace(), "project-a");
     }
+
+    #[test]
+    fn test_write_batch_delete_is_namespaced() {
+        // The BatchOperation::Delete arm must prefix its key with the namespace,
+        // otherwise a batched delete would either miss the row or clobber another
+        // namespace's identically-named key. Two namespaces share one inner
+        // backend and both hold "node:1"; deleting it in proj-a via write_batch
+        // must leave proj-b's "node:1" intact.
+        let inner = MemoryBackend::new();
+        let mut backend_a = NamespacedBackend::new(Box::new(inner.clone()), "proj-a");
+        let mut backend_b = NamespacedBackend::new(Box::new(inner.clone()), "proj-b");
+        backend_a.put(b"node:1", b"a1").unwrap();
+        backend_b.put(b"node:1", b"b1").unwrap();
+
+        backend_a
+            .write_batch(vec![BatchOperation::Delete {
+                key: b"node:1".to_vec(),
+            }])
+            .unwrap();
+
+        assert!(
+            backend_a.get(b"node:1").unwrap().is_none(),
+            "proj-a's key should be deleted"
+        );
+        assert_eq!(
+            backend_b.get(b"node:1").unwrap(),
+            Some(b"b1".to_vec()),
+            "proj-b's identically-named key must survive — Delete arm must namespace the key"
+        );
+        // The un-prefixed raw key was never touched.
+        assert!(inner.get(b"node:1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_write_batch_mixed_puts_and_deletes() {
+        // Exercise both arms of write_batch's match in one call.
+        let mut backend = create_namespaced();
+        backend.put(b"keep", b"v").unwrap();
+        backend.put(b"drop", b"v").unwrap();
+
+        backend
+            .write_batch(vec![
+                BatchOperation::Delete {
+                    key: b"drop".to_vec(),
+                },
+                BatchOperation::Put {
+                    key: b"added".to_vec(),
+                    value: b"new".to_vec(),
+                },
+            ])
+            .unwrap();
+
+        assert!(backend.get(b"drop").unwrap().is_none());
+        assert_eq!(backend.get(b"keep").unwrap(), Some(b"v".to_vec()));
+        assert_eq!(backend.get(b"added").unwrap(), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn test_flush_delegates_to_inner() {
+        // flush() is a pass-through; verify it returns Ok and preserves data.
+        let mut backend = create_namespaced();
+        backend.put(b"k", b"v").unwrap();
+        backend.flush().unwrap();
+        assert_eq!(backend.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn test_scan_prefix_leaves_unprefixed_keys_intact() {
+        // strip_prefix has an else branch for keys that do NOT start with the
+        // namespace prefix — unreachable via a well-behaved backend, so drive it
+        // with a mock whose scan_prefix returns a key lacking the prefix. The key
+        // must pass through unchanged rather than being truncated.
+        struct RawKeyBackend;
+        impl StorageBackend for RawKeyBackend {
+            fn put(&mut self, _k: &[u8], _v: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn get(&self, _k: &[u8]) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn delete(&mut self, _k: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn exists(&self, _k: &[u8]) -> Result<bool> {
+                Ok(false)
+            }
+            fn scan_prefix(&self, _prefix: &[u8]) -> Result<Vec<KeyValue>> {
+                // A key that does NOT begin with "proj:" — hits the else arm.
+                Ok(vec![(b"unprefixed:key".to_vec(), b"val".to_vec())])
+            }
+            fn write_batch(&mut self, _ops: Vec<BatchOperation>) -> Result<()> {
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let backend = NamespacedBackend::new(Box::new(RawKeyBackend), "proj");
+        let results = backend.scan_prefix(b"anything").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].0, b"unprefixed:key",
+            "a key without the namespace prefix must be returned verbatim"
+        );
+    }
 }

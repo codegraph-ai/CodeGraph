@@ -52,10 +52,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", parser_c.display());
 }
 
-fn find_grammar_src(
-    registry_src: &std::path::Path,
-    prefix: &str,
-) -> Option<std::path::PathBuf> {
+fn find_grammar_src(registry_src: &std::path::Path, prefix: &str) -> Option<std::path::PathBuf> {
     let Ok(entries) = std::fs::read_dir(registry_src) else {
         return None;
     };

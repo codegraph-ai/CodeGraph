@@ -54,3 +54,74 @@ pub fn metadata_string() -> String {
         rustc = RUSTC_VERSION,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn author_constant_names_the_maintainer() {
+        assert_eq!(AUTHOR, "Andrey Vasilevsky <anvanster@gmail.com>");
+    }
+
+    #[test]
+    fn license_is_apache_2_0() {
+        assert_eq!(LICENSE, "Apache-2.0");
+    }
+
+    #[test]
+    fn repository_points_at_github() {
+        assert_eq!(REPOSITORY, "https://github.com/anvanster/codegraph");
+        assert!(REPOSITORY.starts_with("https://"));
+    }
+
+    #[test]
+    fn version_and_name_are_populated_from_cargo() {
+        // Both are env!()-derived, so they must be non-empty at compile time.
+        assert!(!VERSION.is_empty());
+        assert!(!NAME.is_empty());
+        assert_eq!(NAME, "codegraph");
+    }
+
+    #[test]
+    fn build_info_constants_are_present() {
+        // build.rs always writes these constants (falling back to "unknown"),
+        // so they are guaranteed non-empty.
+        assert!(!GIT_HASH.is_empty());
+        assert!(!GIT_HASH_SHORT.is_empty());
+        assert!(!RUSTC_VERSION.is_empty());
+        assert!(!BUILD_TIMESTAMP.is_empty());
+    }
+
+    #[test]
+    fn metadata_string_has_five_lines() {
+        let s = metadata_string();
+        assert_eq!(s.lines().count(), 5);
+    }
+
+    #[test]
+    fn metadata_string_embeds_every_field() {
+        let s = metadata_string();
+        assert!(s.contains(NAME));
+        assert!(s.contains(VERSION));
+        assert!(s.contains(GIT_HASH_SHORT));
+        assert!(s.contains(AUTHOR));
+        assert!(s.contains(LICENSE));
+        assert!(s.contains(REPOSITORY));
+        assert!(s.contains(BUILD_TIMESTAMP));
+        assert!(s.contains(RUSTC_VERSION));
+    }
+
+    #[test]
+    fn metadata_string_uses_the_expected_labels() {
+        let s = metadata_string();
+        assert!(s.contains("Author: "));
+        assert!(s.contains("License: "));
+        assert!(s.contains("Repository: "));
+        assert!(s.contains("Built: "));
+        // The first line carries the "name vVERSION (git)" header shape.
+        let first = s.lines().next().unwrap();
+        assert!(first.starts_with(&format!("{NAME} v{VERSION} (")));
+        assert!(first.ends_with(')'));
+    }
+}

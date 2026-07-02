@@ -375,4 +375,252 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("-32601"));
     }
+
+    #[test]
+    fn test_error_constructor_codes() {
+        // Each constructor pins the standard JSON-RPC 2.0 error code.
+        assert_eq!(JsonRpcError::parse_error("x").code, -32700);
+        assert_eq!(JsonRpcError::invalid_request("x").code, -32600);
+        assert_eq!(JsonRpcError::method_not_found("x").code, -32601);
+        assert_eq!(JsonRpcError::invalid_params("x").code, -32602);
+        assert_eq!(JsonRpcError::internal_error("x").code, -32603);
+    }
+
+    #[test]
+    fn test_error_constructor_messages_and_data() {
+        // parse_error/invalid_request/invalid_params/internal_error pass the
+        // message through verbatim; only method_not_found reformats it.
+        let e = JsonRpcError::parse_error("bad json");
+        assert_eq!(e.message, "bad json");
+        assert!(e.data.is_none());
+        assert_eq!(JsonRpcError::invalid_request("nope").message, "nope");
+        assert_eq!(JsonRpcError::invalid_params("nope").message, "nope");
+        assert_eq!(JsonRpcError::internal_error("boom").message, "boom");
+        assert_eq!(
+            JsonRpcError::method_not_found("foo/bar").message,
+            "Method not found: foo/bar"
+        );
+    }
+
+    #[test]
+    fn test_success_response_shape() {
+        // success populates result and leaves error None.
+        let r = JsonRpcResponse::success(Some(Value::Number(7.into())), serde_json::json!(42));
+        assert_eq!(r.jsonrpc, "2.0");
+        assert!(r.result.is_some());
+        assert!(r.error.is_none());
+        assert_eq!(r.id, Some(Value::Number(7.into())));
+    }
+
+    #[test]
+    fn test_error_response_shape() {
+        // error populates error and leaves result None.
+        let r = JsonRpcResponse::error(None, JsonRpcError::internal_error("x"));
+        assert!(r.result.is_none());
+        assert!(r.error.is_some());
+    }
+
+    #[test]
+    fn test_response_skips_none_fields() {
+        // id/result/error all carry skip_serializing_if = Option::is_none.
+        let r = JsonRpcResponse::success(None, serde_json::json!({"ok": true}));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("\"id\""));
+        assert!(!json.contains("\"error\""));
+        assert!(json.contains("\"result\""));
+    }
+
+    #[test]
+    fn test_error_serializes_without_data_when_none() {
+        let json = serde_json::to_string(&JsonRpcError::parse_error("x")).unwrap();
+        assert!(!json.contains("\"data\""));
+        assert!(json.contains("\"code\":-32700"));
+    }
+
+    #[test]
+    fn test_request_params_default_to_none() {
+        // params has #[serde(default)] so a request may omit it entirely.
+        let json = r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert!(req.params.is_none());
+        assert_eq!(req.method, "ping");
+    }
+
+    #[test]
+    fn test_request_allows_null_id() {
+        // Notification-style id absence deserializes to None.
+        let json = r#"{"jsonrpc":"2.0","id":null,"method":"notify"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert!(req.id.is_none());
+    }
+
+    #[test]
+    fn test_tool_call_params_arguments_default_none() {
+        let params: ToolCallParams =
+            serde_json::from_str(r#"{"name":"codegraph_symbol_search"}"#).unwrap();
+        assert_eq!(params.name, "codegraph_symbol_search");
+        assert!(params.arguments.is_none());
+    }
+
+    #[test]
+    fn test_initialize_params_all_defaults() {
+        // Every field is #[serde(default)], so an empty object is valid.
+        let params: InitializeParams = serde_json::from_str("{}").unwrap();
+        assert!(params.protocol_version.is_none());
+        assert!(params.client_info.is_none());
+        assert!(params.roots.is_none());
+    }
+
+    #[test]
+    fn test_tool_result_content_text_tag() {
+        // The enum is internally tagged and lowercased.
+        let content = ToolResultContent::Text {
+            text: "hello".to_string(),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"text\":\"hello\""));
+    }
+
+    #[test]
+    fn test_tool_result_content_image_tag_snake_case_mime() {
+        let content = ToolResultContent::Image {
+            data: "abc".to_string(),
+            mime_type: "image/png".to_string(),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"type\":\"image\""));
+        assert!(json.contains("\"mime_type\":\"image/png\""));
+    }
+
+    #[test]
+    fn test_property_schema_renames_enum_and_type() {
+        let schema = PropertySchema {
+            property_type: "string".to_string(),
+            description: None,
+            default: None,
+            enum_values: Some(vec!["a".to_string(), "b".to_string()]),
+            items: None,
+            minimum: None,
+            maximum: None,
+        };
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(json.contains("\"type\":\"string\""));
+        assert!(json.contains("\"enum\":[\"a\",\"b\"]"));
+        // None-valued optionals are skipped.
+        assert!(!json.contains("\"description\""));
+        assert!(!json.contains("\"items\""));
+    }
+
+    #[test]
+    fn test_tool_input_schema_renames_type_and_skips_none() {
+        let schema = ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: None,
+            required: None,
+        };
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(json.contains("\"type\":\"object\""));
+        assert!(!json.contains("\"properties\""));
+        assert!(!json.contains("\"required\""));
+    }
+
+    #[test]
+    fn test_tool_call_result_camel_case_is_error() {
+        let result = ToolCallResult {
+            content: vec![],
+            is_error: Some(true),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"isError\":true"));
+    }
+
+    #[test]
+    fn test_initialize_result_camel_case_fields() {
+        let result = InitializeResult {
+            protocol_version: "2024-11-05".to_string(),
+            capabilities: ServerCapabilities {
+                experimental: None,
+                logging: None,
+                prompts: None,
+                resources: None,
+                tools: Some(ToolsCapability {
+                    list_changed: Some(false),
+                }),
+            },
+            server_info: ServerInfo {
+                name: "codegraph".to_string(),
+                version: Some("1.0".to_string()),
+            },
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"protocolVersion\":\"2024-11-05\""));
+        assert!(json.contains("\"serverInfo\""));
+        assert!(json.contains("\"listChanged\":false"));
+    }
+
+    #[test]
+    fn test_tool_result_content_resource_tag() {
+        // The third enum arm (Resource) is never serialized elsewhere - only
+        // Text and Image are exercised. It nests a ResourceReference and skips
+        // that reference's None-valued optionals.
+        let content = ToolResultContent::Resource {
+            resource: ResourceReference {
+                uri: "file:///tmp/x.rs".to_string(),
+                text: Some("fn main() {}".to_string()),
+                mime_type: None,
+            },
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"type\":\"resource\""));
+        assert!(json.contains("\"uri\":\"file:///tmp/x.rs\""));
+        assert!(json.contains("\"text\":\"fn main() {}\""));
+        // mime_type is None on the nested reference, so it is skipped.
+        assert!(!json.contains("mime_type"));
+    }
+
+    #[test]
+    fn test_initialize_params_parses_roots() {
+        // Complements test_initialize_params_all_defaults (roots absent): the
+        // roots-present branch deserializes a Root, exercising its required
+        // `uri` and #[serde(default)] `name` (present and absent).
+        let json = r#"{
+            "roots": [
+                {"uri": "file:///work/a", "name": "a"},
+                {"uri": "file:///work/b"}
+            ]
+        }"#;
+        let params: InitializeParams = serde_json::from_str(json).unwrap();
+        let roots = params.roots.expect("roots present");
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].uri, "file:///work/a");
+        assert_eq!(roots[0].name.as_deref(), Some("a"));
+        assert_eq!(roots[1].uri, "file:///work/b");
+        assert!(roots[1].name.is_none());
+    }
+
+    #[test]
+    fn test_resource_content_camel_case_and_skips_none() {
+        // mime_type renames to camelCase; text/blob/mime_type are all skipped
+        // when None, leaving only the required uri.
+        let bare = ResourceContent {
+            uri: "file:///a".to_string(),
+            mime_type: None,
+            text: None,
+            blob: None,
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert_eq!(json, r#"{"uri":"file:///a"}"#);
+
+        let full = ResourceContent {
+            uri: "file:///b".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            text: Some("hi".to_string()),
+            blob: None,
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        assert!(json.contains("\"mimeType\":\"text/plain\""));
+        assert!(json.contains("\"text\":\"hi\""));
+        assert!(!json.contains("\"blob\""));
+    }
 }

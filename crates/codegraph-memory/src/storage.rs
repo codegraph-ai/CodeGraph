@@ -537,6 +537,62 @@ mod tests {
         assert!((cosine_similarity(&a, &b) + 1.0).abs() < 0.001);
     }
 
+    #[test]
+    fn test_cosine_similarity_length_mismatch_is_zero() {
+        // Mismatched dimensions short-circuit to 0.0 rather than panicking on zip.
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector_is_zero() {
+        // A zero-norm operand yields 0.0 (avoids divide-by-zero), even against itself.
+        let zero = vec![0.0, 0.0, 0.0];
+        let nonzero = vec![1.0, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&zero, &nonzero), 0.0);
+        assert_eq!(cosine_similarity(&nonzero, &zero), 0.0);
+        assert_eq!(cosine_similarity(&zero, &zero), 0.0);
+    }
+
+    #[test]
+    fn memory_point_distance_is_one_minus_cosine_similarity() {
+        // MemoryPoint::distance is the HNSW metric: cosine *distance* = 1 - similarity,
+        // so that the index's minimum-distance search returns the most-similar points.
+        let p = |v: Vec<f32>| MemoryPoint {
+            id: "p".to_string(),
+            vector: v,
+        };
+        // Identical direction -> similarity 1.0 -> distance 0.0.
+        assert!((p(vec![1.0, 0.0, 0.0]).distance(&p(vec![1.0, 0.0, 0.0]))).abs() < 0.001);
+        // Orthogonal -> similarity 0.0 -> distance 1.0.
+        assert!((p(vec![1.0, 0.0, 0.0]).distance(&p(vec![0.0, 1.0, 0.0])) - 1.0).abs() < 0.001);
+        // Opposite -> similarity -1.0 -> distance 2.0 (the metric's maximum).
+        assert!((p(vec![1.0, 0.0, 0.0]).distance(&p(vec![-1.0, 0.0, 0.0])) - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn memory_point_distance_degenerate_operands_fall_back_to_one() {
+        // When cosine_similarity short-circuits to 0.0 (dimension mismatch or a
+        // zero-norm operand), the derived distance is 1 - 0.0 = 1.0 rather than
+        // NaN or a panic, keeping the HNSW metric well-defined.
+        let mismatched = MemoryPoint {
+            id: "a".to_string(),
+            vector: vec![1.0, 0.0, 0.0],
+        };
+        let shorter = MemoryPoint {
+            id: "b".to_string(),
+            vector: vec![1.0, 0.0],
+        };
+        assert_eq!(mismatched.distance(&shorter), 1.0);
+
+        let zero = MemoryPoint {
+            id: "z".to_string(),
+            vector: vec![0.0, 0.0, 0.0],
+        };
+        assert_eq!(mismatched.distance(&zero), 1.0);
+    }
+
     /// Test that MemoryNode serializes/deserializes correctly with JSON
     #[test]
     fn test_memory_node_json_roundtrip() {
@@ -890,5 +946,203 @@ mod tests {
 
             assert_eq!(parsed.title, "Raw Test Memory");
         }
+    }
+
+    /// find_by_tag only returns memories carrying the exact tag.
+    #[tokio::test]
+    async fn test_find_by_tag() {
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        let tagged = MemoryNode::builder()
+            .debug_context("Problem", "Solution")
+            .title("Tagged")
+            .content("Content")
+            .tag("alpha")
+            .build()
+            .unwrap();
+        let untagged = MemoryNode::builder()
+            .debug_context("Problem", "Solution")
+            .title("Untagged")
+            .content("Content")
+            .tag("beta")
+            .build()
+            .unwrap();
+
+        store.put(tagged).await.expect("store tagged");
+        store.put(untagged).await.expect("store untagged");
+
+        let alpha = store.find_by_tag("alpha");
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(alpha[0].title, "Tagged");
+        assert!(store.find_by_tag("missing").is_empty());
+    }
+
+    /// find_by_code_node matches on a linked code node id.
+    #[tokio::test]
+    async fn test_find_by_code_node() {
+        use crate::node::LinkedNodeType;
+
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        let linked = MemoryNode::builder()
+            .debug_context("Problem", "Solution")
+            .title("Linked")
+            .content("Content")
+            .link_to_code("func_42", LinkedNodeType::Function)
+            .build()
+            .unwrap();
+        let unlinked = MemoryNode::builder()
+            .debug_context("Problem", "Solution")
+            .title("Unlinked")
+            .content("Content")
+            .build()
+            .unwrap();
+
+        store.put(linked).await.expect("store linked");
+        store.put(unlinked).await.expect("store unlinked");
+
+        let found = store.find_by_code_node("func_42");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "Linked");
+        assert!(store.find_by_code_node("nope").is_empty());
+    }
+
+    /// delete removes the memory and reports whether it was present.
+    #[tokio::test]
+    async fn test_delete_removes_memory() {
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        let memory = MemoryNode::builder()
+            .debug_context("Problem", "Solution")
+            .title("Doomed")
+            .content("Content")
+            .build()
+            .unwrap();
+        let id = store.put(memory).await.expect("store memory");
+
+        assert!(
+            store.delete(&id).expect("delete"),
+            "existing id returns true"
+        );
+        assert!(store.get(&id).is_none(), "deleted memory is gone");
+        assert!(
+            !store.delete(&id).expect("delete again"),
+            "already-gone id returns false"
+        );
+    }
+
+    /// get_all_memories(false) includes invalidated memories that get_all_current hides.
+    #[tokio::test]
+    async fn test_get_all_memories_includes_invalidated() {
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        let a = store
+            .put(
+                MemoryNode::builder()
+                    .debug_context("P", "S")
+                    .title("Kept")
+                    .content("C")
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .expect("store a");
+        let b = store
+            .put(
+                MemoryNode::builder()
+                    .debug_context("P", "S")
+                    .title("Gone")
+                    .content("C")
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .expect("store b");
+
+        store.invalidate(&b, "obsolete").expect("invalidate");
+
+        assert_eq!(store.get_all_current().len(), 1);
+        assert_eq!(store.get_all_memories(false).len(), 2);
+        // The kept memory is still current regardless of the flag.
+        assert!(store.get(&a).is_some());
+    }
+
+    /// semantic_search returns the stored memory ids ranked by similarity.
+    #[tokio::test]
+    async fn test_semantic_search_returns_stored() {
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        let memory = MemoryNode::builder()
+            .debug_context("rocksdb panic on open", "flush the WAL")
+            .title("Searchable")
+            .content("database corruption recovery")
+            .build()
+            .unwrap();
+        let id = store.put(memory).await.expect("store memory");
+
+        // Query with the memory's own vector so it is the nearest neighbor.
+        let query = store
+            .engine()
+            .embed("database corruption recovery")
+            .expect("embed query");
+        let results = store.semantic_search(&query, 5);
+        assert!(
+            !results.is_empty(),
+            "search should surface the stored memory"
+        );
+        assert!(results.iter().any(|(rid, _)| rid == &id));
+    }
+
+    /// Invalidating an id the store has never seen is a silent no-op: the
+    /// `if let Some(entry) = get_mut(id)` guard in `invalidate` takes its None
+    /// arm, so nothing is written and no error is raised. Every prior
+    /// invalidate test operated on an id returned by a preceding `put`, so the
+    /// missing-id arm was never exercised.
+    #[tokio::test]
+    async fn test_invalidate_missing_id_is_noop() {
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        // No memory with this id exists; invalidate must succeed and change nothing.
+        store
+            .invalidate("never-stored", "no such memory")
+            .expect("invalidate of missing id returns Ok");
+
+        let stats = store.stats();
+        assert_eq!(stats["totalMemories"], 0);
+        assert_eq!(stats["currentMemories"], 0);
+        assert_eq!(stats["invalidatedMemories"], 0);
+        assert!(store.get_all_memories(false).is_empty());
+    }
+
+    /// On a fresh store the HNSW index is `None` (no memories have been put),
+    /// so `semantic_search` takes the `None => linear_search(...)` fallback arm
+    /// rather than the HNSW path. With an empty vector cache the linear search
+    /// yields nothing. The existing search test always puts a memory first,
+    /// building the index and covering only the `Some(idx)` arm.
+    #[tokio::test]
+    async fn test_semantic_search_empty_store_uses_linear_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        // An arbitrary query vector: the linear fallback over an empty vector
+        // cache returns empty regardless of dimension.
+        let results = store.semantic_search(&[0.1_f32; 8], 5);
+        assert!(
+            results.is_empty(),
+            "empty store must return no search results via the linear fallback"
+        );
     }
 }

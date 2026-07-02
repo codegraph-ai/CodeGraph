@@ -52,7 +52,7 @@ for func in &ir.functions {
 - 🔗 **Relationships**: Track function calls, imports, inheritance hierarchies
 - ⚙️ **Configurable**: Filter by visibility, file size, enable parallel processing
 - 🛡️ **Safe**: No panics, graceful error handling, continues on failures
-- 📊 **Complete**: 67 tests, 90%+ code coverage
+- 📊 **Complete**: 222 tests, 90%+ code coverage
 - 🐍 **Python 3.8+**: Full support for async/await, decorators, type hints, match statements
 
 ## What it Extracts

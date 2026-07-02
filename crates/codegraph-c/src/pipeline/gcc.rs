@@ -600,4 +600,122 @@ __extension__ struct {
         // Simple strings without __attribute__ should be preserved
         assert!(result.code.contains("\"test\""));
     }
+
+    // --- Direct unit tests for the private paren-matching helpers ---
+    // These are only exercised transitively by neutralize() above; the tests
+    // below pin their individual branches (balanced/unbalanced, guards, and the
+    // string/char-literal skipping that keeps a bracket inside a literal from
+    // being counted).
+
+    #[test]
+    fn test_find_double_paren_end_balanced() {
+        // `start` points just past the opening "((", so depth begins at 2.
+        // A plain body closed by "))" resolves cleanly.
+        let res = GccNeutralizer::find_double_paren_end("foo))", 0);
+        assert_eq!(res, Some((5, "foo))".to_string())));
+    }
+
+    #[test]
+    fn test_find_double_paren_end_nested() {
+        // An interior "(" pushes depth to 3, so three ")" are needed to close.
+        let res = GccNeutralizer::find_double_paren_end("(x)))", 0);
+        assert_eq!(res, Some((5, "(x)))".to_string())));
+    }
+
+    #[test]
+    fn test_find_double_paren_end_unbalanced_returns_none() {
+        // Only one ")" for a starting depth of 2 -> never reaches depth 0.
+        assert_eq!(GccNeutralizer::find_double_paren_end("foo)", 0), None);
+    }
+
+    #[test]
+    fn test_find_double_paren_end_ignores_bracket_in_string_and_escape() {
+        // The `)` inside the string literal must not decrement depth, and the
+        // escaped `\"` must not terminate the literal early. Only the trailing
+        // "))" close the expression. Raw string content: "a\")"))
+        let res = GccNeutralizer::find_double_paren_end(r#""a\")"))"#, 0);
+        assert_eq!(res, Some((8, r#""a\")"))"#.to_string())));
+    }
+
+    #[test]
+    fn test_find_double_paren_end_ignores_bracket_in_char_literal() {
+        // The `)` inside the char literal is skipped, so the real "))" closes.
+        let res = GccNeutralizer::find_double_paren_end("')'))", 0);
+        assert_eq!(res, Some((5, "')'))".to_string())));
+    }
+
+    #[test]
+    fn test_find_matching_paren_balanced() {
+        let res = GccNeutralizer::find_matching_paren("(a)", 0);
+        assert_eq!(res, Some((3, "(a)".to_string())));
+    }
+
+    #[test]
+    fn test_find_matching_paren_nested() {
+        let res = GccNeutralizer::find_matching_paren("(a(b)c)", 0);
+        assert_eq!(res, Some((7, "(a(b)c)".to_string())));
+    }
+
+    #[test]
+    fn test_find_matching_paren_guard_not_open_paren() {
+        // The fast guard rejects a start that is not '(' before scanning.
+        assert_eq!(GccNeutralizer::find_matching_paren("abc", 0), None);
+    }
+
+    #[test]
+    fn test_find_matching_paren_guard_start_out_of_range() {
+        // start >= len short-circuits to None without indexing out of bounds.
+        assert_eq!(GccNeutralizer::find_matching_paren("(", 5), None);
+    }
+
+    #[test]
+    fn test_find_matching_paren_unbalanced_returns_none() {
+        assert_eq!(GccNeutralizer::find_matching_paren("(ab", 0), None);
+    }
+
+    #[test]
+    fn test_find_matching_paren_ignores_bracket_in_string() {
+        // The `)` inside the string literal must not close the paren; the final
+        // ')' does. Raw string content: (")")
+        let res = GccNeutralizer::find_matching_paren(r#"(")")"#, 0);
+        assert_eq!(res, Some((5, r#"(")")"#.to_string())));
+    }
+
+    #[test]
+    fn test_find_statement_expr_end_balanced() {
+        // Requires the "({" opener; both the brace and paren must close.
+        let res = GccNeutralizer::find_statement_expr_end("({ x; })", 0);
+        assert_eq!(res, Some((8, "({ x; })".to_string())));
+    }
+
+    #[test]
+    fn test_find_statement_expr_end_guard_not_open_paren() {
+        assert_eq!(GccNeutralizer::find_statement_expr_end("{x}", 0), None);
+    }
+
+    #[test]
+    fn test_find_statement_expr_end_guard_not_brace() {
+        // '(' present but not followed by '{'.
+        assert_eq!(GccNeutralizer::find_statement_expr_end("(x)", 0), None);
+    }
+
+    #[test]
+    fn test_find_statement_expr_end_guard_too_short() {
+        // start + 1 >= len short-circuits before the second-byte check.
+        assert_eq!(GccNeutralizer::find_statement_expr_end("(", 0), None);
+    }
+
+    #[test]
+    fn test_find_statement_expr_end_unbalanced_returns_none() {
+        // The paren closes but the brace never does -> None.
+        assert_eq!(GccNeutralizer::find_statement_expr_end("({ x)", 0), None);
+    }
+
+    #[test]
+    fn test_find_statement_expr_end_ignores_brace_in_string() {
+        // The `}` inside the string literal must not close the brace; the real
+        // '}' then ')' do. Raw string content: ({ "}" })
+        let res = GccNeutralizer::find_statement_expr_end(r#"({ "}" })"#, 0);
+        assert_eq!(res, Some((9, r#"({ "}" })"#.to_string())));
+    }
 }

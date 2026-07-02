@@ -170,3 +170,156 @@ impl IndexState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an ephemeral workspace root under `dir` whose path contains a
+    /// `codegraph-harness-` component, so `IndexState::for_workspace` routes
+    /// its state file into `<root>/.codegraph-state/` instead of `~/.codegraph`.
+    fn ephemeral_root(dir: &tempfile::TempDir) -> PathBuf {
+        let root = dir.path().join("codegraph-harness-idx");
+        std::fs::create_dir_all(&root).expect("create ephemeral root");
+        root
+    }
+
+    #[test]
+    fn new_state_is_empty() {
+        let state = IndexState::new("some-project");
+        assert!(state.is_empty());
+        assert_eq!(state.len(), 0);
+        assert!(state.all_hashes().is_empty());
+    }
+
+    #[test]
+    fn set_and_get_hash_roundtrip() {
+        let mut state = IndexState::new("p");
+        let path = PathBuf::from("/src/main.rs");
+        assert_eq!(state.get_hash(&path), None);
+        state.set_hash(path.clone(), 42);
+        assert_eq!(state.get_hash(&path), Some(42));
+        assert_eq!(state.len(), 1);
+        assert!(!state.is_empty());
+    }
+
+    #[test]
+    fn set_hash_overwrites_existing() {
+        let mut state = IndexState::new("p");
+        let path = PathBuf::from("/src/lib.rs");
+        state.set_hash(path.clone(), 1);
+        state.set_hash(path.clone(), 2);
+        assert_eq!(state.get_hash(&path), Some(2));
+        assert_eq!(state.len(), 1);
+    }
+
+    #[test]
+    fn remove_deletes_entry() {
+        let mut state = IndexState::new("p");
+        let path = PathBuf::from("/src/a.rs");
+        state.set_hash(path.clone(), 7);
+        state.remove(&path);
+        assert_eq!(state.get_hash(&path), None);
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn clear_removes_all_entries() {
+        let mut state = IndexState::new("p");
+        state.set_hash(PathBuf::from("/a"), 1);
+        state.set_hash(PathBuf::from("/b"), 2);
+        state.clear();
+        assert!(state.is_empty());
+        assert_eq!(state.len(), 0);
+    }
+
+    #[test]
+    fn merge_from_inserts_and_overwrites() {
+        let mut state = IndexState::new("p");
+        state.set_hash(PathBuf::from("/a"), 1);
+        let mut other = HashMap::new();
+        other.insert(PathBuf::from("/a"), 99); // overwrites existing
+        other.insert(PathBuf::from("/b"), 2); // new entry
+        state.merge_from(&other);
+        assert_eq!(state.get_hash(Path::new("/a")), Some(99));
+        assert_eq!(state.get_hash(Path::new("/b")), Some(2));
+        assert_eq!(state.len(), 2);
+    }
+
+    #[test]
+    fn ephemeral_workspace_routes_state_into_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = ephemeral_root(&dir);
+        let state = IndexState::for_workspace("slug", &root);
+        // No disk write yet, so nothing exists.
+        assert!(!state.exists_on_disk());
+    }
+
+    #[test]
+    fn save_then_load_roundtrips_hashes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = ephemeral_root(&dir);
+
+        let mut writer = IndexState::for_workspace("slug", &root);
+        writer.set_hash(PathBuf::from("/src/x.rs"), 111);
+        writer.set_hash(PathBuf::from("/src/y.rs"), 222);
+        writer.save();
+        assert!(writer.exists_on_disk());
+        assert!(root
+            .join(".codegraph-state")
+            .join("index_state.json")
+            .exists());
+
+        let mut reader = IndexState::for_workspace("slug", &root);
+        assert_eq!(reader.load(), 2);
+        assert_eq!(reader.get_hash(Path::new("/src/x.rs")), Some(111));
+        assert_eq!(reader.get_hash(Path::new("/src/y.rs")), Some(222));
+    }
+
+    #[test]
+    fn save_is_noop_when_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = ephemeral_root(&dir);
+        let state = IndexState::for_workspace("slug", &root);
+        state.save();
+        assert!(!state.exists_on_disk());
+    }
+
+    #[test]
+    fn load_missing_file_returns_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = ephemeral_root(&dir);
+        let mut state = IndexState::for_workspace("slug", &root);
+        assert_eq!(state.load(), 0);
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn load_clears_prior_in_memory_hashes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = ephemeral_root(&dir);
+
+        let mut writer = IndexState::for_workspace("slug", &root);
+        writer.set_hash(PathBuf::from("/persisted.rs"), 5);
+        writer.save();
+
+        let mut reader = IndexState::for_workspace("slug", &root);
+        // A stale in-memory entry that is not on disk must be dropped by load.
+        reader.set_hash(PathBuf::from("/stale.rs"), 9);
+        assert_eq!(reader.load(), 1);
+        assert_eq!(reader.get_hash(Path::new("/stale.rs")), None);
+        assert_eq!(reader.get_hash(Path::new("/persisted.rs")), Some(5));
+    }
+
+    #[test]
+    fn load_ignores_corrupt_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = ephemeral_root(&dir);
+        let state_dir = root.join(".codegraph-state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        std::fs::write(state_dir.join("index_state.json"), "not json{").expect("write");
+
+        let mut state = IndexState::for_workspace("slug", &root);
+        assert_eq!(state.load(), 0);
+    }
+}

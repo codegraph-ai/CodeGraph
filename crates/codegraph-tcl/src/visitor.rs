@@ -9,9 +9,8 @@
 //! names, so all dispatch code sees resolved kinds — never "ERROR".
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, Parameter,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity,
+    ImportRelation, Parameter,
 };
 use tree_sitter::Node;
 
@@ -470,9 +469,7 @@ impl<'a> TclVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         self.functions.push(func);
 
@@ -537,9 +534,7 @@ impl<'a> TclVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let class = ClassEntity {
             name: full_ns,
@@ -681,9 +676,7 @@ impl<'a> TclVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         self.functions.push(func);
 
@@ -854,9 +847,7 @@ impl<'a> TclVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let class = ClassEntity {
             name: full_ns,
@@ -2131,6 +2122,443 @@ proc add {a b} {
             fn_names.contains(&"greet"),
             "should find greet, got: {:?}",
             fn_names
+        );
+    }
+
+    // ── parse_param_spec pure edge cases ────────────────────────────────
+
+    #[test]
+    fn test_param_spec_multiword_default() {
+        // splitn(2) keeps the whole rest as the default value
+        let p = TclVisitor::parse_param_spec("opts {a b c}");
+        assert_eq!(p.name, "opts");
+        assert_eq!(p.default_value, Some("{a b c}".to_string()));
+        assert!(!p.is_variadic);
+    }
+
+    #[test]
+    fn test_param_spec_default_with_spaces_trimmed() {
+        // Extra internal spacing is preserved in the name split but the
+        // default is trimmed at the edges
+        let p = TclVisitor::parse_param_spec("count   10");
+        assert_eq!(p.name, "count");
+        assert_eq!(p.default_value, Some("10".to_string()));
+    }
+
+    #[test]
+    fn test_param_spec_args_only_variadic_no_default() {
+        let p = TclVisitor::parse_param_spec("args");
+        assert!(p.is_variadic);
+        assert!(p.default_value.is_none());
+    }
+
+    // ── Complexity metric sub-fields ────────────────────────────────────
+
+    #[test]
+    fn test_complexity_while_counts_loop() {
+        let source = b"proc spin {} {\n    while {1} {\n        puts hi\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert!(c.loops >= 1, "while should count as a loop, got {:?}", c);
+            assert!(c.cyclomatic_complexity >= 2);
+        }
+    }
+
+    #[test]
+    fn test_complexity_catch_counts_exception_handler() {
+        let source = b"proc guard {} {\n    catch {risky} err\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert!(
+                c.exception_handlers >= 1,
+                "catch should count as an exception handler, got {:?}",
+                c
+            );
+            assert!(c.cyclomatic_complexity >= 2);
+        }
+    }
+
+    #[test]
+    fn test_complexity_return_not_counted_in_body() {
+        // A bare `return $x` in a proc body does not reach walk_complexity's
+        // resolved "return" arm (the grammar wraps it differently), so it
+        // contributes neither an early return nor extra cyclomatic complexity.
+        let source = b"proc bail {x} {\n    return $x\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(c.early_returns, 0);
+            assert_eq!(c.cyclomatic_complexity, 1);
+        }
+    }
+
+    #[test]
+    fn test_complexity_multiple_branches_sum() {
+        let source = b"proc grade {x} {\n    if {$x > 90} {\n        puts a\n    }\n    if {$x > 80} {\n        puts b\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert!(
+                c.branches >= 2,
+                "two ifs should yield >=2 branches, got {:?}",
+                c
+            );
+            assert!(c.cyclomatic_complexity >= 3);
+        }
+    }
+
+    #[test]
+    fn test_complexity_nested_ifs_both_counted() {
+        // Two nested ifs each add a branch even though the inner if lives
+        // inside the outer if's body.
+        let source =
+            b"proc nest {x} {\n    if {$x} {\n        if {$x} {\n            puts deep\n        }\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(c.branches, 2, "both nested ifs count, got {:?}", c);
+            assert_eq!(c.cyclomatic_complexity, 3);
+        }
+    }
+
+    // ── Call caller attribution ─────────────────────────────────────────
+
+    #[test]
+    fn test_call_caller_is_enclosing_proc() {
+        let source = b"proc worker {} {\n    set x 42\n}";
+        let visitor = parse_and_visit(source);
+        let set_call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "set")
+            .expect("set should be recorded as a call");
+        assert_eq!(
+            set_call.caller, "worker",
+            "call inside proc should be attributed to that proc"
+        );
+        assert!(set_call.is_direct);
+    }
+
+    #[test]
+    fn test_top_level_call_caller_is_global_scope() {
+        // A lone bare command does not parse as a command node, so use a
+        // multi-command source (matching test_eda_tool_flow) to get a
+        // recorded top-level call.
+        let source = b"report_timing -delay_type max\nreport_area\ncompile_ultra";
+        let visitor = parse_and_visit(source);
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "report_area")
+            .expect("top-level command should be recorded as a call");
+        assert_eq!(
+            call.caller, "::",
+            "a call outside any proc is attributed to global scope"
+        );
+    }
+
+    // ── Proc entity metadata ────────────────────────────────────────────
+
+    #[test]
+    fn test_proc_visibility_signature_and_no_parent() {
+        let source = b"proc greet {name} {\n    puts hi\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert_eq!(f.visibility, "public");
+        assert!(
+            f.signature.starts_with("proc greet"),
+            "signature should start with 'proc greet', got {:?}",
+            f.signature
+        );
+        // top-level proc has no enclosing namespace
+        assert!(f.parent_class.is_none());
+        assert!(f.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_namespaced_proc_call_caller_is_qualified() {
+        let source = b"namespace eval util {\n    proc run {} {\n        set y 1\n    }\n}";
+        let visitor = parse_and_visit(source);
+        // The set call inside util::run should be attributed to the qualified name
+        if let Some(call) = visitor.calls.iter().find(|c| c.callee == "set") {
+            assert!(
+                call.caller.contains("util") && call.caller.contains("run"),
+                "call caller should be namespace-qualified, got {}",
+                call.caller
+            );
+        }
+    }
+
+    #[test]
+    fn test_nested_brace_default_param() {
+        // A parameter whose default is itself a braced list. trim_end_matches('}')
+        // in extract_params_from_braced strips the whole trailing brace run,
+        // including the inner list's closer, so the recovered default keeps its
+        // opening brace but loses the closer: "{a b".
+        let source = b"proc cfg {name {flags {a b}}} {\n    puts ok\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let f = &visitor.functions[0];
+        assert!(f.parameters.iter().any(|p| p.name == "name"));
+        assert!(
+            f.parameters
+                .iter()
+                .any(|p| p.name == "flags" && p.default_value.as_deref() == Some("{a b")),
+            "flags default reflects the trailing-brace-strip quirk, got {:?}",
+            f.parameters
+        );
+    }
+
+    // ── Import relation shape ───────────────────────────────────────────
+
+    #[test]
+    fn test_source_import_is_wildcard_file_relation() {
+        let source = b"source lib/helpers.tcl";
+        let visitor = parse_and_visit(source);
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported.contains("helpers.tcl"))
+            .expect("source should record an import");
+        assert_eq!(imp.importer, "file");
+        assert!(
+            imp.is_wildcard,
+            "a `source` pulls in the whole file, so it is recorded as a wildcard import"
+        );
+        assert!(imp.alias.is_none());
+        assert!(imp.symbols.is_empty());
+    }
+
+    #[test]
+    fn test_quoted_only_source_yields_no_import() {
+        // A lone `source "path"` (quoted arg, no preceding bare command) parses
+        // into an ERROR node, so visit_source_command is never reached and no
+        // import is recorded - a grammar quirk, unlike the bare `source path`.
+        let source = b"source \"lib/quoted.tcl\"";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.imports.is_empty(),
+            "quoted-only source ERROR-parses and records no import, got {:?}",
+            visitor
+                .imports
+                .iter()
+                .map(|i| &i.imported)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_package_require_is_non_wildcard_file_relation() {
+        let source = b"package require http 2.9";
+        let visitor = parse_and_visit(source);
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported == "http")
+            .expect("package require should record an import of the package name");
+        assert_eq!(imp.importer, "file");
+        assert!(
+            !imp.is_wildcard,
+            "a package require names a specific package, not a wildcard"
+        );
+    }
+
+    #[test]
+    fn test_eda_read_records_file_import() {
+        let source = b"read_verilog design.v";
+        let visitor = parse_and_visit(source);
+        let imp = visitor
+            .imports
+            .iter()
+            .find(|i| i.imported.contains("design.v"))
+            .expect("read_verilog should record a design-file import");
+        assert_eq!(imp.importer, "file");
+        assert!(!imp.is_wildcard);
+    }
+
+    // ── Complexity: loop keywords and untracked constructs ──────────────
+
+    #[test]
+    fn test_complexity_foreach_braced_list_counts_loop() {
+        // `foreach x {a b c} {...}` (braced literal list) parses cleanly, unlike
+        // the `foreach x $var {...}` form which ERROR-parses the whole proc.
+        let source = b"proc iter {} {\n    foreach x {a b c} {\n        puts $x\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let c = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("proc should have complexity");
+        assert!(c.loops >= 1, "foreach should count as a loop, got {:?}", c);
+        assert!(c.cyclomatic_complexity >= 2);
+    }
+
+    #[test]
+    fn test_foreach_braced_list_recorded_as_call() {
+        let source = b"proc iter {} {\n    foreach x {a b c} {\n        puts $x\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert!(
+            visitor.calls.iter().any(|c| c.callee == "foreach"),
+            "foreach keyword should be recorded as a call, got: {:?}",
+            visitor.calls.iter().map(|c| &c.callee).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_foreach_var_list_error_parses_and_drops_body() {
+        // Contrast case: with a `$var` list argument the whole proc body lands in
+        // an ERROR node, so foreach is neither counted nor recorded as a call.
+        let source = b"proc iter {items} {\n    foreach x $items {\n        puts $x\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(
+            !visitor.calls.iter().any(|c| c.callee == "foreach"),
+            "foreach over a $var list is not tracked (ERROR parse), got: {:?}",
+            visitor.calls.iter().map(|c| &c.callee).collect::<Vec<_>>()
+        );
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(c.loops, 0, "no loop counted for the ERROR-parsed body");
+        }
+    }
+
+    #[test]
+    fn test_complexity_logical_operators_never_counted() {
+        // walk_complexity has no arm that increments logical_operators, so an
+        // `if` guard with && / || contributes nothing to that metric - a latent gap.
+        let source = b"proc test {a b} {\n    if {$a && $b || $a} {\n        puts yes\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(
+                c.logical_operators, 0,
+                "TclVisitor never accounts for &&/|| in complexity, got {:?}",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_complexity_switch_adds_no_branches() {
+        // `switch` is not one of walk_complexity's branch keywords, so even a
+        // multi-case switch contributes zero branches.
+        let source =
+            b"proc sel {x} {\n    switch $x {\n        a {puts 1}\n        b {puts 2}\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert_eq!(
+                c.branches, 0,
+                "switch cases are not counted as branches, got {:?}",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_complexity_max_nesting_depth_grows_with_braced_bodies() {
+        // Each braced_word body descends one nesting level; a proc body with a
+        // foreach whose body is itself braced reaches depth >= 2.
+        let source = b"proc deep {} {\n    foreach x {a b c} {\n        puts $x\n    }\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        if let Some(ref c) = visitor.functions[0].complexity {
+            assert!(
+                c.max_nesting_depth >= 2,
+                "nested braced bodies should raise max_nesting_depth, got {:?}",
+                c
+            );
+        }
+    }
+
+    // ── Doc comment attachment ──────────────────────────────────────────
+
+    #[test]
+    fn test_two_leading_comments_attach_joined_in_order() {
+        // extract_preceding_comment walks prev_siblings and joins them with '\n'
+        // after reversing, so stacked comments appear in source order. This form
+        // (two comment lines directly above the proc) parses cleanly enough for
+        // the comments to be prev_siblings of the proc node.
+        let source = b"# first line\n# second line\nproc doc {} {\n    puts hi\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        let doc = visitor.functions[0]
+            .doc_comment
+            .as_ref()
+            .expect("two stacked comments should attach as a doc comment");
+        let first = doc.find("first line").expect("has first line");
+        let second = doc.find("second line").expect("has second line");
+        assert!(
+            first < second,
+            "comments should be joined in source order, got {:?}",
+            doc
+        );
+    }
+
+    // ── Proc entity edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn test_proc_with_no_params_has_empty_parameters() {
+        let source = b"proc noop {} {\n    puts hi\n}";
+        let visitor = parse_and_visit(source);
+        assert_eq!(visitor.functions.len(), 1);
+        assert!(
+            visitor.functions[0].parameters.is_empty(),
+            "empty brace list yields no parameters, got {:?}",
+            visitor.functions[0].parameters
+        );
+    }
+
+    // ── qualified_name / current_namespace pure helpers ─────────────────
+
+    #[test]
+    fn test_current_namespace_empty_stack_is_none() {
+        let visitor = TclVisitor::new(b"");
+        assert!(
+            visitor.current_namespace().is_none(),
+            "an empty namespace_stack must yield None"
+        );
+    }
+
+    #[test]
+    fn test_current_namespace_joins_stack_with_scope_resolution() {
+        let mut visitor = TclVisitor::new(b"");
+        visitor.namespace_stack.push("outer".to_string());
+        assert_eq!(visitor.current_namespace().as_deref(), Some("outer"));
+        visitor.namespace_stack.push("inner".to_string());
+        assert_eq!(
+            visitor.current_namespace().as_deref(),
+            Some("outer::inner"),
+            "nested namespaces must join with `::`"
+        );
+    }
+
+    #[test]
+    fn test_qualified_name_no_namespace_returns_verbatim() {
+        let visitor = TclVisitor::new(b"");
+        assert_eq!(
+            visitor.qualified_name("proc_name"),
+            "proc_name",
+            "with an empty namespace_stack the name is returned unchanged"
+        );
+    }
+
+    #[test]
+    fn test_qualified_name_prefixes_with_current_namespace() {
+        let mut visitor = TclVisitor::new(b"");
+        visitor.namespace_stack.push("app".to_string());
+        assert_eq!(
+            visitor.qualified_name("run"),
+            "app::run",
+            "a single namespace prefixes the name with `ns::`"
+        );
+        visitor.namespace_stack.push("util".to_string());
+        assert_eq!(
+            visitor.qualified_name("run"),
+            "app::util::run",
+            "nested namespaces prefix with the full `::`-joined path"
         );
     }
 }

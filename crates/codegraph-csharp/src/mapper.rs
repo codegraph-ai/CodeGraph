@@ -192,9 +192,7 @@ pub fn ir_to_graph(
                 method_props = method_props.with("attributes", method.attributes.clone());
             }
             // Detect ASP.NET HTTP handler attributes on methods
-            if let Some((http_method, route)) =
-                detect_csharp_http_attribute(&method.attributes)
-            {
+            if let Some((http_method, route)) = detect_csharp_http_attribute(&method.attributes) {
                 method_props = method_props
                     .with("http_method", http_method)
                     .with("route", route)
@@ -453,7 +451,11 @@ fn extract_attribute_value(attr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{ClassEntity, FunctionEntity, ImportRelation, TraitEntity};
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, Parameter,
+        TraitEntity,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -735,5 +737,489 @@ mod tests {
             "is_async should be Bool(true), got {:?}",
             func_node.properties.get("is_async")
         );
+    }
+
+    // ---- detect_csharp_http_attribute (pure helper) ----
+
+    #[test]
+    fn test_detect_http_get_no_route() {
+        assert_eq!(
+            detect_csharp_http_attribute(&["HttpGet".to_string()]),
+            Some(("GET".to_string(), "/".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_detect_http_post_with_route() {
+        assert_eq!(
+            detect_csharp_http_attribute(&["HttpPost(\"/users\")".to_string()]),
+            Some(("POST".to_string(), "/users".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_detect_http_put_delete_patch() {
+        assert_eq!(
+            detect_csharp_http_attribute(&["HttpPut".to_string()]),
+            Some(("PUT".to_string(), "/".to_string()))
+        );
+        assert_eq!(
+            detect_csharp_http_attribute(&["HttpDelete".to_string()]),
+            Some(("DELETE".to_string(), "/".to_string()))
+        );
+        assert_eq!(
+            detect_csharp_http_attribute(&["HttpPatch".to_string()]),
+            Some(("PATCH".to_string(), "/".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_detect_http_case_insensitive() {
+        assert_eq!(
+            detect_csharp_http_attribute(&["httpget".to_string()]),
+            Some(("GET".to_string(), "/".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_detect_http_route_before_method_supplies_route() {
+        // A preceding [Route("/api")] provides the route for a bare [HttpGet].
+        assert_eq!(
+            detect_csharp_http_attribute(&["Route(\"/api\")".to_string(), "HttpGet".to_string()]),
+            Some(("GET".to_string(), "/api".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_detect_http_route_only_returns_none() {
+        // A [Route(..)] with no HTTP-method attribute is not itself an endpoint.
+        assert_eq!(
+            detect_csharp_http_attribute(&["Route(\"/api\")".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_detect_http_none() {
+        assert_eq!(detect_csharp_http_attribute(&[]), None);
+        assert_eq!(
+            detect_csharp_http_attribute(&["Serializable".to_string()]),
+            None
+        );
+    }
+
+    // ---- is_aspnet_controller_class (pure helper) ----
+
+    #[test]
+    fn test_is_aspnet_controller_by_name() {
+        assert!(is_aspnet_controller_class("UsersController", &[]));
+    }
+
+    #[test]
+    fn test_is_aspnet_controller_by_attribute() {
+        assert!(is_aspnet_controller_class(
+            "Users",
+            &["ApiController".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_is_aspnet_controller_negative() {
+        assert!(!is_aspnet_controller_class(
+            "Service",
+            &["Serializable".to_string()]
+        ));
+    }
+
+    // ---- extract_attribute_value (pure helper) ----
+
+    #[test]
+    fn test_extract_attribute_value() {
+        assert_eq!(
+            extract_attribute_value("HttpGet(\"/x\")"),
+            Some("/x".to_string())
+        );
+        assert_eq!(extract_attribute_value("HttpGet"), None);
+        // Unterminated quote yields None.
+        assert_eq!(extract_attribute_value("Route(\"/y"), None);
+    }
+
+    // ---- function optional props ----
+
+    #[test]
+    fn test_function_optional_props_present() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        ir.add_function(
+            FunctionEntity::new("Compute", 1, 5)
+                .with_doc("computes")
+                .with_return_type("int")
+                .with_parameters(vec![Parameter::new("x"), Parameter::new("y")])
+                .with_attributes(vec!["Pure".to_string()])
+                .with_body_prefix("return x + y;"),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let p = &graph.get_node(fi.functions[0]).unwrap().properties;
+        assert_eq!(
+            p.get("doc"),
+            Some(&PropertyValue::String("computes".into()))
+        );
+        assert_eq!(
+            p.get("return_type"),
+            Some(&PropertyValue::String("int".into()))
+        );
+        assert_eq!(
+            p.get("parameters"),
+            Some(&PropertyValue::StringList(vec!["x".into(), "y".into()]))
+        );
+        assert_eq!(
+            p.get("attributes"),
+            Some(&PropertyValue::StringList(vec!["Pure".into()]))
+        );
+        assert_eq!(
+            p.get("body_prefix"),
+            Some(&PropertyValue::String("return x + y;".into()))
+        );
+    }
+
+    #[test]
+    fn test_function_optional_props_absent() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        ir.add_function(FunctionEntity::new("Bare", 1, 2));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let p = &graph.get_node(fi.functions[0]).unwrap().properties;
+        assert!(p.get("doc").is_none());
+        assert!(p.get("return_type").is_none());
+        assert!(p.get("parent_class").is_none());
+        assert!(p.get("parameters").is_none());
+        assert!(p.get("attributes").is_none());
+        assert!(p.get("body_prefix").is_none());
+        assert!(p.get("complexity").is_none());
+    }
+
+    #[test]
+    fn test_function_complexity_all_props() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        let metrics = ComplexityMetrics {
+            cyclomatic_complexity: 12,
+            branches: 3,
+            loops: 2,
+            logical_operators: 4,
+            max_nesting_depth: 5,
+            exception_handlers: 1,
+            early_returns: 2,
+        };
+        ir.add_function(FunctionEntity::new("f", 1, 20).with_complexity(metrics));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let p = &graph.get_node(fi.functions[0]).unwrap().properties;
+        use codegraph::PropertyValue::{Int, String as S};
+        assert_eq!(p.get("complexity"), Some(&Int(12)));
+        assert_eq!(p.get("complexity_grade"), Some(&S("C".to_string())));
+        assert_eq!(p.get("complexity_branches"), Some(&Int(3)));
+        assert_eq!(p.get("complexity_loops"), Some(&Int(2)));
+        assert_eq!(p.get("complexity_logical_ops"), Some(&Int(4)));
+        assert_eq!(p.get("complexity_nesting"), Some(&Int(5)));
+        assert_eq!(p.get("complexity_exceptions"), Some(&Int(1)));
+        assert_eq!(p.get("complexity_early_returns"), Some(&Int(2)));
+    }
+
+    #[test]
+    fn test_function_http_handler_props() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        ir.add_function(
+            FunctionEntity::new("GetUser", 1, 5)
+                .with_attributes(vec!["HttpGet(\"/user\")".to_string()]),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let p = &graph.get_node(fi.functions[0]).unwrap().properties;
+        assert_eq!(
+            p.get("http_method"),
+            Some(&PropertyValue::String("GET".into()))
+        );
+        assert_eq!(p.get("route"), Some(&PropertyValue::String("/user".into())));
+        assert_eq!(p.get("is_entry_point"), Some(&PropertyValue::Bool(true)));
+    }
+
+    // ---- methods ----
+
+    #[test]
+    fn test_method_qualified_name_and_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        let mut class = ClassEntity::new("Calc", 1, 10);
+        class
+            .methods
+            .push(FunctionEntity::new("Add", 2, 4).with_body_prefix("return a + b;"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        // Two functions ids? functions vec holds only free functions... method is pushed too.
+        let method_id = *fi.functions.last().unwrap();
+        let p = &graph.get_node(method_id).unwrap().properties;
+        assert_eq!(
+            p.get("name"),
+            Some(&PropertyValue::String("Calc.Add".into()))
+        );
+        assert_eq!(
+            p.get("is_method"),
+            Some(&PropertyValue::String("true".into()))
+        );
+        assert_eq!(
+            p.get("parent_class"),
+            Some(&PropertyValue::String("Calc".into()))
+        );
+
+        // Class Contains method.
+        let class_id = fi.classes[0];
+        let edges = graph.get_edges_between(class_id, method_id).unwrap();
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    #[test]
+    fn test_method_http_attribute() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        let mut class = ClassEntity::new("Api", 1, 10);
+        class.methods.push(
+            FunctionEntity::new("Create", 2, 4)
+                .with_visibility("public")
+                .with_attributes(vec!["HttpPost".to_string()]),
+        );
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let p = &graph
+            .get_node(*fi.functions.last().unwrap())
+            .unwrap()
+            .properties;
+        assert_eq!(
+            p.get("http_method"),
+            Some(&PropertyValue::String("POST".into()))
+        );
+        assert_eq!(p.get("is_entry_point"), Some(&PropertyValue::Bool(true)));
+    }
+
+    #[test]
+    fn test_method_aspnet_controller_heuristic() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        let mut class = ClassEntity::new("UsersController", 1, 10);
+        class
+            .methods
+            .push(FunctionEntity::new("Index", 2, 4).with_visibility("public"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        // A public method on a *Controller class is heuristically an ANY endpoint.
+        let p = &graph
+            .get_node(*fi.functions.last().unwrap())
+            .unwrap()
+            .properties;
+        assert_eq!(
+            p.get("http_method"),
+            Some(&PropertyValue::String("ANY".into()))
+        );
+        assert_eq!(p.get("route"), Some(&PropertyValue::String("/".into())));
+        assert_eq!(p.get("is_entry_point"), Some(&PropertyValue::Bool(true)));
+    }
+
+    #[test]
+    fn test_private_controller_method_not_endpoint() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        let mut class = ClassEntity::new("UsersController", 1, 10);
+        class
+            .methods
+            .push(FunctionEntity::new("Helper", 2, 4).with_visibility("private"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let p = &graph
+            .get_node(*fi.functions.last().unwrap())
+            .unwrap()
+            .properties;
+        assert!(p.get("is_entry_point").is_none());
+    }
+
+    // ---- class / interface props ----
+
+    #[test]
+    fn test_class_optional_props() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        ir.add_class(
+            ClassEntity::new("Base", 1, 10)
+                .with_visibility("internal")
+                .abstract_class()
+                .with_doc("base class")
+                .with_attributes(vec!["Serializable".to_string()])
+                .with_type_parameters(vec!["T".to_string()])
+                .with_body_prefix("abstract class Base {"),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let p = &graph.get_node(fi.classes[0]).unwrap().properties;
+        assert_eq!(
+            p.get("visibility"),
+            Some(&PropertyValue::String("internal".into()))
+        );
+        assert_eq!(p.get("is_abstract"), Some(&PropertyValue::Bool(true)));
+        assert_eq!(
+            p.get("doc"),
+            Some(&PropertyValue::String("base class".into()))
+        );
+        assert_eq!(
+            p.get("attributes"),
+            Some(&PropertyValue::StringList(vec!["Serializable".into()]))
+        );
+        assert_eq!(
+            p.get("type_parameters"),
+            Some(&PropertyValue::StringList(vec!["T".into()]))
+        );
+        assert_eq!(
+            p.get("body_prefix"),
+            Some(&PropertyValue::String("abstract class Base {".into()))
+        );
+    }
+
+    #[test]
+    fn test_interface_required_methods_and_edge() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        ir.add_trait(
+            TraitEntity::new("IShape", 1, 5)
+                .with_doc("a shape")
+                .with_methods(vec![
+                    FunctionEntity::new("Area", 2, 2),
+                    FunctionEntity::new("Perimeter", 3, 3),
+                ]),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let node = graph.get_node(fi.traits[0]).unwrap();
+        assert_eq!(node.node_type, NodeType::Interface);
+        assert_eq!(
+            node.properties.get("doc"),
+            Some(&PropertyValue::String("a shape".into()))
+        );
+        assert_eq!(
+            node.properties.get("required_methods"),
+            Some(&PropertyValue::StringList(vec![
+                "Area".into(),
+                "Perimeter".into()
+            ]))
+        );
+
+        // File Contains interface.
+        let edges = graph.get_edges_between(fi.file_id, fi.traits[0]).unwrap();
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    // ---- imports ----
+
+    #[test]
+    fn test_import_edge_props_and_external() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        ir.add_import(
+            ImportRelation::new("Test", "System.Linq")
+                .with_alias("L")
+                .with_symbols(vec!["Enumerable".to_string()])
+                .wildcard(),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let edges = graph.get_edges_between(fi.file_id, fi.imports[0]).unwrap();
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        use codegraph::PropertyValue::{String as S, StringList};
+        assert_eq!(edge.properties.get("alias"), Some(&S("L".into())));
+        assert_eq!(edge.properties.get("is_wildcard"), Some(&S("true".into())));
+        assert_eq!(
+            edge.properties.get("symbols"),
+            Some(&StringList(vec!["Enumerable".into()]))
+        );
+
+        let node = graph.get_node(fi.imports[0]).unwrap();
+        assert_eq!(node.node_type, NodeType::Module);
+        assert_eq!(node.properties.get("is_external"), Some(&S("true".into())));
+    }
+
+    #[test]
+    fn test_import_reuses_in_file_node() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        ir.add_class(ClassEntity::new("Widget", 1, 5));
+        ir.add_import(ImportRelation::new("Test", "Widget"));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        // Import reuses the existing Class node rather than creating a Module.
+        assert_eq!(fi.imports[0], fi.classes[0]);
+        let node = graph.get_node(fi.imports[0]).unwrap();
+        assert_eq!(node.node_type, NodeType::Class);
+        assert!(node.properties.get("is_external").is_none());
+    }
+
+    // ---- file node fallbacks / unresolved calls ----
+
+    #[test]
+    fn test_file_stem_fallback_no_module() {
+        let ir = CodeIR::new(PathBuf::from("Service.cs"));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("dir/Service.cs").as_path()).unwrap();
+
+        let p = &graph.get_node(fi.file_id).unwrap().properties;
+        assert_eq!(
+            p.get("name"),
+            Some(&PropertyValue::String("Service".into()))
+        );
+        assert_eq!(
+            p.get("language"),
+            Some(&PropertyValue::String("csharp".into()))
+        );
+    }
+
+    #[test]
+    fn test_unresolved_calls_stored_and_deduped() {
+        let mut ir = CodeIR::new(PathBuf::from("Test.cs"));
+        ir.add_function(FunctionEntity::new("Caller", 1, 3));
+        ir.add_call(CallRelation::new("Caller", "External", 2));
+        ir.add_call(CallRelation::new("Caller", "External", 4));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let fi = ir_to_graph(&ir, &mut graph, PathBuf::from("Test.cs").as_path()).unwrap();
+
+        let unresolved = graph
+            .get_node(fi.functions[0])
+            .unwrap()
+            .properties
+            .get_string_list_compat("unresolved_calls")
+            .unwrap();
+        assert_eq!(unresolved, vec!["External".to_string()]);
     }
 }

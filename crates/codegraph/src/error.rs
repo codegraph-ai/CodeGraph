@@ -152,4 +152,125 @@ mod tests {
             "Property 'name' not found on node node-123"
         );
     }
+
+    #[test]
+    fn test_edge_not_found_error() {
+        let err = GraphError::EdgeNotFound {
+            edge_id: "edge-42".to_string(),
+        };
+        assert_eq!(err.to_string(), "Edge not found: edge-42");
+    }
+
+    #[test]
+    fn test_file_not_found_error() {
+        let err = GraphError::FileNotFound {
+            path: PathBuf::from("/tmp/missing.rs"),
+        };
+        assert_eq!(err.to_string(), "File not found: /tmp/missing.rs");
+    }
+
+    #[test]
+    fn test_property_type_mismatch_error() {
+        let err = GraphError::PropertyTypeMismatch {
+            key: "count".to_string(),
+            expected: "integer".to_string(),
+            actual: "string".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Property type mismatch: expected integer, got string for key 'count'"
+        );
+    }
+
+    #[test]
+    fn test_serialization_error_message() {
+        let err = GraphError::serialization("bad json", None::<std::io::Error>);
+        assert_eq!(err.to_string(), "Serialization error: bad json");
+    }
+
+    #[test]
+    fn test_storage_error_with_source_chains() {
+        use std::error::Error;
+        let io_err = std::io::Error::other("disk full");
+        let err = GraphError::storage("write failed", Some(io_err));
+        assert_eq!(err.to_string(), "Storage error: write failed");
+        // The Some(source) branch wraps the io error, exposed via Error::source().
+        let src = err.source().expect("expected a source error");
+        assert_eq!(src.to_string(), "disk full");
+    }
+
+    #[test]
+    fn test_serialization_error_with_source_chains() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::InvalidData, "not utf8");
+        let err = GraphError::serialization("decode failed", Some(io_err));
+        let src = err.source().expect("expected a source error");
+        assert_eq!(src.to_string(), "not utf8");
+    }
+
+    #[test]
+    fn test_sourceless_variants_have_no_source() {
+        use std::error::Error;
+        // The six variants that carry no `#[source]` field must all return
+        // source() == None. The existing source tests only exercise the
+        // Some/None arms of Storage/Serialization, never pinning that these
+        // variants stay sourceless - a stray #[source] added to any of them
+        // (via a thiserror change or refactor) would otherwise go uncaught.
+        let sourceless: Vec<GraphError> = vec![
+            GraphError::NodeNotFound {
+                node_id: "n1".to_string(),
+            },
+            GraphError::EdgeNotFound {
+                edge_id: "e1".to_string(),
+            },
+            GraphError::FileNotFound {
+                path: PathBuf::from("/tmp/x.rs"),
+            },
+            GraphError::InvalidOperation {
+                message: "dup".to_string(),
+            },
+            GraphError::PropertyNotFound {
+                entity_type: "node".to_string(),
+                entity_id: "n1".to_string(),
+                key: "name".to_string(),
+            },
+            GraphError::PropertyTypeMismatch {
+                key: "count".to_string(),
+                expected: "int".to_string(),
+                actual: "str".to_string(),
+            },
+        ];
+        for err in &sourceless {
+            assert!(
+                err.source().is_none(),
+                "variant should have no source: {err}"
+            );
+        }
+        // The None arm of the Storage/Serialization constructors must also
+        // surface no source (distinct from the sourceless variants above,
+        // since these variants *can* carry a source but were built without one).
+        assert!(GraphError::storage("m", None::<std::io::Error>)
+            .source()
+            .is_none());
+        assert!(GraphError::serialization("m", None::<std::io::Error>)
+            .source()
+            .is_none());
+    }
+
+    #[test]
+    fn test_storage_source_downcasts_to_concrete_io_error() {
+        use std::error::Error;
+        // The existing source-chain tests assert only source().to_string();
+        // they never confirm the boxed source downcasts back to a concrete
+        // io::Error preserving its ErrorKind. ErrorKind preservation is what
+        // lets callers branch on NotFound/PermissionDenied rather than string-match.
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err = GraphError::storage("write failed", Some(io_err));
+        let src = err.source().expect("expected a source error");
+        let downcast = src
+            .downcast_ref::<std::io::Error>()
+            .expect("source should downcast to a concrete io::Error");
+        assert_eq!(downcast.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(downcast.to_string(), "denied");
+    }
 }

@@ -250,4 +250,206 @@ mod tests {
         let info = result.unwrap();
         assert_eq!(info.classes.len(), 1);
     }
+
+    use std::io::Write;
+
+    /// A small, complete SystemVerilog module touching each entity kind Verilog
+    /// supports. The `module sample` yields one class, the `import my_pkg::*`
+    /// yields one import, and the contained `function integer add` yields one
+    /// function. Verilog has no trait concept, so this pins functions=1 /
+    /// classes=1 / traits=0 / imports=1 with entity_count=2 (functions +
+    /// classes + traits, which excludes imports).
+    const SAMPLE: &str = concat!(
+        "module sample ();\n",
+        "  import my_pkg::*;\n",
+        "  function integer add;\n",
+        "    input a, b;\n",
+        "    add = a + b;\n",
+        "  endfunction\n",
+        "endmodule\n",
+    );
+
+    fn graph() -> CodeGraph {
+        CodeGraph::in_memory().expect("in-memory graph")
+    }
+
+    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).expect("create temp file");
+        f.write_all(content.as_bytes()).expect("write temp file");
+        path
+    }
+
+    #[test]
+    fn test_default_matches_new_metrics() {
+        let default = VerilogParser::default().metrics();
+        let new = VerilogParser::new().metrics();
+        assert_eq!(default.files_attempted, new.files_attempted);
+        assert_eq!(default.files_attempted, 0);
+        assert_eq!(default.total_entities, 0);
+    }
+
+    #[test]
+    fn test_with_config_and_accessor() {
+        let cfg = ParserConfig::default().with_max_file_size(4242);
+        let parser = VerilogParser::with_config(cfg);
+        assert_eq!(parser.config().max_file_size, 4242);
+    }
+
+    #[test]
+    fn test_parse_source_extracts_each_entity_kind() {
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("sample.sv"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.functions.len(), 1, "one function");
+        assert_eq!(info.classes.len(), 1, "one module");
+        assert_eq!(info.traits.len(), 0, "Verilog has no traits");
+        assert_eq!(info.imports.len(), 1, "one package import");
+        assert_eq!(info.entity_count(), 2, "functions + classes + traits");
+    }
+
+    #[test]
+    fn test_parse_source_records_line_and_byte_counts() {
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("sample.sv"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.line_count, SAMPLE.lines().count());
+        assert_eq!(info.byte_count, SAMPLE.len());
+    }
+
+    #[test]
+    fn test_parse_source_comment_only_yields_no_entities() {
+        // Verilog is tree-sitter-based and error-tolerant, so a comment-only
+        // source (a `//` line comment) parses and extracts no entities: without
+        // a module/interface/class there is no class.
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        let src = "// just a comment\n";
+        let info = parser
+            .parse_source(src, Path::new("sample.sv"), &mut g)
+            .expect("comment-only source still parses");
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.traits.len(), 0);
+        assert_eq!(info.imports.len(), 0);
+        assert_eq!(info.line_count, 1);
+        assert_eq!(info.byte_count, src.len());
+    }
+
+    #[test]
+    fn test_parse_source_does_not_touch_metrics() {
+        // Verilog's parse_source is metric-free; only parse_file records metrics.
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        parser
+            .parse_source(SAMPLE, Path::new("sample.sv"), &mut g)
+            .expect("parse ok");
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.total_entities, 0);
+    }
+
+    #[test]
+    fn test_parse_file_success_updates_metrics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "sample.sv", SAMPLE);
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        let info = parser.parse_file(&path, &mut g).expect("parse ok");
+        assert_eq!(info.functions.len(), 1);
+        assert_eq!(info.classes.len(), 1);
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_succeeded, 1);
+        assert_eq!(m.files_failed, 0);
+        assert_eq!(m.total_entities, info.entity_count());
+    }
+
+    #[test]
+    fn test_parse_file_missing_file_is_io_error() {
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        let err = parser
+            .parse_file(Path::new("/no/such/sample.sv"), &mut g)
+            .expect_err("missing file should error");
+        assert!(matches!(err, ParserError::IoError(..)));
+        // A pre-read failure never reaches update_metrics.
+        assert_eq!(parser.metrics().files_attempted, 0);
+    }
+
+    #[test]
+    fn test_parse_file_too_large() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "sample.sv", SAMPLE);
+        let parser = VerilogParser::with_config(ParserConfig::default().with_max_file_size(4));
+        let mut g = graph();
+        let err = parser
+            .parse_file(&path, &mut g)
+            .expect_err("oversized file should error");
+        assert!(matches!(err, ParserError::FileTooLarge(..)));
+        // The size guard also short-circuits before metrics are touched.
+        assert_eq!(parser.metrics().files_attempted, 0);
+    }
+
+    #[test]
+    fn test_reset_metrics_zeroes_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "sample.sv", SAMPLE);
+        let mut parser = VerilogParser::new();
+        let mut g = graph();
+        parser.parse_file(&path, &mut g).expect("parse ok");
+        assert_eq!(parser.metrics().files_attempted, 1);
+        parser.reset_metrics();
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.files_succeeded, 0);
+        assert_eq!(m.total_entities, 0);
+    }
+
+    #[test]
+    fn test_metrics_accumulate_across_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.sv", SAMPLE);
+        let b = write_file(dir.path(), "b.sv", SAMPLE);
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        parser.parse_file(&a, &mut g).expect("parse a");
+        parser.parse_file(&b, &mut g).expect("parse b");
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 2);
+        assert_eq!(m.files_succeeded, 2);
+    }
+
+    #[test]
+    fn test_parse_files_sequential_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.sv", SAMPLE);
+        let b = write_file(dir.path(), "b.sv", SAMPLE);
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        let project = parser.parse_files(&[a, b], &mut g).expect("parse ok");
+        assert_eq!(project.files.len(), 2);
+        assert!(project.failed_files.is_empty());
+        assert_eq!(project.total_functions, 2);
+        assert_eq!(project.total_classes, 2);
+    }
+
+    #[test]
+    fn test_parse_files_partitions_failures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = write_file(dir.path(), "good.sv", SAMPLE);
+        let missing = dir.path().join("missing.sv");
+        let parser = VerilogParser::new();
+        let mut g = graph();
+        let project = parser
+            .parse_files(&[good, missing.clone()], &mut g)
+            .expect("parse ok");
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.failed_files.len(), 1);
+        assert_eq!(project.failed_files[0].0, missing);
+    }
 }

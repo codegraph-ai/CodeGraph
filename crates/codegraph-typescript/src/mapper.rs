@@ -468,7 +468,10 @@ fn detect_ts_http_decorator(attributes: &[String]) -> Option<(String, String)> {
 
         // NestJS: Get(), Get('/path'), Post(), etc.
         for method in HTTP_METHODS {
-            if lower.starts_with(method) && (lower.len() == method.len() || lower.as_bytes().get(method.len()) == Some(&b'(')) {
+            if lower.starts_with(method)
+                && (lower.len() == method.len()
+                    || lower.as_bytes().get(method.len()) == Some(&b'('))
+            {
                 let route = extract_first_string(attr).unwrap_or_else(|| "/".to_string());
                 return Some((method.to_uppercase(), route));
             }
@@ -1172,5 +1175,56 @@ mod tests {
             Some("public"),
             "visibility should be 'public'"
         );
+    }
+
+    #[test]
+    fn test_extract_first_string_variants() {
+        // Single-quoted argument
+        assert_eq!(
+            extract_first_string("Get('/users/:id')"),
+            Some("/users/:id".to_string())
+        );
+        // Double-quoted argument
+        assert_eq!(
+            extract_first_string("Post(\"/create\")"),
+            Some("/create".to_string())
+        );
+        // First quote wins when multiple strings are present
+        assert_eq!(
+            extract_first_string("Header('X', 'application/json')"),
+            Some("X".to_string())
+        );
+        // No quotes at all yields None
+        assert_eq!(extract_first_string("Get()"), None);
+        // Unterminated quote yields None (scan reaches end without a closing quote)
+        assert_eq!(extract_first_string("Get('/oops"), None);
+    }
+
+    #[test]
+    fn test_detect_ts_http_decorator() {
+        // Bare decorator with no path defaults route to "/"
+        assert_eq!(
+            detect_ts_http_decorator(&["Get()".to_string()]),
+            Some(("GET".to_string(), "/".to_string()))
+        );
+        // Path argument is extracted and method is uppercased
+        assert_eq!(
+            detect_ts_http_decorator(&["Post('/create')".to_string()]),
+            Some(("POST".to_string(), "/create".to_string()))
+        );
+        // Decorator name with no parens still matches (len == method.len())
+        assert_eq!(
+            detect_ts_http_decorator(&["delete".to_string()]),
+            Some(("DELETE".to_string(), "/".to_string()))
+        );
+        // Non-HTTP decorators are ignored, first HTTP match wins across the list
+        assert_eq!(
+            detect_ts_http_decorator(&["Injectable()".to_string(), "Patch(':id')".to_string()]),
+            Some(("PATCH".to_string(), ":id".to_string()))
+        );
+        // A prefix-only lookalike (Getter) must NOT match get: next char is neither end nor '('
+        assert_eq!(detect_ts_http_decorator(&["Getter()".to_string()]), None);
+        // Empty attribute list yields None
+        assert_eq!(detect_ts_http_decorator(&[]), None);
     }
 }

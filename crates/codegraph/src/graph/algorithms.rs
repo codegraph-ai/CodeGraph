@@ -315,4 +315,246 @@ mod tests {
         let result = dfs(&graph, a, Direction::Outgoing, None).unwrap();
         assert_eq!(result.len(), 2);
     }
+
+    /// Build the acyclic chain a -> b -> c and return (graph, a, b, c).
+    fn chain() -> (CodeGraph, NodeId, NodeId, NodeId) {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, c, vec![]).unwrap();
+        (graph, a, b, c)
+    }
+
+    #[test]
+    fn test_bfs_respects_max_depth() {
+        let (graph, a, b, _c) = chain();
+        // Depth 1 expands only the start's direct neighbors.
+        let result = bfs(&graph, a, Direction::Outgoing, Some(1)).unwrap();
+        assert_eq!(result, vec![b]);
+    }
+
+    #[test]
+    fn test_bfs_incoming_direction() {
+        let (graph, a, b, c) = chain();
+        // Walking incoming edges from the tail reaches both ancestors.
+        let result = bfs(&graph, c, Direction::Incoming, None).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&a));
+        assert!(result.contains(&b));
+    }
+
+    #[test]
+    fn test_bfs_cycle_terminates_and_dedups() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, a, vec![]).unwrap();
+        // The start node is pre-marked visited, so the cycle back to `a`
+        // does not re-add it; only `b` is returned.
+        let result = bfs(&graph, a, Direction::Outgoing, None).unwrap();
+        assert_eq!(result, vec![b]);
+    }
+
+    #[test]
+    fn test_dfs_respects_max_depth() {
+        let (graph, a, b, _c) = chain();
+        let result = dfs(&graph, a, Direction::Outgoing, Some(1)).unwrap();
+        assert_eq!(result, vec![b]);
+    }
+
+    #[test]
+    fn test_dfs_incoming_direction() {
+        // Mirror of the bfs incoming test: dfs walking incoming edges from the
+        // tail must reach both ancestors. bfs exercised Direction::Incoming but
+        // dfs only ever ran Outgoing, leaving its direction arg unpinned.
+        let (graph, a, b, c) = chain();
+        let result = dfs(&graph, c, Direction::Incoming, None).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&a));
+        assert!(result.contains(&b));
+    }
+
+    #[test]
+    fn test_dfs_cycle_terminates_and_dedups() {
+        // dfs mirror of the bfs cycle test: the start node is pre-marked
+        // visited, so the back edge to `a` does not re-add it and traversal
+        // terminates. dfs's visited-set dedup on a cycle was previously untested.
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, a, vec![]).unwrap();
+        let result = dfs(&graph, a, Direction::Outgoing, None).unwrap();
+        assert_eq!(result, vec![b]);
+    }
+
+    #[test]
+    fn test_bfs_max_depth_zero_returns_empty() {
+        // The depth guard is `depth >= max`, so max_depth Some(0) fires on the
+        // very first pop (depth 0 >= 0) before any neighbor is expanded. Prior
+        // tests only used Some(1), never the depth==max boundary at zero.
+        let (graph, a, _b, _c) = chain();
+        assert!(bfs(&graph, a, Direction::Outgoing, Some(0))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_dfs_max_depth_zero_returns_empty() {
+        let (graph, a, _b, _c) = chain();
+        assert!(dfs(&graph, a, Direction::Outgoing, Some(0))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_scc_no_cycle_is_empty() {
+        let (graph, _a, _b, _c) = chain();
+        assert!(find_strongly_connected_components(&graph)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_scc_detects_two_node_cycle() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        // a <-> b is a cycle; c only depends on a (no back edge).
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, a, vec![]).unwrap();
+        helpers::add_import(&mut graph, c, a, vec![]).unwrap();
+
+        let sccs = find_strongly_connected_components(&graph).unwrap();
+        assert_eq!(sccs.len(), 1);
+        let scc = &sccs[0];
+        assert_eq!(scc.len(), 2);
+        assert!(scc.contains(&a) && scc.contains(&b));
+    }
+
+    #[test]
+    fn test_scc_detects_multiple_disconnected_cycles() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        let d = helpers::add_file(&mut graph, "d.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, a, vec![]).unwrap();
+        helpers::add_import(&mut graph, c, d, vec![]).unwrap();
+        helpers::add_import(&mut graph, d, c, vec![]).unwrap();
+
+        let sccs = find_strongly_connected_components(&graph).unwrap();
+        assert_eq!(sccs.len(), 2);
+        assert!(sccs.iter().all(|scc| scc.len() == 2));
+    }
+
+    #[test]
+    fn test_find_all_paths_single_path() {
+        let (graph, a, b, c) = chain();
+        let paths = find_all_paths(&graph, a, c, None).unwrap();
+        assert_eq!(paths, vec![vec![a, b, c]]);
+    }
+
+    #[test]
+    fn test_find_all_paths_start_equals_end() {
+        // When start == end, find_paths_recursive hits the `current == end`
+        // target check on the very first call (current_path == [start]) and
+        // returns a single length-1 path without traversing any edge. Every
+        // prior test used distinct start/end, so this immediate-hit branch
+        // (ordered before neighbor exploration) was never exercised.
+        let (graph, a, _b, _c) = chain();
+        let paths = find_all_paths(&graph, a, a, None).unwrap();
+        assert_eq!(paths, vec![vec![a]]);
+    }
+
+    #[test]
+    fn test_find_all_paths_diamond_multiple() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        let d = helpers::add_file(&mut graph, "d.py", "python").unwrap();
+        // a -> b -> d and a -> c -> d: two distinct paths.
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, a, c, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, d, vec![]).unwrap();
+        helpers::add_import(&mut graph, c, d, vec![]).unwrap();
+
+        let paths = find_all_paths(&graph, a, d, None).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths
+            .iter()
+            .all(|p| p.first() == Some(&a) && p.last() == Some(&d)));
+    }
+
+    #[test]
+    fn test_find_all_paths_no_path_returns_empty() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        // c is unreachable from a.
+        let paths = find_all_paths(&graph, a, c, None).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_find_all_paths_depth_check_preempts_target() {
+        let (graph, a, _b, c) = chain();
+        // The [a, b, c] path has length 3. The depth guard fires when
+        // current_path.len() >= max_depth *before* the target check, so
+        // max_depth must exceed the path length: 3 finds nothing, 4 finds it.
+        assert!(find_all_paths(&graph, a, c, Some(3)).unwrap().is_empty());
+        let paths = find_all_paths(&graph, a, c, Some(4)).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].first(), Some(&a));
+        assert_eq!(paths[0].last(), Some(&c));
+    }
+
+    #[test]
+    fn test_find_all_paths_skips_back_edge_to_ancestor() {
+        // a -> b -> c plus a back edge b -> a. Searching a..c, when the recursion
+        // reaches b it explores both neighbors: c (the target) and a. Because a is
+        // the start and is already in `visited`, the `!visited.contains(&neighbor)`
+        // guard takes its false arm and the back edge is skipped, so exactly one
+        // path is enumerated. Every prior path test was acyclic or returned at the
+        // target before any back edge, leaving that visited-skip arm unexercised.
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, c, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, a, vec![]).unwrap();
+
+        let paths = find_all_paths(&graph, a, c, None).unwrap();
+        assert_eq!(paths, vec![vec![a, b, c]]);
+    }
+
+    #[test]
+    fn test_find_all_paths_terminates_on_deep_cycle() {
+        // a -> b -> c -> a is a 3-node cycle; c also branches to d. Searching a..d,
+        // when the recursion reaches c it hits the back edge c -> a (a already on the
+        // path/visited) and skips it, then follows c -> d to the target. This drives
+        // the visited-skip arm one level deeper than the two-node case and confirms
+        // the traversal terminates rather than looping the cycle forever.
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let a = helpers::add_file(&mut graph, "a.py", "python").unwrap();
+        let b = helpers::add_file(&mut graph, "b.py", "python").unwrap();
+        let c = helpers::add_file(&mut graph, "c.py", "python").unwrap();
+        let d = helpers::add_file(&mut graph, "d.py", "python").unwrap();
+        helpers::add_import(&mut graph, a, b, vec![]).unwrap();
+        helpers::add_import(&mut graph, b, c, vec![]).unwrap();
+        helpers::add_import(&mut graph, c, a, vec![]).unwrap();
+        helpers::add_import(&mut graph, c, d, vec![]).unwrap();
+
+        let paths = find_all_paths(&graph, a, d, None).unwrap();
+        assert_eq!(paths, vec![vec![a, b, c, d]]);
+    }
 }

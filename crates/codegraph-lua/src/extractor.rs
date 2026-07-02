@@ -56,6 +56,95 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        extract(source, Path::new(path), &ParserConfig::default()).expect("extract should succeed")
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("local x = 1\n", "widget.lua");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "widget");
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        let ir = extract_ok("local x = 1\n", "..");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_module_metadata() {
+        let source = "local x = 1\nlocal y = 2\n";
+        let ir = extract_ok(source, "path/to/mod.lua");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "path/to/mod.lua");
+        assert_eq!(module.language, "lua");
+        assert_eq!(module.line_count, 2);
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "empty.lua");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let ir = extract_ok("-- just a comment\n", "comment.lua");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_calls_populated() {
+        let source = r#"
+function callee()
+    return 1
+end
+
+function caller()
+    callee()
+end
+"#;
+        let ir = extract_ok(source, "calls.lua");
+        assert!(ir
+            .calls
+            .iter()
+            .any(|c| c.caller == "caller" && c.callee == "callee"));
+    }
+
+    #[test]
+    fn test_no_class_or_trait_concept() {
+        let source = r#"
+function f()
+    return 1
+end
+"#;
+        let ir = extract_ok(source, "noclass.lua");
+        assert!(ir.classes.is_empty());
+        assert!(ir.traits.is_empty());
+    }
+
+    #[test]
+    fn test_multi_function_extraction() {
+        let source = r#"
+function one() end
+function two() end
+function three() end
+"#;
+        let ir = extract_ok(source, "multi.lua");
+        assert_eq!(ir.functions.len(), 3);
+    }
+
     #[test]
     fn test_extract_simple_function() {
         let source = r#"

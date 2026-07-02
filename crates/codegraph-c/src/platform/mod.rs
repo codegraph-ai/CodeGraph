@@ -398,4 +398,173 @@ int main(int argc, char **argv) {
         let unknown = registry.get("unknown");
         assert!(unknown.is_none());
     }
+
+    #[test]
+    fn test_detection_pattern_function_call_and_type_name() {
+        let fc = DetectionPattern::function_call("copy_from_user", 1.5);
+        assert_eq!(fc.kind, DetectionKind::FunctionCall);
+        assert_eq!(fc.pattern, "copy_from_user");
+        assert!((fc.weight - 1.5).abs() < f32::EPSILON);
+
+        let tn = DetectionPattern::type_name("task_struct", 0.5);
+        assert_eq!(tn.kind, DetectionKind::TypeName);
+        assert_eq!(tn.pattern, "task_struct");
+        assert!((tn.weight - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_header_stubs_has_stub_and_available_headers() {
+        let mut stubs = HeaderStubs::new();
+        assert!(!stubs.has_stub("linux/types.h"));
+        assert!(stubs.available_headers().is_empty());
+
+        stubs.add("linux/types.h", "typedef unsigned int u32;");
+        stubs.add("linux/kernel.h", "typedef unsigned long size_t;");
+
+        assert!(stubs.has_stub("linux/types.h"));
+        assert!(stubs.has_stub("linux/kernel.h"));
+        assert!(!stubs.has_stub("linux/module.h"));
+
+        let mut headers = stubs.available_headers();
+        headers.sort_unstable();
+        assert_eq!(headers, vec!["linux/kernel.h", "linux/types.h"]);
+    }
+
+    #[test]
+    fn test_header_stubs_extract_include_path_edge_cases() {
+        // Unterminated angle bracket -> strip_suffix('>') fails -> None.
+        assert_eq!(
+            HeaderStubs::extract_include_path("#include <linux/types.h"),
+            None
+        );
+        // Unterminated quote likewise yields None.
+        assert_eq!(
+            HeaderStubs::extract_include_path("#include \"myheader.h"),
+            None
+        );
+        // A line without a delimiter after #include falls into the else -> None.
+        assert_eq!(
+            HeaderStubs::extract_include_path("#include linux/types.h"),
+            None
+        );
+        // Not an include line at all: everything after trimming #include is kept,
+        // but with no leading '<' or '"' it is None.
+        assert_eq!(HeaderStubs::extract_include_path("#define FOO 1"), None);
+    }
+
+    #[test]
+    fn test_header_stubs_get_for_includes_quoted_and_no_match() {
+        let mut stubs = HeaderStubs::new();
+        stubs.add("my/local.h", "struct local { int x; };");
+
+        // Quoted include resolves to the stub; the comment banner is emitted.
+        let result = stubs.get_for_includes("#include \"my/local.h\"\n");
+        assert!(result.contains("/* Stub for my/local.h */"));
+        assert!(result.contains("struct local"));
+
+        // No matching include -> empty output.
+        assert!(stubs
+            .get_for_includes("int main(void) { return 0; }\n")
+            .is_empty());
+    }
+
+    #[test]
+    fn test_platform_registry_default_matches_new() {
+        // Default delegates to new(), so linux is registered and resolvable.
+        let registry = PlatformRegistry::default();
+        assert!(registry.get("linux").is_some());
+    }
+
+    /// Minimal fake platform used to exercise register/score paths independently
+    /// of the built-in LinuxPlatform.
+    struct FakePlatform {
+        stubs: HeaderStubs,
+        norms: HashMap<&'static str, &'static str>,
+    }
+
+    impl FakePlatform {
+        fn new() -> Self {
+            Self {
+                stubs: HeaderStubs::new(),
+                norms: HashMap::new(),
+            }
+        }
+    }
+
+    impl PlatformModule for FakePlatform {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        fn name(&self) -> &'static str {
+            "Fake Platform"
+        }
+        fn detection_patterns(&self) -> Vec<DetectionPattern> {
+            vec![
+                DetectionPattern::function_call("fake_call", 3.0),
+                DetectionPattern::type_name("FakeType", 3.0),
+                DetectionPattern::macro_pattern("FAKE_MACRO", 3.0),
+            ]
+        }
+        fn header_stubs(&self) -> &HeaderStubs {
+            &self.stubs
+        }
+        fn attributes_to_strip(&self) -> &[&'static str] {
+            &[]
+        }
+        fn ops_structs(&self) -> &[OpsStructDef] {
+            &[]
+        }
+        fn call_normalizations(&self) -> &HashMap<&'static str, &'static str> {
+            &self.norms
+        }
+    }
+
+    #[test]
+    fn test_score_platform_function_call_and_type_name_branches() {
+        let mut registry = PlatformRegistry::new();
+        registry.register(Box::new(FakePlatform::new()));
+
+        // fake_call( triggers FunctionCall; FakeType matches TypeName case-insensitively;
+        // FAKE_MACRO matches the Macro branch. All three weights (3.0 each = 9.0/10) score high.
+        let source = "faketype x; fake_call(x); FAKE_MACRO;";
+        let result = registry.detect(source);
+        assert_eq!(result.platform_id, "fake");
+        assert!(result.matched_patterns.contains(&"fake_call".to_string()));
+        assert!(result.matched_patterns.contains(&"FakeType".to_string()));
+        assert!(result.matched_patterns.contains(&"FAKE_MACRO".to_string()));
+    }
+
+    #[test]
+    fn test_score_platform_function_call_needs_paren() {
+        let mut registry = PlatformRegistry::new();
+        registry.register(Box::new(FakePlatform::new()));
+
+        // Bare "fake_call" without a '(' must NOT match the FunctionCall pattern.
+        let result = registry.detect("int fake_call = 3;");
+        assert!(!result.matched_patterns.contains(&"fake_call".to_string()));
+    }
+
+    #[test]
+    fn test_score_platform_confidence_capped_at_one() {
+        // Two 3.0 patterns present + linux's own matches could exceed 10, but the
+        // fake source below only hits FakePlatform's patterns (9.0 -> 0.9), and
+        // adding a fourth match keeps us under the cap; verify the cap explicitly
+        // by matching every fake pattern which sums to 9.0/10 = 0.9 (< 1.0).
+        let mut registry = PlatformRegistry::new();
+        registry.register(Box::new(FakePlatform::new()));
+        let result = registry.detect("FakeType fake_call( FAKE_MACRO");
+        assert!(result.confidence <= 1.0);
+        assert!(result.confidence > 0.0);
+    }
+
+    #[test]
+    fn test_detect_empty_registry_returns_generic() {
+        let registry = PlatformRegistry {
+            platforms: Vec::new(),
+        };
+        let result = registry.detect("anything at all");
+        assert_eq!(result.platform_id, "generic");
+        assert_eq!(result.confidence, 0.0);
+        assert!(result.matched_patterns.is_empty());
+    }
 }

@@ -394,8 +394,20 @@ fn is_controller_callback(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{ClassEntity, FunctionEntity, ImportRelation, TraitEntity};
+    use codegraph::PropertyValue;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation, Parameter,
+        TraitEntity,
+    };
     use std::path::PathBuf;
+
+    fn prop<'a>(
+        graph: &'a CodeGraph,
+        id: NodeId,
+        key: &str,
+    ) -> Option<&'a codegraph::PropertyValue> {
+        graph.get_node(id).ok().and_then(|n| n.properties.get(key))
+    }
 
     #[test]
     fn test_ir_to_graph_empty() {
@@ -643,6 +655,422 @@ mod tests {
             ),
             "is_async should be Bool(true), got {:?}",
             func_node.properties.get("is_async")
+        );
+    }
+
+    // --- is_controller_class / is_controller_callback helpers ---
+
+    #[test]
+    fn test_is_controller_class() {
+        assert!(is_controller_class("UsersController"));
+        assert!(is_controller_class("api_controller"));
+        assert!(!is_controller_class("UserService"));
+        assert!(!is_controller_class("Controllers"));
+    }
+
+    #[test]
+    fn test_is_controller_callback() {
+        for name in [
+            "before_action",
+            "after_save",
+            "around_filter",
+            "set_user",
+            "validate_input",
+            "check_perms",
+            "require_login",
+            "authenticate_user",
+            "authorize_admin",
+            "initialize",
+            "new",
+        ] {
+            assert!(is_controller_callback(name), "{name} should be a callback");
+        }
+        assert!(!is_controller_callback("index"));
+        assert!(!is_controller_callback("show"));
+    }
+
+    // --- Rails HTTP handler prop stamping ---
+
+    #[test]
+    fn test_controller_action_gets_http_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        // HTTP action prop stamping fires in the top-level function loop for a
+        // public function whose parent_class is a controller (class.methods do
+        // not carry the stamping path).
+        let func = FunctionEntity::new("index", 2, 4)
+            .with_visibility("public")
+            .with_parent_class("UsersController");
+        ir.add_function(func);
+
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let action = file_info.functions[0];
+        assert_eq!(
+            prop(&graph, action, "http_method"),
+            Some(&PropertyValue::String("ANY".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, action, "route"),
+            Some(&PropertyValue::String("/index".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, action, "is_entry_point"),
+            Some(&PropertyValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_controller_callback_no_http_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        let func = FunctionEntity::new("before_action", 2, 4)
+            .with_visibility("public")
+            .with_parent_class("UsersController");
+        ir.add_function(func);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        assert_eq!(prop(&graph, file_info.functions[0], "http_method"), None);
+    }
+
+    #[test]
+    fn test_private_controller_method_no_http_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        let func = FunctionEntity::new("index", 2, 4)
+            .with_visibility("private")
+            .with_parent_class("UsersController");
+        ir.add_function(func);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        assert_eq!(prop(&graph, file_info.functions[0], "http_method"), None);
+    }
+
+    // --- Function optional props ---
+
+    #[test]
+    fn test_function_optional_props_present() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        let func = FunctionEntity::new("parse", 1, 5)
+            .with_doc("parses input")
+            .with_return_type("Hash")
+            .with_body_prefix("def parse")
+            .with_parameters(vec![Parameter::new("raw"), Parameter::new("opts")]);
+        ir.add_function(func);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let id = file_info.functions[0];
+        assert_eq!(
+            prop(&graph, id, "doc"),
+            Some(&PropertyValue::String("parses input".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "return_type"),
+            Some(&PropertyValue::String("Hash".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "body_prefix"),
+            Some(&PropertyValue::String("def parse".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "parameters"),
+            Some(&PropertyValue::StringList(vec![
+                "raw".to_string(),
+                "opts".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_function_optional_props_absent() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        ir.add_function(FunctionEntity::new("bare", 1, 3));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let id = file_info.functions[0];
+        assert_eq!(prop(&graph, id, "doc"), None);
+        assert_eq!(prop(&graph, id, "return_type"), None);
+        assert_eq!(prop(&graph, id, "body_prefix"), None);
+        assert_eq!(prop(&graph, id, "parameters"), None);
+    }
+
+    // --- Complexity sub-props + grade ---
+
+    #[test]
+    fn test_function_complexity_all_subprops() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        let metrics = ComplexityMetrics::new()
+            .with_branches(3)
+            .with_loops(2)
+            .with_logical_operators(4)
+            .with_nesting_depth(5)
+            .with_exception_handlers(1)
+            .with_early_returns(2);
+        let mut func = FunctionEntity::new("complex", 1, 40);
+        func = func.with_complexity(metrics.clone());
+        ir.add_function(func);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let id = file_info.functions[0];
+        assert_eq!(
+            prop(&graph, id, "complexity"),
+            Some(&PropertyValue::Int(metrics.cyclomatic_complexity as i64))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_grade"),
+            Some(&PropertyValue::String(metrics.grade().to_string()))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_branches"),
+            Some(&PropertyValue::Int(3))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_loops"),
+            Some(&PropertyValue::Int(2))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_logical_ops"),
+            Some(&PropertyValue::Int(4))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_nesting"),
+            Some(&PropertyValue::Int(5))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_exceptions"),
+            Some(&PropertyValue::Int(1))
+        );
+        assert_eq!(
+            prop(&graph, id, "complexity_early_returns"),
+            Some(&PropertyValue::Int(2))
+        );
+    }
+
+    // --- Import edge props and is_external branches ---
+
+    #[test]
+    fn test_import_edge_props_and_external() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        ir.add_import(
+            ImportRelation::new("main", "active_support")
+                .with_alias("as")
+                .wildcard()
+                .with_symbols(vec!["Concern".to_string(), "Callbacks".to_string()]),
+        );
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let import_id = file_info.imports[0];
+        assert_eq!(
+            prop(&graph, import_id, "is_external"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+
+        let edges = graph
+            .get_edges_between(file_info.file_id, import_id)
+            .unwrap();
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert_eq!(
+            edge.properties.get("alias"),
+            Some(&PropertyValue::String("as".to_string()))
+        );
+        assert_eq!(
+            edge.properties.get("is_wildcard"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+        assert_eq!(
+            edge.properties.get("symbols"),
+            Some(&PropertyValue::StringList(vec![
+                "Concern".to_string(),
+                "Callbacks".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_require_relative_import_not_external() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        ir.add_import(ImportRelation::new("main", "./helper").with_alias("require_relative"));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        assert_eq!(
+            prop(&graph, file_info.imports[0], "is_external"),
+            Some(&PropertyValue::String("false".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_bare_import_edge_has_no_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        ir.add_import(ImportRelation::new("main", "json"));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let edges = graph
+            .get_edges_between(file_info.file_id, file_info.imports[0])
+            .unwrap();
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.properties.get("alias"), None);
+        assert_eq!(edge.properties.get("is_wildcard"), None);
+        assert_eq!(edge.properties.get("symbols"), None);
+    }
+
+    #[test]
+    fn test_import_reuses_in_file_node() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        // A class named the same as an import: the import loop reuses the
+        // existing in-file class node rather than creating an external Module.
+        ir.add_class(ClassEntity::new("Widget", 1, 10));
+        ir.add_import(ImportRelation::new("main", "Widget"));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let import_id = file_info.imports[0];
+        // Reused class node: it is the same node as the class, not an external Module.
+        assert_eq!(import_id, file_info.classes[0]);
+        assert_eq!(prop(&graph, import_id, "is_external"), None);
+        let node = graph.get_node(import_id).unwrap();
+        assert_eq!(node.node_type, NodeType::Class);
+    }
+
+    // --- Class method qualified naming ---
+
+    #[test]
+    fn test_method_qualified_name_and_props() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        let mut class = ClassEntity::new("Calc", 1, 10);
+        class
+            .methods
+            .push(FunctionEntity::new("add", 2, 4).with_visibility("public"));
+        ir.add_class(class);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let method_id = file_info.functions[0];
+        assert_eq!(
+            prop(&graph, method_id, "name"),
+            Some(&PropertyValue::String("Calc#add".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, method_id, "is_method"),
+            Some(&PropertyValue::String("true".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, method_id, "parent_class"),
+            Some(&PropertyValue::String("Calc".to_string()))
+        );
+        // Method is contained by the class, not the file.
+        let edges = graph
+            .get_edges_between(file_info.classes[0], method_id)
+            .unwrap();
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    // --- Trait required methods + doc ---
+
+    #[test]
+    fn test_trait_required_methods_and_doc() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        let trait_entity = TraitEntity::new("Walkable", 1, 8)
+            .with_doc("walk mixin")
+            .with_methods(vec![
+                FunctionEntity::new("walk", 2, 3),
+                FunctionEntity::new("run", 4, 5),
+            ]);
+        ir.add_trait(trait_entity);
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let trait_id = file_info.traits[0];
+        assert_eq!(
+            prop(&graph, trait_id, "doc"),
+            Some(&PropertyValue::String("walk mixin".to_string()))
+        );
+        assert_eq!(
+            prop(&graph, trait_id, "required_methods"),
+            Some(&PropertyValue::StringList(vec![
+                "walk".to_string(),
+                "run".to_string()
+            ]))
+        );
+        assert_eq!(
+            graph.get_node(trait_id).unwrap().node_type,
+            NodeType::Interface
+        );
+    }
+
+    // --- Call edges: direct / indirect / unresolved ---
+
+    #[test]
+    fn test_direct_call_edge_is_direct() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        ir.add_function(FunctionEntity::new("caller_fn", 1, 5));
+        ir.add_function(FunctionEntity::new("callee_fn", 6, 10));
+        ir.add_call(CallRelation::new("caller_fn", "callee_fn", 3));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let caller = file_info.functions[0];
+        let callee = file_info.functions[1];
+        let edges = graph.get_edges_between(caller, callee).unwrap();
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(
+            edge.properties.get("is_direct"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert_eq!(
+            edge.properties.get("call_site_line"),
+            Some(&PropertyValue::Int(3))
+        );
+    }
+
+    #[test]
+    fn test_indirect_call_edge_flag() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        ir.add_function(FunctionEntity::new("a", 1, 5));
+        ir.add_function(FunctionEntity::new("b", 6, 10));
+        ir.add_call(CallRelation::new("a", "b", 3).indirect());
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        let edges = graph
+            .get_edges_between(file_info.functions[0], file_info.functions[1])
+            .unwrap();
+        assert_eq!(
+            graph
+                .get_edge(edges[0])
+                .unwrap()
+                .properties
+                .get("is_direct"),
+            Some(&PropertyValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn test_unresolved_calls_stored_and_deduped() {
+        let mut ir = CodeIR::new(PathBuf::from("test.rb"));
+        ir.add_function(FunctionEntity::new("caller_fn", 1, 5));
+        // callee not in node_map -> accumulates into unresolved_calls, deduped.
+        ir.add_call(CallRelation::new("caller_fn", "missing", 2));
+        ir.add_call(CallRelation::new("caller_fn", "missing", 3));
+        ir.add_call(CallRelation::new("caller_fn", "other", 4));
+
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let file_info = ir_to_graph(&ir, &mut graph, Path::new("test.rb")).unwrap();
+        assert_eq!(
+            prop(&graph, file_info.functions[0], "unresolved_calls"),
+            Some(&PropertyValue::StringList(vec![
+                "missing".to_string(),
+                "other".to_string()
+            ]))
         );
     }
 }

@@ -635,4 +635,154 @@ mod tests {
         let scope = SearchScope::default();
         assert_eq!(scope, SearchScope::Workspace);
     }
+
+    #[test]
+    fn truncate_string_keeps_input_at_exact_boundary() {
+        // s.len() == max_len takes the `<=` branch and returns the string
+        // unchanged (no ellipsis) - the equality edge of the length guard.
+        let s = "exactly-ten"; // 11 bytes
+        assert_eq!(truncate_string(s, s.len()), s);
+    }
+
+    #[test]
+    fn truncate_optional_passes_none_and_truncates_some() {
+        assert_eq!(truncate_optional(None, 10), None);
+        // Short Some passes through untouched.
+        assert_eq!(truncate_optional(Some("hi"), 10), Some("hi".to_string()));
+        // Long Some is truncated with an ellipsis.
+        let out = truncate_optional(Some("this string is definitely too long"), 12)
+            .expect("Some in, Some out");
+        assert!(out.ends_with("..."));
+        assert!(out.len() <= 12);
+    }
+
+    #[test]
+    fn test_search_options_compact_and_include_private_setters() {
+        // compact() flips the flag; with_compact(false) and
+        // with_include_private(true) set them explicitly.
+        let opts = SearchOptions::new().compact();
+        assert!(opts.compact);
+        let opts = SearchOptions::new()
+            .with_compact(true)
+            .with_include_private(true);
+        assert!(opts.compact);
+        assert!(opts.include_private);
+        let opts = SearchOptions::new().with_compact(false);
+        assert!(!opts.compact);
+    }
+
+    #[test]
+    fn test_import_search_options_builder() {
+        let opts = ImportSearchOptions::new()
+            .with_match_mode(ImportMatchMode::Prefix)
+            .with_scope(SearchScope::File)
+            .include_transitive();
+        assert_eq!(opts.match_mode, ImportMatchMode::Prefix);
+        assert_eq!(opts.scope, SearchScope::File);
+        assert!(opts.include_transitive);
+        // Defaults: Exact mode, Workspace scope, non-transitive.
+        let d = ImportSearchOptions::new();
+        assert_eq!(d.match_mode, ImportMatchMode::Exact);
+        assert_eq!(d.scope, SearchScope::Workspace);
+        assert!(!d.include_transitive);
+        assert!(d.languages.is_empty());
+    }
+
+    #[test]
+    fn test_traversal_filter_edge_types_and_defaults() {
+        let filter = TraversalFilter::new()
+            .with_edge_types(vec!["calls".to_string(), "imports".to_string()]);
+        assert_eq!(filter.edge_types, vec!["calls", "imports"]);
+        // new() defaults max_nodes to 1000 with empty type filters.
+        assert_eq!(filter.max_nodes, 1000);
+        assert!(filter.symbol_types.is_empty());
+    }
+
+    #[test]
+    fn test_signature_pattern_defaults_are_empty() {
+        let p = SignaturePattern::new();
+        assert!(p.name_pattern.is_none());
+        assert!(p.return_type.is_none());
+        assert!(p.param_count.is_none());
+        assert!(p.modifiers.is_empty());
+    }
+
+    #[test]
+    fn search_scope_serializes_lowercase() {
+        // rename_all = "lowercase" contract for the wire format.
+        assert_eq!(
+            serde_json::to_string(&SearchScope::Module).unwrap(),
+            "\"module\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SearchScope>("\"file\"").unwrap(),
+            SearchScope::File
+        );
+    }
+
+    #[test]
+    fn symbol_type_and_import_mode_serialize_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&SymbolType::Interface).unwrap(),
+            "\"interface\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ImportMatchMode::Fuzzy).unwrap(),
+            "\"fuzzy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TraversalDirection::Incoming).unwrap(),
+            "\"incoming\""
+        );
+    }
+
+    #[test]
+    fn entry_type_serializes_snake_case() {
+        // EntryType uses rename_all = "snake_case", not lowercase.
+        assert_eq!(
+            serde_json::to_string(&EntryType::HttpHandler).unwrap(),
+            "\"http_handler\""
+        );
+        assert_eq!(
+            serde_json::from_str::<EntryType>("\"cli_command\"").unwrap(),
+            EntryType::CliCommand
+        );
+    }
+
+    #[test]
+    fn entry_type_all_variants_round_trip_snake_case() {
+        // rename_all = "snake_case" applies a distinct per-variant boundary
+        // rewrite; the single-variant test above only pins http_handler /
+        // cli_command, leaving the remaining four wire strings unverified.
+        let cases = [
+            (EntryType::HttpHandler, "\"http_handler\""),
+            (EntryType::CliCommand, "\"cli_command\""),
+            (EntryType::PublicApi, "\"public_api\""),
+            (EntryType::EventHandler, "\"event_handler\""),
+            (EntryType::TestEntry, "\"test_entry\""),
+            (EntryType::Main, "\"main\""),
+        ];
+        for (variant, wire) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<EntryType>(wire).unwrap(), variant);
+        }
+    }
+
+    #[test]
+    fn traversal_direction_all_variants_round_trip_lowercase() {
+        // The serialize test above only pins Incoming; Outgoing and Both were
+        // never exercised for either serialize or deserialize.
+        let cases = [
+            (TraversalDirection::Outgoing, "\"outgoing\""),
+            (TraversalDirection::Incoming, "\"incoming\""),
+            (TraversalDirection::Both, "\"both\""),
+        ];
+        for (variant, wire) in cases {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<TraversalDirection>(wire).unwrap(),
+                variant
+            );
+        }
+    }
 }

@@ -158,4 +158,69 @@ void foo() { bar(); }
         let ir = result.unwrap();
         assert!(!ir.calls.is_empty(), "Should extract at least one call");
     }
+
+    #[test]
+    fn test_module_metadata_fields() {
+        let source = "class A {};\nclass B {};\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("widget.cpp"), &config).unwrap();
+
+        let module = ir.module.expect("module entity should be set");
+        assert_eq!(module.name, "widget");
+        assert_eq!(module.path, "widget.cpp");
+        assert_eq!(module.language, "cpp");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        // An empty path has no file_stem, so name falls back to "unknown".
+        let config = ParserConfig::default();
+        let ir = extract("int main() { return 0; }", Path::new(""), &config).unwrap();
+
+        let module = ir.module.expect("module entity should be set");
+        assert_eq!(module.name, "unknown");
+    }
+
+    #[test]
+    fn test_empty_source_zero_lines() {
+        let config = ParserConfig::default();
+        let ir = extract("", Path::new("empty.cpp"), &config).unwrap();
+
+        let module = ir.module.expect("module entity should be set");
+        assert_eq!(module.name, "empty");
+        assert_eq!(module.line_count, 0);
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_line_count_tracks_blank_lines() {
+        // line_count follows source.lines().count(), independent of entity count.
+        let source = "\n\n\nvoid solo() {}\n\n\n";
+        let config = ParserConfig::default();
+        let ir = extract(source, Path::new("blanks.cpp"), &config).unwrap();
+
+        let module = ir.module.expect("module entity should be set");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(!ir.functions.is_empty());
+    }
+
+    #[test]
+    fn test_imports_empty_without_includes() {
+        // A plain function with no #include leaves ir.imports empty.
+        let config = ParserConfig::default();
+        let ir = extract(
+            "int add(int a, int b) { return a + b; }",
+            Path::new("m.cpp"),
+            &config,
+        )
+        .unwrap();
+
+        assert!(ir.imports.is_empty());
+    }
 }

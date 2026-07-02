@@ -366,3 +366,519 @@ impl CodeGraphBackend {
         Ok(Value::Null)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai_query::QueryEngine;
+    use codegraph::CodeGraph;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use tower_lsp::jsonrpc::ErrorCode;
+
+    /// Build a backend over an empty in-memory graph.
+    fn test_backend() -> CodeGraphBackend {
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("Failed to create graph"),
+        ));
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        CodeGraphBackend::new_for_test(graph, query_engine)
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_method_not_found() {
+        let backend = test_backend();
+        let err = backend
+            .handle_custom_request("codegraph/doesNotExist", Value::Null)
+            .await
+            .expect_err("unknown method must error");
+        assert_eq!(err.code, ErrorCode::MethodNotFound);
+    }
+
+    #[tokio::test]
+    async fn typed_handler_rejects_malformed_params() {
+        let backend = test_backend();
+        // A bare number cannot deserialize into the DependencyGraphParams struct.
+        let err = backend
+            .handle_custom_request("codegraph/getDependencyGraph", json!(42))
+            .await
+            .expect_err("malformed params must error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("Invalid params"));
+    }
+
+    #[tokio::test]
+    async fn index_files_requires_non_empty_list() {
+        let backend = test_backend();
+        let err = backend
+            .handle_custom_request("codegraph/indexFiles", json!({}))
+            .await
+            .expect_err("missing files must error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("files parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn index_files_counts_missing_paths_as_failed() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexFiles",
+                json!({ "paths": ["/definitely/not/a/real/file.rs"] }),
+            )
+            .await
+            .expect("dispatch should succeed");
+        assert_eq!(result["files_indexed"], json!(0));
+        assert_eq!(result["files_failed"], json!(1));
+        assert_eq!(result["status"], json!("success"));
+    }
+
+    #[tokio::test]
+    async fn index_files_indexes_a_real_source_file() {
+        let backend = test_backend();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "fn hello() -> i32 { 1 }\n").expect("write file");
+
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexFiles",
+                json!({ "files": [file.to_string_lossy()] }),
+            )
+            .await
+            .expect("dispatch should succeed");
+        assert_eq!(result["files_indexed"], json!(1));
+        assert_eq!(result["files_failed"], json!(0));
+
+        // The parsed function should now be present in the graph.
+        let count = {
+            let graph = backend.graph.read().await;
+            graph.node_count()
+        };
+        assert!(count > 0, "graph should contain the indexed function");
+    }
+
+    #[tokio::test]
+    async fn index_directory_requires_a_path() {
+        let backend = test_backend();
+        let err = backend
+            .handle_custom_request("codegraph/indexDirectory", json!({}))
+            .await
+            .expect_err("missing path must error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("path parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn update_configuration_accepts_values_and_returns_null() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/updateConfiguration",
+                json!({ "maxFileSizeKb": 512, "embedOnOpen": false }),
+            )
+            .await
+            .expect("valid config should apply");
+        assert_eq!(result, Value::Null);
+
+        let config = backend.config.read().await;
+        assert_eq!(config.max_file_size_kb, 512);
+        assert!(!config.embed_on_open);
+    }
+
+    #[tokio::test]
+    async fn update_configuration_rejects_wrong_types() {
+        let backend = test_backend();
+        let err = backend
+            .handle_custom_request(
+                "codegraph/updateConfiguration",
+                json!({ "maxFileSizeKb": "not-a-number" }),
+            )
+            .await
+            .expect_err("bad config must error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("Invalid configuration"));
+    }
+
+    #[tokio::test]
+    async fn reindex_workspace_with_no_folders_indexes_zero() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request("codegraph/reindexWorkspace", Value::Null)
+            .await
+            .expect("reindex should succeed on an empty workspace");
+        assert_eq!(result["files_indexed"], json!(0));
+        assert_eq!(result["status"], json!("success"));
+    }
+
+    #[tokio::test]
+    async fn index_directory_skips_non_directory_path() {
+        let backend = test_backend();
+        // `path` points at a regular file, not a directory: the per-path loop
+        // hits the `!path.is_dir()` skip branch, so nothing is indexed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir.rs");
+        std::fs::write(&file, "fn f() {}\n").expect("write file");
+
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexDirectory",
+                json!({ "path": file.to_string_lossy() }),
+            )
+            .await
+            .expect("dispatch should succeed even when the path is skipped");
+        // Note the distinct response shape: index_directory returns `indexed`,
+        // not the `files_indexed`/`status` shape used by index_files/reindex.
+        assert_eq!(result, json!({ "indexed": 0 }));
+    }
+
+    #[tokio::test]
+    async fn index_directory_indexes_a_real_directory() {
+        let backend = test_backend();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("sample.rs"), "fn hello() -> i32 { 1 }\n")
+            .expect("write file");
+
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexDirectory",
+                json!({ "path": dir.path().to_string_lossy() }),
+            )
+            .await
+            .expect("dispatch should succeed");
+        assert_eq!(result["indexed"], json!(1));
+
+        // The parsed function should now be present in the graph.
+        let count = {
+            let graph = backend.graph.read().await;
+            graph.node_count()
+        };
+        assert!(count > 0, "graph should contain the indexed function");
+    }
+
+    #[tokio::test]
+    async fn index_directory_accepts_paths_array_alias() {
+        let backend = test_backend();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("sample.rs"), "fn world() {}\n").expect("write file");
+
+        // The `paths` array alias should be accepted just like the singular `path`.
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexDirectory",
+                json!({ "paths": [dir.path().to_string_lossy()] }),
+            )
+            .await
+            .expect("dispatch should succeed via the paths alias");
+        assert_eq!(result["indexed"], json!(1));
+    }
+
+    // ---- Success-path dispatch arms ----
+    //
+    // The typed-handler arms (getDependencyGraph, symbolSearch, findByImports,
+    // findEntryPoints, getWorkspaceSymbols) were only exercised on their error
+    // path (`typed_handler_rejects_malformed_params` feeds a bad payload to
+    // getDependencyGraph). The success half of each arm — deserialize params,
+    // invoke the handler, and re-serialize the response with `serde_to_value`
+    // — stayed unexercised through `handle_custom_request`. These pin the
+    // happy path against an empty in-memory graph, where each handler returns
+    // an empty-but-Ok response so the full arm (including the final
+    // to_value) runs.
+
+    #[tokio::test]
+    async fn dependency_graph_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/getDependencyGraph",
+                json!({ "uri": "file:///tmp/nonexistent.rs" }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["nodes"], json!([]));
+        assert_eq!(result["edges"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn symbol_search_dispatch_returns_no_matches_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request("codegraph/symbolSearch", json!({ "query": "anything" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["results"], json!([]));
+        assert_eq!(result["totalMatches"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn find_by_imports_dispatch_returns_no_results_on_empty_graph() {
+        let backend = test_backend();
+        // An empty `libraries` list skips the per-library search loop entirely,
+        // still driving the arm's deserialize + handle + to_value path.
+        let result = backend
+            .handle_custom_request("codegraph/findByImports", json!({ "libraries": [] }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["results"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn find_entry_points_dispatch_returns_none_on_empty_graph() {
+        let backend = test_backend();
+        // All fields are optional, so an empty object deserializes cleanly.
+        let result = backend
+            .handle_custom_request("codegraph/findEntryPoints", json!({}))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["entryPoints"], json!([]));
+        assert_eq!(result["totalFound"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn workspace_symbols_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        // An empty query asks for top-level Module symbols; the empty symbol
+        // index yields none, exercising the arm's success path end to end.
+        let result = backend
+            .handle_custom_request("codegraph/getWorkspaceSymbols", json!({ "query": "" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["symbols"], json!([]));
+    }
+
+    // ---- Additional success-path dispatch arms (position/URI handlers) ----
+    //
+    // These arms resolve a node at a file position first; on an empty graph the
+    // position lookup misses and each handler returns an empty-but-Ok response,
+    // so the full arm (deserialize params → handle → to_value) still runs.
+
+    #[tokio::test]
+    async fn call_graph_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/getCallGraph",
+                json!({
+                    "uri": "file:///tmp/nonexistent.rs",
+                    "position": { "line": 0, "character": 0 }
+                }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["root"], json!(null));
+        assert_eq!(result["nodes"], json!([]));
+        assert_eq!(result["edges"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn analyze_impact_dispatch_returns_empty_summary_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request(
+                "codegraph/analyzeImpact",
+                json!({
+                    "uri": "file:///tmp/nonexistent.rs",
+                    "position": { "line": 0, "character": 0 },
+                    "analysisType": "modify"
+                }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["directImpact"], json!([]));
+        assert_eq!(result["affectedTests"], json!([]));
+        assert_eq!(result["summary"]["filesAffected"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn parser_metrics_dispatch_returns_zeroed_totals_on_fresh_backend() {
+        let backend = test_backend();
+        // No parses have run, so every registered language reports zeroed
+        // counters and the totals collapse to zeros with a 0.0 success rate
+        // (the `attempted == 0` else arm).
+        let result = backend
+            .handle_custom_request("codegraph/getParserMetrics", json!({}))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        let metrics = result["metrics"].as_array().expect("metrics is an array");
+        assert!(!metrics.is_empty(), "registered languages should be listed");
+        assert!(metrics
+            .iter()
+            .all(|m| m["filesAttempted"] == json!(0) && m["filesSucceeded"] == json!(0)));
+        assert_eq!(result["totals"]["filesAttempted"], json!(0));
+        assert_eq!(result["totals"]["successRate"], json!(0.0));
+    }
+
+    #[tokio::test]
+    async fn find_related_tests_dispatch_returns_no_tests_on_empty_graph() {
+        let backend = test_backend();
+        // The position lookup misses on the empty graph, so the domain query
+        // yields no tests and `truncated` is omitted (serialized as null).
+        let result = backend
+            .handle_custom_request(
+                "codegraph/findRelatedTests",
+                json!({
+                    "uri": "file:///tmp/nonexistent.rs",
+                    "position": { "line": 0, "character": 0 }
+                }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["tests"], json!([]));
+        assert_eq!(result["truncated"], json!(null));
+    }
+
+    #[tokio::test]
+    async fn node_location_dispatch_returns_null_for_missing_node() {
+        let backend = test_backend();
+        // A parseable-but-absent NodeId (u64) makes get_node error, so the
+        // handler returns Ok(None), which serializes to JSON null.
+        let result = backend
+            .handle_custom_request("codegraph/getNodeLocation", json!({ "nodeId": "999999" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result, json!(null));
+    }
+
+    // ---- Additional success-path dispatch arms (node-id / signature / file) ----
+    //
+    // These arms either resolve a directly-supplied node ID (which parses without
+    // touching the graph) or scan the whole graph; on an empty graph each returns
+    // an empty-but-Ok response, so the full arm (deserialize → handle → to_value)
+    // runs. Node-resolving arms that error on a miss (e.g. getDetailedSymbolInfo,
+    // whose handler maps a not-found symbol to InvalidParams) are excluded here.
+
+    #[tokio::test]
+    async fn traverse_graph_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        // A parseable NodeId resolves without a graph lookup, so traversal runs
+        // and simply finds no reachable nodes on the empty graph.
+        let result = backend
+            .handle_custom_request(
+                "codegraph/traverseGraph",
+                json!({ "startNodeId": "999999" }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["nodes"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_callers_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        let result = backend
+            .handle_custom_request("codegraph/getCallers", json!({ "nodeId": "999999" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["callers"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_callees_dispatch_returns_empty_on_empty_graph() {
+        let backend = test_backend();
+        // getCallees shares GetCallersParams and returns its results under the
+        // same `callers` field; the empty graph yields none.
+        let result = backend
+            .handle_custom_request("codegraph/getCallees", json!({ "nodeId": "999999" }))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["callers"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn find_by_signature_dispatch_returns_no_results_on_empty_graph() {
+        let backend = test_backend();
+        // All fields are optional, so an empty object builds a wildcard pattern;
+        // the empty graph has no signatures to match.
+        let result = backend
+            .handle_custom_request("codegraph/findBySignature", json!({}))
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["results"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn analyze_complexity_dispatch_returns_empty_summary_on_empty_graph() {
+        let backend = test_backend();
+        // A valid file URI resolves to zero file symbols on the empty graph, so
+        // complexity analysis reports no functions and a zero total.
+        let result = backend
+            .handle_custom_request(
+                "codegraph/analyzeComplexity",
+                json!({ "uri": "file:///tmp/nonexistent.rs" }),
+            )
+            .await
+            .expect("valid params should dispatch and serialize a response");
+        assert_eq!(result["functions"], json!([]));
+        assert_eq!(result["fileSummary"]["totalFunctions"], json!(0));
+    }
+
+    // The final two dispatch arms — getAIContext and getDetailedSymbolInfo — differ
+    // from the arms above: on an empty graph their handlers map a not-found symbol to
+    // an error, so the `serde_to_value` line never runs. Populating the graph with a
+    // real indexed function lets a valid request thread all the way through
+    // deserialize → handle → to_value, covering the success arm end-to-end.
+
+    /// Index a single-function source file into `backend` and return its file:// URI.
+    async fn index_hello_fn(backend: &CodeGraphBackend) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "fn hello() -> i32 { 1 }\n").expect("write file");
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexFiles",
+                json!({ "files": [file.to_string_lossy()] }),
+            )
+            .await
+            .expect("indexing should dispatch");
+        assert_eq!(result["files_indexed"], json!(1));
+        let uri = tower_lsp::lsp_types::Url::from_file_path(&file)
+            .expect("file path should form a URI")
+            .to_string();
+        (dir, uri)
+    }
+
+    /// Look up the graph NodeId of the indexed `hello` function by name.
+    async fn hello_node_id(backend: &CodeGraphBackend) -> String {
+        let graph = backend.graph.read().await;
+        let id = graph
+            .nodes_iter()
+            .find(|(_, node)| node.properties.get_string("name") == Some("hello"))
+            .map(|(id, _)| *id)
+            .expect("indexed graph should contain the hello function node");
+        id.to_string()
+    }
+
+    #[tokio::test]
+    async fn get_ai_context_dispatch_returns_primary_context_for_indexed_symbol() {
+        let backend = test_backend();
+        let (_dir, uri) = index_hello_fn(&backend).await;
+        // With the graph populated, the nearest-node lookup resolves to `hello`, so the
+        // handler returns Ok and the dispatch arm serializes a full response. The domain
+        // resolver compares the raw `line` against 1-indexed graph rows, so line 1 lands
+        // inside hello's tightest range.
+        let result = backend
+            .handle_custom_request("codegraph/getAIContext", json!({ "uri": uri, "line": 1 }))
+            .await
+            .expect("valid params over a populated graph should dispatch and serialize");
+        assert_eq!(result["primaryContext"]["name"], json!("hello"));
+    }
+
+    #[tokio::test]
+    async fn get_detailed_symbol_info_dispatch_returns_symbol_for_indexed_node() {
+        let backend = test_backend();
+        let (_dir, _uri) = index_hello_fn(&backend).await;
+        // A directly-supplied NodeId parses without touching the symbol index (which
+        // indexFiles does not populate), so get_symbol_info yields Some(..) and the
+        // dispatch arm reaches the final to_value serialization.
+        let node_id = hello_node_id(&backend).await;
+        let result = backend
+            .handle_custom_request(
+                "codegraph/getDetailedSymbolInfo",
+                json!({ "nodeId": node_id }),
+            )
+            .await
+            .expect("valid params over a populated graph should dispatch and serialize");
+        assert_eq!(result["symbol"]["name"], json!("hello"));
+    }
+}

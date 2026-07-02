@@ -122,7 +122,10 @@ fn test_parse_sample_app_media_nested_selectors() {
     // .container, .navbar, h1 appear inside @media (max-width: 768px)
     // .col, .btn appear inside @media (max-width: 576px)
     // The selectors may appear multiple times (once top-level, once nested)
-    let container_count = selector_names.iter().filter(|n| n.contains("container")).count();
+    let container_count = selector_names
+        .iter()
+        .filter(|n| n.contains("container"))
+        .count();
     assert!(
         container_count >= 2,
         "Expected .container at least twice (top-level + @media), found {} times",

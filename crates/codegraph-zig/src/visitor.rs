@@ -336,7 +336,12 @@ impl<'a> ZigVisitor<'a> {
 
     fn extract_doc_comment(&self, node: Node) -> Option<String> {
         if let Some(prev) = node.prev_sibling() {
-            if prev.kind() == "line_comment" || prev.kind() == "doc_comment" {
+            // ABI 15: doc/line comments both parse as a "comment" node; the leading
+            // marker (/// or //!) distinguishes doc comments from ordinary ones.
+            if prev.kind() == "comment"
+                || prev.kind() == "line_comment"
+                || prev.kind() == "doc_comment"
+            {
                 let text = self.node_text(prev);
                 if text.starts_with("///") || text.starts_with("//!") {
                     return Some(text);
@@ -402,6 +407,7 @@ impl<'a> ZigVisitor<'a> {
 mod tests {
     use super::*;
 
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
     use tree_sitter::Parser;
 
     fn parse_and_visit(source: &[u8]) -> ZigVisitor<'_> {
@@ -431,5 +437,464 @@ mod tests {
 
         assert_eq!(visitor.imports.len(), 1);
         assert_eq!(visitor.imports[0].imported, "std");
+        assert!(visitor.imports[0].symbols.is_empty());
+        assert!(!visitor.imports[0].is_wildcard);
+        assert_eq!(visitor.imports[0].alias, None);
+    }
+
+    #[test]
+    fn test_private_function_visibility() {
+        let source = b"fn helper() void {}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        assert_eq!(visitor.functions[0].name, "helper");
+        assert_eq!(visitor.functions[0].visibility, "private");
+    }
+
+    #[test]
+    fn test_function_parameters() {
+        let source = b"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let params = &visitor.functions[0].parameters;
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "a");
+        assert_eq!(params[0].type_annotation.as_deref(), Some("i32"));
+        assert_eq!(params[1].name, "b");
+        assert_eq!(params[1].type_annotation.as_deref(), Some("i32"));
+    }
+
+    #[test]
+    fn test_function_return_type() {
+        let source = b"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].return_type.as_deref(), Some("i32"));
+    }
+
+    #[test]
+    fn test_function_no_return_type() {
+        let source = b"fn noop() void {}";
+        let visitor = parse_and_visit(source);
+
+        // `void` is a named identifier between params and block, captured as return type
+        assert_eq!(visitor.functions[0].return_type.as_deref(), Some("void"));
+    }
+
+    #[test]
+    fn test_doc_comment_extraction() {
+        let source =
+            b"/// Adds two numbers.\npub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(
+            visitor.functions[0].doc_comment.as_deref(),
+            Some("/// Adds two numbers.")
+        );
+    }
+
+    #[test]
+    fn test_plain_comment_not_doc() {
+        let source = b"// just a comment\npub fn add(a: i32) i32 {\n    return a;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].doc_comment, None);
+    }
+
+    #[test]
+    fn test_body_prefix_present() {
+        let source = b"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert!(visitor.functions[0].body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_struct_declaration() {
+        let source = b"const Point = struct {\n    x: i32,\n    y: i32,\n};";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].name, "Point");
+        assert_eq!(visitor.classes[0].attributes, vec!["struct".to_string()]);
+        assert!(!visitor.classes[0].is_abstract);
+        assert!(!visitor.classes[0].is_interface);
+    }
+
+    #[test]
+    fn test_enum_declaration() {
+        let source = b"const Color = enum {\n    red,\n    green,\n    blue,\n};";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].name, "Color");
+        assert_eq!(visitor.classes[0].attributes, vec!["enum".to_string()]);
+    }
+
+    #[test]
+    fn test_union_declaration() {
+        let source = b"const Value = union {\n    int: i32,\n    float: f32,\n};";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        assert_eq!(visitor.classes[0].name, "Value");
+        assert_eq!(visitor.classes[0].attributes, vec!["union".to_string()]);
+    }
+
+    #[test]
+    fn test_method_parent_struct() {
+        let source =
+            b"const Point = struct {\n    pub fn origin() Point {\n        return undefined;\n    }\n};";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 1);
+        let method = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "origin")
+            .expect("method extracted");
+        assert_eq!(method.parent_class.as_deref(), Some("Point"));
+    }
+
+    #[test]
+    fn test_top_level_function_no_parent() {
+        let source = b"pub fn add(a: i32) i32 {\n    return a;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].parent_class, None);
+    }
+
+    #[test]
+    fn test_test_declaration() {
+        let source = b"test \"addition works\" {\n    try expect(add(1, 2) == 3);\n}";
+        let visitor = parse_and_visit(source);
+
+        let t = visitor
+            .functions
+            .iter()
+            .find(|f| f.is_test)
+            .expect("test extracted");
+        assert_eq!(t.name, "addition works");
+        assert_eq!(t.visibility, "private");
+    }
+
+    #[test]
+    fn test_call_extraction() {
+        let source = b"pub fn run() void {\n    helper();\n}";
+        let visitor = parse_and_visit(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("call extracted");
+        assert_eq!(call.caller, "run");
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_branch_complexity() {
+        let source =
+            b"pub fn f(a: i32) i32 {\n    if (a > 0) {\n        return 1;\n    }\n    return 0;\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let visitor = parse_and_visit(b"");
+        assert!(visitor.functions.is_empty());
+        assert!(visitor.classes.is_empty());
+        assert!(visitor.imports.is_empty());
+        assert!(visitor.calls.is_empty());
+    }
+
+    #[test]
+    fn test_function_line_numbers() {
+        // Leading newline pushes the function onto line 2.
+        let source = b"\npub fn add(a: i32) i32 {\n    return a;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].line_start, 2);
+        assert_eq!(visitor.functions[0].line_end, 4);
+    }
+
+    #[test]
+    fn test_function_default_flags() {
+        let source = b"pub fn add(a: i32) i32 {\n    return a;\n}";
+        let visitor = parse_and_visit(source);
+
+        let f = &visitor.functions[0];
+        assert!(!f.is_async);
+        assert!(!f.is_test);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+    }
+
+    #[test]
+    fn test_signature_is_first_line_only() {
+        let source = b"pub fn add(\n    a: i32,\n    b: i32,\n) i32 {\n    return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions[0].signature, "pub fn add(");
+    }
+
+    #[test]
+    fn test_body_prefix_content() {
+        let source = b"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let prefix = visitor.functions[0]
+            .body_prefix
+            .as_deref()
+            .expect("body prefix present");
+        assert!(prefix.contains("return"));
+    }
+
+    #[test]
+    fn test_loop_complexity() {
+        let source =
+            b"pub fn f() void {\n    var i: usize = 0;\n    while (i < 10) {\n        i += 1;\n    }\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_switch_complexity() {
+        let source =
+            b"pub fn f(a: i32) i32 {\n    switch (a) {\n        0 => return 1,\n        else => return 0,\n    }\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_logical_operator_complexity() {
+        let source = b"pub fn f(a: bool, b: bool) bool {\n    return a and b;\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_multiple_imports() {
+        let source = b"const std = @import(\"std\");\nconst builtin = @import(\"builtin\");";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.imports.len(), 2);
+        assert_eq!(visitor.imports[0].imported, "std");
+        assert_eq!(visitor.imports[1].imported, "builtin");
+    }
+
+    #[test]
+    fn test_struct_doc_comment() {
+        let source = b"/// A 2D point.\nconst Point = struct {\n    x: i32,\n};";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(
+            visitor.classes[0].doc_comment.as_deref(),
+            Some("/// A 2D point.")
+        );
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let source = b"pub fn one() i32 {\n    return 1;\n}\npub fn two() i32 {\n    return 2;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        assert_eq!(visitor.functions[0].name, "one");
+        assert_eq!(visitor.functions[1].name, "two");
+    }
+
+    #[test]
+    fn test_body_prefix_truncation() {
+        // A body longer than BODY_PREFIX_MAX_CHARS is truncated to exactly that length.
+        let filler = "    _ = 1;\n".repeat(200); // ~2000 bytes, well over the 1024 limit
+        let source = format!("pub fn big() void {{\n{filler}}}");
+        let visitor = parse_and_visit(source.as_bytes());
+
+        let prefix = visitor.functions[0]
+            .body_prefix
+            .as_deref()
+            .expect("body prefix present");
+        assert_eq!(prefix.len(), BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_builtin_call_extraction() {
+        // A builtin call (@panic) inside a body is recorded as a builtin_function call.
+        let source = b"pub fn boom() void {\n    @panic(\"x\");\n}";
+        let visitor = parse_and_visit(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee.contains("panic"))
+            .expect("builtin call extracted");
+        assert_eq!(call.caller, "boom");
+        assert!(call.is_direct);
+    }
+
+    #[test]
+    fn test_call_site_line() {
+        // The call site line is recorded 1-indexed at the call location, not the fn start.
+        let source = b"pub fn run() void {\n    helper();\n}";
+        let visitor = parse_and_visit(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("call extracted");
+        assert_eq!(call.call_site_line, 2);
+    }
+
+    #[test]
+    fn test_nested_call_attribution() {
+        // A call nested inside an if block is still attributed to the enclosing function.
+        let source = b"pub fn run(a: i32) void {\n    if (a > 0) {\n        helper();\n    }\n}";
+        let visitor = parse_and_visit(source);
+
+        let call = visitor
+            .calls
+            .iter()
+            .find(|c| c.callee == "helper")
+            .expect("nested call extracted");
+        assert_eq!(call.caller, "run");
+    }
+
+    #[test]
+    fn test_multiple_structs() {
+        let source = b"const A = struct {\n    x: i32,\n};\nconst B = struct {\n    y: i32,\n};";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.classes.len(), 2);
+        assert_eq!(visitor.classes[0].name, "A");
+        assert_eq!(visitor.classes[1].name, "B");
+    }
+
+    #[test]
+    fn test_struct_method_flags() {
+        let source =
+            b"const Point = struct {\n    pub fn origin() Point {\n        return undefined;\n    }\n};";
+        let visitor = parse_and_visit(source);
+
+        let method = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "origin")
+            .expect("method extracted");
+        assert!(!method.is_static);
+        assert!(!method.is_abstract);
+        assert!(!method.is_test);
+    }
+
+    #[test]
+    fn test_catch_complexity() {
+        // A catch expression raises cyclomatic complexity via the exception-handler path.
+        let source = b"pub fn f() void {\n    const x = maybe() catch return;\n    _ = x;\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_for_loop_complexity() {
+        let source =
+            b"pub fn f(items: []const i32) void {\n    for (items) |item| {\n        _ = item;\n    }\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert!(complexity.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_switch_case_count_does_not_change_complexity() {
+        // Switch arms parse as `switch_case` (not the visitor's dead `switch_prong` arm),
+        // so adding more cases does not raise complexity; only the `else` arm does.
+        let two = parse_and_visit(
+            b"pub fn f(a: i32) i32 {\n    switch (a) {\n        0 => return 1,\n        else => return 0,\n    }\n}",
+        );
+        let three = parse_and_visit(
+            b"pub fn f(a: i32) i32 {\n    switch (a) {\n        0 => return 1,\n        1 => return 2,\n        else => return 0,\n    }\n}",
+        );
+
+        let two_c = two.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed")
+            .cyclomatic_complexity;
+        let three_c = three.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed")
+            .cyclomatic_complexity;
+        assert_eq!(two_c, three_c);
+    }
+
+    #[test]
+    fn test_switch_without_else_is_baseline_complexity() {
+        // A switch whose arms are all `switch_case` (no `else`) keeps baseline complexity 1,
+        // confirming the branch in the existing switch test comes from the `else` keyword.
+        let source =
+            b"pub fn f(a: i32) i32 {\n    switch (a) {\n        0 => return 1,\n        1 => return 0,\n    }\n}";
+        let visitor = parse_and_visit(source);
+
+        let complexity = visitor.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity computed");
+        assert_eq!(complexity.cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_function_source_order_lines() {
+        // Two functions preserve source order with strictly increasing start lines.
+        let source = b"pub fn one() i32 {\n    return 1;\n}\npub fn two() i32 {\n    return 2;\n}";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 2);
+        assert!(visitor.functions[1].line_start > visitor.functions[0].line_start);
+    }
+
+    #[test]
+    fn test_test_declaration_line_numbers() {
+        // A leading blank line pushes the test declaration onto line 2.
+        let source = b"\ntest \"adds\" {\n    try expect(true);\n}";
+        let visitor = parse_and_visit(source);
+
+        let t = visitor
+            .functions
+            .iter()
+            .find(|f| f.is_test)
+            .expect("test extracted");
+        assert_eq!(t.line_start, 2);
     }
 }

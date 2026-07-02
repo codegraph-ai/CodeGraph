@@ -1205,6 +1205,72 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_layer_covers_remaining_pattern_arms() {
+        // The prior detect_layer tests exercise only ~9 of the 20 ordered
+        // pattern arms; these pin the remaining classifications, each with a
+        // path whose earliest-matching pattern is the intended layer.
+        assert_eq!(
+            detect_layer("/src/views/home.ts"),
+            Some("presentation".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/handlers/event.ts"),
+            Some("handler".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/commands/create.ts"),
+            Some("command".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/queries/find.ts"),
+            Some("query".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/aggregates/cart.ts"),
+            Some("aggregate".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/value_objects/money.ts"),
+            Some("value_object".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/clients/http.ts"),
+            Some("client".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/providers/auth.ts"),
+            Some("provider".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/middleware/cors.ts"),
+            Some("middleware".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/config/app.ts"),
+            Some("configuration".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/types/index.ts"),
+            Some("contract".to_string())
+        );
+        assert_eq!(
+            detect_layer("/src/fixtures/data.ts"),
+            Some("test_support".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_layer_first_matching_pattern_wins() {
+        // Patterns are scanned in declaration order and the first hit wins:
+        // "controllers" (arm 1) precedes "services" (arm 4), so a path
+        // containing both resolves to the earlier "controller" layer.
+        assert_eq!(
+            detect_layer("/src/controllers/services/user.ts"),
+            Some("controller".to_string())
+        );
+    }
+
+    #[test]
     fn test_generate_usage_description_basic() {
         let desc =
             generate_usage_description("process_order", "validate_data", "validate_data(input)");
@@ -1238,5 +1304,877 @@ mod tests {
     fn test_generate_usage_description_empty_caller() {
         let desc = generate_usage_description("", "my_function", "my_function()");
         assert!(desc.contains("Usage of `my_function`"));
+    }
+
+    // ============================================================
+    // get_ai_context end-to-end tests (in-memory graph)
+    // ============================================================
+
+    use codegraph::{PropertyMap, PropertyValue};
+
+    fn str_prop(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    fn int_prop(v: i64) -> PropertyValue {
+        PropertyValue::Int(v)
+    }
+
+    /// Add a node carrying the given key/value properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, PropertyValue)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), v.clone());
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// A Function node with path, an inline source, and a [start, end] line range.
+    fn add_fn(
+        graph: &mut CodeGraph,
+        name: &str,
+        path: &str,
+        start: i64,
+        end: i64,
+        source: &str,
+    ) -> NodeId {
+        add_node(
+            graph,
+            NodeType::Function,
+            &[
+                ("name", str_prop(name)),
+                ("path", str_prop(path)),
+                ("line_start", int_prop(start)),
+                ("line_end", int_prop(end)),
+                ("source", str_prop(source)),
+            ],
+        )
+    }
+
+    fn rels(result: &AiContextResult, relationship: &str) -> Vec<String> {
+        result
+            .related_symbols
+            .iter()
+            .filter(|s| s.relationship == relationship)
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn ai_context_none_for_unknown_file() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        assert!(get_ai_context(&g, "/nope.rs", 1, "explain", 1000).is_none());
+    }
+
+    #[test]
+    fn ai_context_assembles_primary_from_target() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("do_work")),
+                ("path", str_prop("/src/app.rs")),
+                ("language", str_prop("rust")),
+                ("line_start", int_prop(10)),
+                ("line_end", int_prop(20)),
+                ("source", str_prop("fn do_work() {}")),
+            ],
+        );
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 10_000).expect("context");
+        assert_eq!(r.primary_context.name, "do_work");
+        assert_eq!(r.primary_context.context_type, "function");
+        assert_eq!(r.primary_context.language, "rust");
+        assert_eq!(r.primary_context.code, "fn do_work() {}");
+        assert_eq!(r.primary_context.location.range.start.line, 10);
+        assert_eq!(r.primary_context.location.range.end.line, 20);
+        assert_eq!(r.primary_context.location.uri, "file:///src/app.rs");
+        // Exact containment — no fallback.
+        assert!(r.metadata.used_fallback.is_none());
+        assert!(r.metadata.fallback_message.is_none());
+        assert_eq!(r.metadata.graph_stats.entities_in_graph, 1);
+        assert_eq!(r.metadata.graph_stats.entities_kept, 1);
+        assert!(r.related_symbols.is_empty());
+    }
+
+    #[test]
+    fn ai_context_used_fallback_when_line_not_contained() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+
+        // Request line 5 — before the only node's range → proximity fallback.
+        let r = get_ai_context(&g, "/src/app.rs", 5, "explain", 10_000).expect("context");
+        assert_eq!(r.metadata.used_fallback, Some(true));
+        assert!(r
+            .metadata
+            .fallback_message
+            .as_deref()
+            .unwrap()
+            .contains("do_work"));
+    }
+
+    #[test]
+    fn ai_context_language_falls_back_to_extension() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No language property — must be derived from the file extension.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("do_work")),
+                ("path", str_prop("/src/app.rs")),
+                ("line_start", int_prop(10)),
+                ("line_end", int_prop(20)),
+                ("source", str_prop("fn do_work() {}")),
+            ],
+        );
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 10_000).expect("context");
+        assert_eq!(r.primary_context.language, "rs");
+    }
+
+    #[test]
+    fn ai_context_line_end_zero_collapses_to_line_start() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No line_end property → line_end reads as 0 and collapses onto line_start.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("do_work")),
+                ("path", str_prop("/src/app.rs")),
+                ("line_start", int_prop(7)),
+                ("source", str_prop("fn do_work() {}")),
+            ],
+        );
+
+        let r = get_ai_context(&g, "/src/app.rs", 7, "explain", 10_000).expect("context");
+        assert_eq!(r.primary_context.location.range.start.line, 7);
+        assert_eq!(r.primary_context.location.range.end.line, 7);
+    }
+
+    #[test]
+    fn ai_context_explain_surfaces_uses_and_called_by() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let dep = add_fn(&mut g, "helper", "/src/dep.rs", 1, 3, "fn helper() {}");
+        let caller = add_fn(
+            &mut g,
+            "caller",
+            "/src/c.rs",
+            1,
+            3,
+            "fn caller() { do_work(); }",
+        );
+        edge(&mut g, target, dep, EdgeType::Calls); // outgoing → "uses"
+        edge(&mut g, caller, target, EdgeType::Calls); // incoming Calls → "called_by"
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(rels(&r, "uses"), vec!["helper".to_string()]);
+        assert_eq!(rels(&r, "called_by"), vec!["caller".to_string()]);
+    }
+
+    #[test]
+    fn ai_context_explain_inherits_via_extends() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "Derived", "/src/app.rs", 10, 20, "struct Derived;");
+        let base = add_fn(&mut g, "Base", "/src/base.rs", 1, 3, "struct Base;");
+        edge(&mut g, base, target, EdgeType::Extends); // incoming Extends → "inherits"
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(rels(&r, "inherits"), vec!["Base".to_string()]);
+        let sym = r
+            .related_symbols
+            .iter()
+            .find(|s| s.relationship == "inherits")
+            .unwrap();
+        assert_eq!(sym.relevance_score, 0.9);
+    }
+
+    #[test]
+    fn ai_context_modify_surfaces_tests_and_swallows_callers() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let test_caller = add_fn(
+            &mut g,
+            "test_do_work",
+            "/src/t.rs",
+            1,
+            3,
+            "fn test_do_work() { do_work(); }",
+        );
+        let caller = add_fn(
+            &mut g,
+            "caller",
+            "/src/c.rs",
+            1,
+            3,
+            "fn caller() { do_work(); }",
+        );
+        edge(&mut g, test_caller, target, EdgeType::Calls);
+        edge(&mut g, caller, target, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "modify", 100_000).expect("context");
+        assert_eq!(rels(&r, "tests"), vec!["test_do_work".to_string()]);
+        // Latent behavior: the modify Priority-1 "tests" loop calls seen.insert on
+        // *every* Calls caller it visits (test or not), so the non-test "caller" is
+        // marked seen without being emitted. Priority 2 iterates the same take(5)
+        // set and finds nothing fresh, so "called_by" is never populated for callers
+        // that appeared in Priority 1's window — the non-test caller is swallowed.
+        assert!(rels(&r, "called_by").is_empty());
+    }
+
+    #[test]
+    fn ai_context_debug_includes_hints_and_call_chain() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let caller = add_fn(
+            &mut g,
+            "caller",
+            "/src/c.rs",
+            1,
+            3,
+            "fn caller() { do_work(); }",
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "debug", 100_000).expect("context");
+        assert!(r.debug_hints.is_some());
+        assert_eq!(
+            rels(&r, "call_chain_depth_0"),
+            vec!["caller".to_string()],
+            "debug intent walks the caller chain starting at depth 0"
+        );
+    }
+
+    #[test]
+    fn ai_context_debug_hints_absent_for_explain_intent() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 10_000).expect("context");
+        assert!(r.debug_hints.is_none());
+    }
+
+    #[test]
+    fn ai_context_test_intent_surfaces_example_test_and_mock() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let example = add_fn(
+            &mut g,
+            "test_do_work",
+            "/src/t.rs",
+            1,
+            3,
+            "fn test_do_work() { do_work(); }",
+        );
+        let dep = add_fn(&mut g, "helper", "/src/dep.rs", 1, 3, "fn helper() {}");
+        edge(&mut g, example, target, EdgeType::Calls); // incoming test → "example_test"
+        edge(&mut g, target, dep, EdgeType::Calls); // outgoing → "dependency_to_mock"
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "test", 100_000).expect("context");
+        assert_eq!(rels(&r, "example_test"), vec!["test_do_work".to_string()]);
+        assert_eq!(rels(&r, "dependency_to_mock"), vec!["helper".to_string()]);
+    }
+
+    #[test]
+    fn ai_context_dependencies_list_imports_only() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let module = add_node(
+            &mut g,
+            NodeType::Module,
+            &[("name", str_prop("serde")), ("path", str_prop("serde"))],
+        );
+        let helper = add_fn(&mut g, "helper", "/src/dep.rs", 1, 3, "fn helper() {}");
+        edge(&mut g, target, module, EdgeType::Imports);
+        edge(&mut g, target, helper, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(r.dependencies.len(), 1);
+        assert_eq!(r.dependencies[0].name, "serde");
+        assert_eq!(r.dependencies[0].dep_type, "import");
+        assert!(r.dependencies[0].code.is_none());
+    }
+
+    #[test]
+    fn ai_context_imports_collected_from_file_nodes() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let module = add_node(
+            &mut g,
+            NodeType::Module,
+            &[("name", str_prop("serde")), ("path", str_prop("serde"))],
+        );
+        edge(&mut g, target, module, EdgeType::Imports);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(r.imports, vec!["serde".to_string()]);
+    }
+
+    #[test]
+    fn ai_context_sibling_functions_exclude_target_and_sort() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("other")),
+                ("path", str_prop("/src/app.rs")),
+                ("line_start", int_prop(30)),
+                ("line_end", int_prop(40)),
+                ("signature", str_prop("fn other()")),
+                ("visibility", str_prop("private")),
+                ("source", str_prop("fn other() {}")),
+            ],
+        );
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert_eq!(r.sibling_functions.len(), 1);
+        let sib = &r.sibling_functions[0];
+        assert_eq!(sib.name, "other");
+        assert_eq!(sib.signature, "fn other()");
+        assert_eq!(sib.visibility, "private");
+        assert_eq!(sib.line_start, 30);
+    }
+
+    #[test]
+    fn ai_context_architecture_reports_module_and_neighbors() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(
+            &mut g,
+            "doStuff",
+            "/src/services/auth.rs",
+            1,
+            5,
+            "fn doStuff() {}",
+        );
+        let neighbor = add_fn(&mut g, "Db", "/src/db/conn.rs", 1, 3, "struct Db;");
+        edge(&mut g, target, neighbor, EdgeType::Calls);
+
+        let r =
+            get_ai_context(&g, "/src/services/auth.rs", 2, "explain", 100_000).expect("context");
+        let arch = r.architecture.expect("architecture");
+        assert_eq!(arch.module, "auth");
+        assert_eq!(arch.layer, Some("service".to_string()));
+        let conn = arch.neighbors.iter().find(|n| n.module == "conn").unwrap();
+        assert!(conn.relationship.contains("calls"));
+    }
+
+    #[test]
+    fn ai_context_usage_examples_from_non_test_caller() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let runner = add_fn(
+            &mut g,
+            "runner",
+            "/src/r.rs",
+            1,
+            3,
+            "fn runner() { do_work(); }",
+        );
+        edge(&mut g, runner, target, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        let examples = r.usage_examples.expect("usage examples");
+        assert_eq!(examples.len(), 1);
+        let desc = examples[0].description.as_deref().unwrap();
+        assert!(desc.contains("runner"));
+        assert!(desc.contains("do_work"));
+    }
+
+    #[test]
+    fn estimate_tokens_is_len_over_four_floor() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abc"), 0); // 3/4 floors to 0
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcdefg"), 1); // 7/4 floors to 1
+        assert_eq!(estimate_tokens("abcdefgh"), 2);
+    }
+
+    #[test]
+    fn token_budget_consume_and_has_budget() {
+        let mut b = TokenBudget::new(10);
+        assert!(b.has_budget());
+        // Partial consume within budget succeeds.
+        assert!(b.consume(4));
+        assert!(b.has_budget());
+        // Consuming exactly up to the total succeeds and exhausts budget.
+        assert!(b.consume(6));
+        assert!(!b.has_budget()); // used == total is not < total
+                                  // Any further consume is rejected and leaves `used` unchanged.
+        assert!(!b.consume(1));
+        assert!(!b.has_budget());
+    }
+
+    #[test]
+    fn token_budget_over_budget_consume_does_not_mutate() {
+        let mut b = TokenBudget::new(10);
+        // A single request exceeding the total is rejected outright.
+        assert!(!b.consume(11));
+        // Budget was untouched, so a smaller request still fits.
+        assert!(b.consume(10));
+        // Zero-total budget has no budget from the start.
+        assert!(!TokenBudget::new(0).has_budget());
+    }
+
+    #[test]
+    fn make_location_prefixes_absolute_paths_with_file_scheme() {
+        let loc = make_location("/src/a.rs", 3, 7);
+        assert_eq!(loc.uri, "file:///src/a.rs");
+        assert_eq!(loc.range.start.line, 3);
+        assert_eq!(loc.range.start.character, 0);
+        assert_eq!(loc.range.end.line, 7);
+        assert_eq!(loc.range.end.character, 0);
+    }
+
+    #[test]
+    fn make_location_leaves_relative_paths_unscheme() {
+        let loc = make_location("src/a.rs", 0, 0);
+        assert_eq!(loc.uri, "src/a.rs");
+        assert_eq!(loc.range.start.line, 0);
+        assert_eq!(loc.range.end.line, 0);
+    }
+
+    #[test]
+    fn truncate_to_call_site_near_top_keeps_all_without_omission() {
+        // Target on line 1 (idx=1) => start=0, so no signature-prepend and
+        // no omitted markers for a short snippet fully inside the window.
+        let code = "fn sig() {\n    do_work();\n    more();\n}";
+        let out = truncate_to_call_site(code, "do_work");
+        assert!(out.contains("fn sig() {"));
+        assert!(out.contains("do_work();"));
+        assert!(out.contains("more();"));
+        assert!(!out.contains("lines omitted"));
+    }
+
+    #[test]
+    fn truncate_to_call_site_deep_prepends_signature_and_omits_both_sides() {
+        // 40 lines, target on line index 12 => start=7 (>1) prepends the
+        // signature plus a leading "6 lines omitted" (start-1) marker, and
+        // end=18 leaves a trailing "22 lines omitted" (40-18) marker.
+        let mut lines: Vec<String> = vec!["fn signature() {".to_string()];
+        for i in 1..40 {
+            if i == 12 {
+                lines.push("    target_call();".to_string());
+            } else {
+                lines.push(format!("    line_{i}();"));
+            }
+        }
+        let code = lines.join("\n");
+        let out = truncate_to_call_site(&code, "target_call");
+        assert!(out.contains("fn signature() {"));
+        assert!(out.contains("target_call();"));
+        assert!(out.contains("// ... (6 lines omitted)"));
+        assert!(out.contains("// ... (22 lines omitted)"));
+    }
+
+    #[test]
+    fn truncate_to_call_site_start_one_prepends_signature_without_leading_omission() {
+        // Target on line index 6 (CALL_SITE_CONTEXT=5) => start=1, exercising the
+        // `start > 0` (prepend signature) branch WITHOUT the nested `start > 1`
+        // leading-omission marker. With 20 lines, end=12 (<20) so exactly one
+        // trailing "lines omitted" marker is emitted - never a leading one.
+        let mut lines: Vec<String> = vec!["fn signature() {".to_string()];
+        for i in 1..20 {
+            if i == 6 {
+                lines.push("    target_call();".to_string());
+            } else {
+                lines.push(format!("    line_{i}();"));
+            }
+        }
+        let code = lines.join("\n");
+        let out = truncate_to_call_site(&code, "target_call");
+        assert!(out.contains("fn signature() {"));
+        assert!(out.contains("target_call();"));
+        // start=1 skips the leading marker, leaving only the trailing one.
+        assert_eq!(out.matches("lines omitted").count(), 1);
+        assert!(out.contains("// ... (8 lines omitted)"));
+    }
+
+    #[test]
+    fn truncate_to_call_site_not_found_falls_back_to_max_related_lines() {
+        // 40 lines, none containing the target => fallback takes the first
+        // MAX_RELATED_LINES (30) and reports the remaining 10 as omitted.
+        let lines: Vec<String> = (0..40).map(|i| format!("stmt_{i}();")).collect();
+        let code = lines.join("\n");
+        let out = truncate_to_call_site(&code, "never_present");
+        assert!(out.contains("stmt_0();"));
+        assert!(out.contains("stmt_29();"));
+        assert!(!out.contains("stmt_30();"));
+        assert!(out.contains("// ... (10 lines omitted)"));
+    }
+
+    // ============================================================
+    // make_related_symbol / make_related_symbol_for
+    // ============================================================
+
+    #[test]
+    fn make_related_symbol_maps_fields_and_consumes_budget() {
+        // A short function (<= MAX_RELATED_LINES) is emitted verbatim; the
+        // wrapper delegates to make_related_symbol_for with target None.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "helper", "/src/lib.rs", 5, 7, "fn helper() {}");
+        let mut budget = TokenBudget::new(1000);
+
+        let sym = make_related_symbol(&g, id, "callee", 0.75, &mut budget).expect("symbol");
+        assert_eq!(sym.name, "helper");
+        assert_eq!(sym.relationship, "callee");
+        assert_eq!(sym.code, "fn helper() {}");
+        assert_eq!(sym.relevance_score, 0.75);
+        assert_eq!(sym.location.uri, "file:///src/lib.rs");
+        assert_eq!(sym.location.range.start.line, 5);
+        assert_eq!(sym.location.range.end.line, 7);
+        // "fn helper() {}" is 14 bytes => 3 estimated tokens were charged.
+        assert_eq!(budget.used, estimate_tokens("fn helper() {}"));
+    }
+
+    #[test]
+    fn make_related_symbol_for_large_code_with_target_truncates_to_call_site() {
+        // 41 lines (> MAX_RELATED_LINES) with a known call site at index 20 =>
+        // the Some(target) arm routes through truncate_to_call_site.
+        let mut lines: Vec<String> = (0..41).map(|i| format!("stmt_{i}();")).collect();
+        lines[20] = "call_target();".to_string();
+        let source = lines.join("\n");
+
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "big", "/src/big.rs", 1, 41, &source);
+        let mut budget = TokenBudget::new(100_000);
+
+        let sym = make_related_symbol_for(&g, id, "caller", 1.0, &mut budget, Some("call_target"))
+            .expect("symbol");
+        assert!(sym.code.contains("call_target();"));
+        assert!(sym.code.contains("lines omitted"));
+        assert!(sym.code.lines().count() < 41);
+    }
+
+    #[test]
+    fn make_related_symbol_for_large_code_without_target_keeps_full_source() {
+        // Same oversized body, but target None => no truncation, full source kept.
+        let lines: Vec<String> = (0..41).map(|i| format!("stmt_{i}();")).collect();
+        let source = lines.join("\n");
+
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "big", "/src/big.rs", 1, 41, &source);
+        let mut budget = TokenBudget::new(100_000);
+
+        let sym =
+            make_related_symbol_for(&g, id, "caller", 0.5, &mut budget, None).expect("symbol");
+        assert_eq!(sym.code, source);
+        assert!(!sym.code.contains("lines omitted"));
+    }
+
+    #[test]
+    fn make_related_symbol_returns_none_when_budget_exhausted() {
+        // A zero budget can't cover the estimated tokens of a non-empty body.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "helper", "/src/lib.rs", 1, 1, "fn helper() {}");
+        let mut budget = TokenBudget::new(0);
+
+        assert!(make_related_symbol(&g, id, "callee", 0.5, &mut budget).is_none());
+        assert_eq!(budget.used, 0);
+    }
+
+    #[test]
+    fn make_related_symbol_for_end_line_zero_falls_back_to_start_line() {
+        // line_end == 0 => the emitted range end collapses onto start_line.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_fn(&mut g, "helper", "/src/lib.rs", 12, 0, "fn helper() {}");
+        let mut budget = TokenBudget::new(1000);
+
+        let sym = make_related_symbol(&g, id, "callee", 0.5, &mut budget).expect("symbol");
+        assert_eq!(sym.location.range.start.line, 12);
+        assert_eq!(sym.location.range.end.line, 12);
+    }
+
+    // ============================================================
+    // get_file_imports / get_dependencies (Imports-edge collectors)
+    // ============================================================
+
+    #[test]
+    fn file_imports_collects_named_import_targets_and_dedups() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Two source nodes sharing the same file path.
+        let a = add_fn(&mut g, "a", "/src/app.rs", 1, 5, "");
+        let b = add_fn(&mut g, "b", "/src/app.rs", 6, 10, "");
+        // Two distinct import targets, one shared between both sources.
+        let dep1 = add_node(&mut g, NodeType::Module, &[("name", str_prop("serde"))]);
+        let dep2 = add_node(&mut g, NodeType::Module, &[("name", str_prop("tokio"))]);
+        edge(&mut g, a, dep1, EdgeType::Imports);
+        edge(&mut g, a, dep2, EdgeType::Imports);
+        // b re-imports serde — must be de-duplicated, not double counted.
+        edge(&mut g, b, dep1, EdgeType::Imports);
+
+        let mut imports = get_file_imports(&g, "/src/app.rs");
+        imports.sort();
+        assert_eq!(imports, vec!["serde".to_string(), "tokio".to_string()]);
+    }
+
+    #[test]
+    fn file_imports_ignores_non_import_edges_and_empty_names() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let a = add_fn(&mut g, "a", "/src/app.rs", 1, 5, "");
+        // A Calls edge (not Imports) must be skipped.
+        let callee = add_node(&mut g, NodeType::Function, &[("name", str_prop("helper"))]);
+        edge(&mut g, a, callee, EdgeType::Calls);
+        // An Imports edge to a node with an empty name must be skipped.
+        let anon = add_node(&mut g, NodeType::Module, &[("name", str_prop(""))]);
+        edge(&mut g, a, anon, EdgeType::Imports);
+
+        assert!(get_file_imports(&g, "/src/app.rs").is_empty());
+    }
+
+    #[test]
+    fn file_imports_empty_for_unknown_path() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        assert!(get_file_imports(&g, "/nope.rs").is_empty());
+    }
+
+    #[test]
+    fn dependencies_returns_import_targets_only() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_fn(&mut g, "f", "/src/app.rs", 1, 5, "");
+        let dep = add_node(&mut g, NodeType::Module, &[("name", str_prop("anyhow"))]);
+        let called = add_node(&mut g, NodeType::Function, &[("name", str_prop("g"))]);
+        edge(&mut g, f, dep, EdgeType::Imports);
+        edge(&mut g, f, called, EdgeType::Calls);
+
+        let deps = get_dependencies(&g, f);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "anyhow");
+        assert_eq!(deps[0].dep_type, "import");
+        assert!(deps[0].code.is_none());
+    }
+
+    #[test]
+    fn dependencies_skips_empty_named_imports() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_fn(&mut g, "f", "/src/app.rs", 1, 5, "");
+        let anon = add_node(&mut g, NodeType::Module, &[("name", str_prop(""))]);
+        edge(&mut g, f, anon, EdgeType::Imports);
+        assert!(get_dependencies(&g, f).is_empty());
+    }
+
+    // ============================================================
+    // get_sibling_functions
+    // ============================================================
+
+    #[test]
+    fn sibling_functions_excludes_self_and_sorts_by_line() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "target", "/src/app.rs", 20, 30, "");
+        add_fn(&mut g, "later", "/src/app.rs", 40, 50, "");
+        add_fn(&mut g, "earlier", "/src/app.rs", 1, 10, "");
+
+        let sibs = get_sibling_functions(&g, target, "/src/app.rs");
+        let names: Vec<_> = sibs.iter().map(|s| s.name.as_str()).collect();
+        // target itself excluded; remaining sorted ascending by line_start.
+        assert_eq!(names, vec!["earlier", "later"]);
+        assert_eq!(sibs[0].line_start, 1);
+    }
+
+    #[test]
+    fn sibling_functions_skips_non_functions_and_empty_names() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "target", "/src/app.rs", 20, 30, "");
+        // A Class node at the same path — not a Function, must be skipped.
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[
+                ("name", str_prop("Widget")),
+                ("path", str_prop("/src/app.rs")),
+            ],
+        );
+        // A Function with an empty name — skipped.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("")), ("path", str_prop("/src/app.rs"))],
+        );
+        assert!(get_sibling_functions(&g, target, "/src/app.rs").is_empty());
+    }
+
+    #[test]
+    fn sibling_functions_signature_falls_back_to_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "target", "/src/app.rs", 20, 30, "");
+        // Sibling with no explicit signature property → signature == name.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("plain")),
+                ("path", str_prop("/src/app.rs")),
+                ("line_start", int_prop(5)),
+            ],
+        );
+        let sibs = get_sibling_functions(&g, target, "/src/app.rs");
+        assert_eq!(sibs.len(), 1);
+        assert_eq!(sibs[0].signature, "plain");
+    }
+
+    // ============================================================
+    // get_debug_hints — error-path detection over Calls edges
+    // ============================================================
+
+    #[test]
+    fn debug_hints_collects_error_named_callees_only() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f = add_fn(&mut g, "f", "/src/app.rs", 1, 20, "");
+        // Callees whose names match the error/panic/fail patterns.
+        let e1 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("handle_error"))],
+        );
+        let e2 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("do_panic"))],
+        );
+        // A normal callee — must NOT appear in error_paths.
+        let ok = add_node(&mut g, NodeType::Function, &[("name", str_prop("compute"))]);
+        // A References edge (not Calls) to an error name — excluded (Calls-only).
+        let ref_err = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("throw_it"))],
+        );
+        edge(&mut g, f, e1, EdgeType::Calls);
+        edge(&mut g, f, e2, EdgeType::Calls);
+        edge(&mut g, f, ok, EdgeType::Calls);
+        edge(&mut g, f, ref_err, EdgeType::References);
+
+        let hints = get_debug_hints(&g, f).expect("hints");
+        let mut paths = hints.error_paths.clone();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["do_panic".to_string(), "handle_error".to_string()]
+        );
+    }
+
+    #[test]
+    fn debug_hints_none_for_unknown_node() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        // No node with this id exists → get_node fails → None.
+        assert!(get_debug_hints(&g, 999_999).is_none());
+    }
+
+    #[test]
+    fn ai_context_usage_examples_skip_test_callers_yield_none() {
+        // Only caller is test_-prefixed → skipped by the name filter → examples
+        // stays empty → get_usage_examples returns None.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let tester = add_fn(
+            &mut g,
+            "test_do_work",
+            "/src/t.rs",
+            1,
+            3,
+            "fn test_do_work() { do_work(); }",
+        );
+        edge(&mut g, tester, target, EdgeType::Calls);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        assert!(r.usage_examples.is_none());
+    }
+
+    #[test]
+    fn ai_context_usage_examples_include_references_edge_caller() {
+        // A References edge (not just Calls) is a valid usage source.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(&mut g, "do_work", "/src/app.rs", 10, 20, "fn do_work() {}");
+        let reader = add_fn(
+            &mut g,
+            "reader",
+            "/src/r.rs",
+            1,
+            3,
+            "fn reader() { let _ = do_work; }",
+        );
+        edge(&mut g, reader, target, EdgeType::References);
+
+        let r = get_ai_context(&g, "/src/app.rs", 12, "explain", 100_000).expect("context");
+        let examples = r.usage_examples.expect("usage examples");
+        assert_eq!(examples.len(), 1);
+        assert!(examples[0].code.contains("reader"));
+    }
+
+    #[test]
+    fn ai_context_architecture_incoming_relationships() {
+        // A neighbor that both Imports and Calls into the target yields the
+        // incoming-direction labels (imported_by / called_by), aggregated per module.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(
+            &mut g,
+            "doStuff",
+            "/src/services/auth.rs",
+            1,
+            5,
+            "fn doStuff() {}",
+        );
+        let neighbor = add_fn(
+            &mut g,
+            "handler",
+            "/src/api/http.rs",
+            1,
+            3,
+            "fn handler() {}",
+        );
+        edge(&mut g, neighbor, target, EdgeType::Calls);
+        edge(&mut g, neighbor, target, EdgeType::Imports);
+
+        let r =
+            get_ai_context(&g, "/src/services/auth.rs", 2, "explain", 100_000).expect("context");
+        let arch = r.architecture.expect("architecture");
+        let http = arch.neighbors.iter().find(|n| n.module == "http").unwrap();
+        assert!(http.relationship.contains("called_by"));
+        assert!(http.relationship.contains("imported_by"));
+    }
+
+    #[test]
+    fn ai_context_architecture_catch_all_depends_relationships() {
+        // A non-Calls/Imports edge (Extends) routes through the catch-all match
+        // arm: outgoing → depends_on, incoming → depended_on_by.
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_fn(
+            &mut g,
+            "doStuff",
+            "/src/services/auth.rs",
+            1,
+            5,
+            "fn doStuff() {}",
+        );
+        let base = add_fn(&mut g, "Base", "/src/core/base.rs", 1, 3, "struct Base;");
+        let child = add_fn(&mut g, "Child", "/src/ext/child.rs", 1, 3, "struct Child;");
+        edge(&mut g, target, base, EdgeType::Extends); // outgoing → depends_on
+        edge(&mut g, child, target, EdgeType::Extends); // incoming → depended_on_by
+
+        let r =
+            get_ai_context(&g, "/src/services/auth.rs", 2, "explain", 100_000).expect("context");
+        let arch = r.architecture.expect("architecture");
+        let base_n = arch.neighbors.iter().find(|n| n.module == "base").unwrap();
+        assert_eq!(base_n.relationship, "depends_on");
+        let child_n = arch.neighbors.iter().find(|n| n.module == "child").unwrap();
+        assert_eq!(child_n.relationship, "depended_on_by");
+    }
+
+    #[test]
+    fn architecture_info_none_for_empty_path_node() {
+        // A node with no path property → path_str is empty → None (guard branch).
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let id = add_node(&mut g, NodeType::Function, &[("name", str_prop("orphan"))]);
+        assert!(get_architecture_info(&g, id).is_none());
     }
 }

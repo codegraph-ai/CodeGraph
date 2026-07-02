@@ -20,6 +20,9 @@ pub struct ProCommandContext {
     pub workspace_folders: Vec<std::path::PathBuf>,
 }
 
+/// Boxed future returned by pro command handlers.
+pub type ProCommandFuture = Pin<Box<dyn Future<Output = Result<Option<Value>, String>> + Send>>;
+
 /// Trait for injecting pro commands into the LSP workspace/executeCommand handler.
 pub trait ProCommandProvider: Send + Sync + 'static {
     /// List additional command names provided by this extension.
@@ -32,7 +35,7 @@ pub trait ProCommandProvider: Send + Sync + 'static {
         name: &str,
         args: Value,
         ctx: ProCommandContext,
-    ) -> Option<Pin<Box<dyn Future<Output = Result<Option<Value>, String>> + Send>>>;
+    ) -> Option<ProCommandFuture>;
 
     /// Return the edition name.
     fn edition(&self) -> &str {
@@ -62,5 +65,59 @@ impl ProCommandProvider for NoopProCommandProvider {
         _ctx: ProCommandContext,
     ) -> Option<Pin<Box<dyn Future<Output = Result<Option<Value>, String>> + Send>>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ctx() -> ProCommandContext {
+        let graph = Arc::new(tokio::sync::RwLock::new(
+            codegraph::CodeGraph::in_memory().expect("in-memory graph"),
+        ));
+        let query_engine = Arc::new(crate::ai_query::QueryEngine::new(graph.clone()));
+        let memory_manager = Arc::new(crate::memory::MemoryManager::new(None));
+        ProCommandContext {
+            graph,
+            query_engine,
+            memory_manager,
+            workspace_folders: vec![std::path::PathBuf::from("/tmp/ws")],
+        }
+    }
+
+    #[test]
+    fn test_noop_commands_empty() {
+        assert!(NoopProCommandProvider.commands().is_empty());
+    }
+
+    #[test]
+    fn test_noop_default_edition_is_community() {
+        // edition() uses the trait's default impl.
+        assert_eq!(NoopProCommandProvider.edition(), "community");
+    }
+
+    #[test]
+    fn test_noop_default_command_prefix() {
+        // command_prefix() uses the trait's default impl.
+        assert_eq!(NoopProCommandProvider.command_prefix(), "codegraph");
+    }
+
+    #[test]
+    fn test_noop_handle_command_returns_none() {
+        let ctx = make_ctx();
+        let result = NoopProCommandProvider.handle_command("codegraph.anything", Value::Null, ctx);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_context_clone_preserves_fields() {
+        let ctx = make_ctx();
+        let cloned = ctx.clone();
+        // Arc fields share the same allocation after clone.
+        assert!(Arc::ptr_eq(&ctx.graph, &cloned.graph));
+        assert!(Arc::ptr_eq(&ctx.query_engine, &cloned.query_engine));
+        assert!(Arc::ptr_eq(&ctx.memory_manager, &cloned.memory_manager));
+        assert_eq!(ctx.workspace_folders, cloned.workspace_folders);
     }
 }

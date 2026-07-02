@@ -8,9 +8,8 @@
 //! programs, packages, tasks, functions, instantiations, imports).
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImportRelation, Parameter, BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImportRelation, Parameter,
 };
 use tree_sitter::Node;
 
@@ -271,9 +270,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let entity = ClassEntity {
             name,
@@ -333,9 +330,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
@@ -394,9 +389,7 @@ impl<'a> VerilogVisitor<'a> {
             .utf8_text(self.source)
             .ok()
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
         let func = FunctionEntity {
             name,
@@ -634,6 +627,7 @@ impl<'a> VerilogVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph_parser_api::BODY_PREFIX_MAX_CHARS;
 
     #[test]
     fn test_visitor_basics() {
@@ -821,5 +815,519 @@ endmodule";
             "Expected module instantiation call"
         );
         assert_eq!(visitor.calls[0].callee, "counter");
+    }
+
+    /// Parse `source` and return a populated visitor.
+    fn parse_visit(source: &[u8]) -> VerilogVisitor<'_> {
+        use tree_sitter::Parser;
+        let mut parser = Parser::new();
+        parser.set_language(&crate::ts_verilog::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        // Leak the tree so the borrow lives as long as the returned visitor's source ref.
+        let tree = Box::leak(Box::new(tree));
+        let mut visitor = VerilogVisitor::new(source);
+        visitor.visit_node(tree.root_node());
+        visitor
+    }
+
+    #[test]
+    fn test_empty_source_extracts_nothing() {
+        let v = parse_visit(b"");
+        assert!(v.modules.is_empty());
+        assert!(v.functions.is_empty());
+        assert!(v.imports.is_empty());
+        assert!(v.calls.is_empty());
+    }
+
+    #[test]
+    fn test_function_metadata_defaults() {
+        let source = b"module top();
+  function int add(input int a, input int b);
+    return a + b;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        assert_eq!(v.functions.len(), 1);
+        let f = &v.functions[0];
+        // Verilog functions are always public, synchronous, non-static, non-abstract.
+        assert_eq!(f.visibility, "public");
+        assert!(!f.is_async);
+        assert!(!f.is_static);
+        assert!(!f.is_abstract);
+        assert!(!f.is_test);
+        // Verilog has no return-type extraction, and no doc/attributes.
+        assert_eq!(f.return_type, None);
+        assert_eq!(f.doc_comment, None);
+        assert!(f.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_function_one_based_line_bounds_and_signature() {
+        let source = b"module top();
+  function int add(input int a);
+    return a;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let f = &v.functions[0];
+        // Function declaration begins on the 2nd line (row 1 -> line 2).
+        assert_eq!(f.line_start, 2);
+        assert!(f.line_end >= f.line_start);
+        // Signature is the first line of the declaration text.
+        assert!(f.signature.contains("function int add"));
+        assert!(f.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_function_parent_class_is_enclosing_module() {
+        let source = b"module alu();
+  function int neg(input int a);
+    return -a;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        assert_eq!(v.functions[0].parent_class.as_deref(), Some("alu"));
+    }
+
+    #[test]
+    fn test_baseline_function_complexity() {
+        let source = b"module top();
+  function int id(input int a);
+    return a;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        // A straight-line function has no branches or loops.
+        assert_eq!(c.branches, 0);
+        assert_eq!(c.loops, 0);
+    }
+
+    #[test]
+    fn test_conditional_raises_complexity() {
+        let source = b"module top();
+  function int pick(input int a);
+    if (a > 0) return a;
+    else return 0;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            c.branches >= 1,
+            "if statement should register a branch, got {}",
+            c.branches
+        );
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_loop_raises_complexity() {
+        let source = b"module top();
+  function int sum(input int n);
+    int total; total = 0;
+    for (int i = 0; i < n; i = i + 1) total = total + i;
+    return total;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        assert!(c.loops >= 1, "for loop should register a loop");
+    }
+
+    #[test]
+    fn test_task_extracted_as_function_with_name_and_parent() {
+        let source = b"module dut();
+  task reset(input logic clk);
+  endtask
+endmodule";
+        let v = parse_visit(source);
+        assert_eq!(v.functions.len(), 1);
+        assert_eq!(v.functions[0].name, "reset");
+        assert_eq!(v.functions[0].parent_class.as_deref(), Some("dut"));
+    }
+
+    #[test]
+    fn test_include_directive_becomes_import() {
+        let source = b"`include \"defs.svh\"\nmodule top(); endmodule";
+        let v = parse_visit(source);
+        assert!(
+            v.imports.iter().any(|i| i.imported == "defs.svh"),
+            "expected an include import for defs.svh, got {:?}",
+            v.imports.iter().map(|i| &i.imported).collect::<Vec<_>>()
+        );
+        let inc = v.imports.iter().find(|i| i.imported == "defs.svh").unwrap();
+        // Top-level include has no enclosing module -> importer defaults to "file".
+        assert_eq!(inc.importer, "file");
+        assert!(!inc.is_wildcard);
+    }
+
+    #[test]
+    fn test_specific_symbol_package_import_is_not_wildcard() {
+        let source = b"module top(); import my_pkg::my_type; endmodule";
+        let v = parse_visit(source);
+        let imp = v
+            .imports
+            .iter()
+            .find(|i| i.imported == "my_pkg")
+            .expect("expected my_pkg import");
+        assert!(
+            !imp.is_wildcard,
+            "a specific symbol import (::my_type) is not a wildcard"
+        );
+        // Import inside a module records the module as the importer.
+        assert_eq!(imp.importer, "top");
+    }
+
+    #[test]
+    fn test_interface_is_flagged_but_module_is_not() {
+        let mod_v = parse_visit(b"module top(); endmodule");
+        assert!(!mod_v.modules[0].is_interface);
+        let if_v = parse_visit(b"interface bus; endinterface");
+        assert!(if_v.modules[0].is_interface);
+    }
+
+    #[test]
+    fn test_multiple_modules_extracted() {
+        let source = b"module a(); endmodule\nmodule b(); endmodule";
+        let v = parse_visit(source);
+        let names: Vec<&str> = v.modules.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+        assert_eq!(v.modules.len(), 2);
+    }
+
+    #[test]
+    fn test_module_class_entity_defaults() {
+        let v = parse_visit(b"module top(); endmodule");
+        let m = &v.modules[0];
+        assert_eq!(m.visibility, "public");
+        assert!(!m.is_abstract);
+        assert_eq!(m.line_start, 1);
+        assert!(m.base_classes.is_empty());
+        assert!(m.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_case_statement_raises_complexity() {
+        let source = b"module top();
+  function int classify(input int a);
+    case (a)
+      0: return 0;
+      1: return 1;
+      default: return 2;
+    endcase
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        // A case statement plus its case_items each register a branch.
+        assert!(
+            c.branches >= 1,
+            "case statement should register at least one branch, got {}",
+            c.branches
+        );
+        assert!(c.cyclomatic_complexity > 1);
+    }
+
+    #[test]
+    fn test_nested_loops_increase_loop_count() {
+        let source = b"module top();
+  function int grid(input int n);
+    int total; total = 0;
+    for (int i = 0; i < n; i = i + 1)
+      for (int j = 0; j < n; j = j + 1)
+        total = total + 1;
+    return total;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        // Two nested for loops each count toward the loop metric.
+        assert!(
+            c.loops >= 2,
+            "two nested for loops should register two loops, got {}",
+            c.loops
+        );
+    }
+
+    #[test]
+    fn test_module_instantiation_caller_is_enclosing_module() {
+        let source = b"module top(); counter u1 (.clk(clk)); endmodule";
+        let v = parse_visit(source);
+        assert_eq!(v.calls[0].callee, "counter");
+        // The instantiation is attributed to the module it appears inside.
+        assert_eq!(v.calls[0].caller, "top");
+    }
+
+    #[test]
+    fn test_top_level_package_import_importer_is_file() {
+        let source = b"import glob_pkg::*;\nmodule top(); endmodule";
+        let v = parse_visit(source);
+        let imp = v
+            .imports
+            .iter()
+            .find(|i| i.imported == "glob_pkg")
+            .expect("expected glob_pkg import");
+        // An import with no enclosing module defaults its importer to "file".
+        assert_eq!(imp.importer, "file");
+        assert!(imp.is_wildcard);
+    }
+
+    #[test]
+    fn test_multiple_includes_preserve_order() {
+        let source = b"`include \"a.svh\"\n`include \"b.svh\"\nmodule top(); endmodule";
+        let v = parse_visit(source);
+        let paths: Vec<&str> = v.imports.iter().map(|i| i.imported.as_str()).collect();
+        assert_eq!(paths, vec!["a.svh", "b.svh"]);
+    }
+
+    #[test]
+    fn test_wildcard_import_importer_is_enclosing_module() {
+        let source = b"module top(); import my_pkg::*; endmodule";
+        let v = parse_visit(source);
+        let imp = &v.imports[0];
+        assert!(imp.is_wildcard);
+        // Inside a module the import records the module as the importer.
+        assert_eq!(imp.importer, "top");
+    }
+
+    #[test]
+    fn test_task_one_based_line_bounds_and_signature() {
+        let source = b"module dut();
+  task reset(input logic clk);
+  endtask
+endmodule";
+        let v = parse_visit(source);
+        let f = &v.functions[0];
+        // The task begins on the 2nd line (row 1 -> line 2).
+        assert_eq!(f.line_start, 2);
+        assert!(f.line_end >= f.line_start);
+        assert!(f.signature.contains("task reset"));
+        assert!(f.body_prefix.is_some());
+    }
+
+    #[test]
+    fn test_function_parameter_field_defaults() {
+        let source = b"module top();
+  function int add(input int a, input int b);
+    return a + b;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let p = &v.functions[0].parameters[0];
+        // Verilog parameter extraction captures the name only.
+        assert_eq!(p.name, "a");
+        assert_eq!(p.type_annotation, None);
+        assert_eq!(p.default_value, None);
+        assert!(!p.is_variadic);
+    }
+
+    #[test]
+    fn test_class_method_parent_is_class() {
+        let source = b"class Packet;
+  function int size();
+    return 8;
+  endfunction
+endclass";
+        let v = parse_visit(source);
+        assert_eq!(v.functions.len(), 1);
+        assert_eq!(v.functions[0].name, "size");
+        // A function declared inside a class is parented to that class.
+        assert_eq!(v.functions[0].parent_class.as_deref(), Some("Packet"));
+    }
+
+    #[test]
+    fn test_program_task_parent_is_program() {
+        let source = b"program my_test;
+  task run();
+  endtask
+endprogram";
+        let v = parse_visit(source);
+        assert_eq!(v.functions.len(), 1);
+        // A task inside a program is parented to the program name.
+        assert_eq!(v.functions[0].parent_class.as_deref(), Some("my_test"));
+    }
+
+    #[test]
+    fn test_body_prefix_truncated_on_large_module() {
+        // Build a module whose text exceeds BODY_PREFIX_MAX_CHARS.
+        let mut src = String::from("module big();\n");
+        for i in 0..400 {
+            src.push_str(&format!("  wire signal_{i};\n"));
+        }
+        src.push_str("endmodule");
+        let v = parse_visit(src.as_bytes());
+        let bp = v.modules[0].body_prefix.as_ref().unwrap();
+        assert!(bp.len() <= BODY_PREFIX_MAX_CHARS);
+        assert!(src.len() > BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_multiple_functions_in_module_order() {
+        let source = b"module top();
+  function int first(input int a);
+    return a;
+  endfunction
+  function int second(input int b);
+    return b;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let names: Vec<&str> = v.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn test_case_items_each_add_a_branch() {
+        let source = b"module top();
+  function int classify(input int a);
+    case (a)
+      0: return 0;
+      1: return 1;
+      2: return 2;
+      default: return 9;
+    endcase
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let c = v.functions[0].complexity.as_ref().unwrap();
+        // The case_statement plus its individual case_items each register a branch,
+        // so a 3-value case is strictly more complex than a single branch.
+        assert!(
+            c.branches >= 3,
+            "case with multiple items should register multiple branches, got {}",
+            c.branches
+        );
+    }
+
+    #[test]
+    fn test_function_with_no_parameters_has_empty_params() {
+        let source = b"module top();
+  function int now();
+    return 1;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        // A parameterless function has no tf_port_list, so parameters is empty.
+        assert!(v.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn test_function_inside_program_parent_is_program() {
+        let source = b"program my_test;
+  function int check();
+    return 0;
+  endfunction
+endprogram";
+        let v = parse_visit(source);
+        assert_eq!(v.functions.len(), 1);
+        // A function declared inside a program is parented to the program name.
+        assert_eq!(v.functions[0].parent_class.as_deref(), Some("my_test"));
+    }
+
+    #[test]
+    fn test_module_instantiation_call_default_metadata() {
+        let source = b"module top(); counter u1 (.clk(clk)); endmodule";
+        let v = parse_visit(source);
+        let call = &v.calls[0];
+        // CallRelation::new defaults: direct call, no struct/field, 1-based call site.
+        assert!(call.is_direct);
+        assert_eq!(call.struct_type, None);
+        assert_eq!(call.field_name, None);
+        assert_eq!(call.call_site_line, 1);
+    }
+
+    #[test]
+    fn test_two_module_instantiations_recorded_in_order() {
+        let source = b"module top();
+  counter u1 (.clk(clk));
+  divider u2 (.clk(clk));
+endmodule";
+        let v = parse_visit(source);
+        let callees: Vec<&str> = v.calls.iter().map(|c| c.callee.as_str()).collect();
+        // Both instantiations are attributed to the enclosing module in source order.
+        assert!(callees.contains(&"counter"));
+        assert!(callees.contains(&"divider"));
+        assert!(v.calls.iter().all(|c| c.caller == "top"));
+    }
+
+    #[test]
+    fn test_function_body_prefix_truncated_on_large_body() {
+        let mut src = String::from("module top();\n  function int big(input int a);\n");
+        for i in 0..400 {
+            src.push_str(&format!("    int local_{i}; local_{i} = a;\n"));
+        }
+        src.push_str("    return a;\n  endfunction\nendmodule");
+        let v = parse_visit(src.as_bytes());
+        let f = v.functions.iter().find(|f| f.name == "big").unwrap();
+        let bp = f.body_prefix.as_ref().unwrap();
+        assert!(bp.len() <= BODY_PREFIX_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_function_signature_is_first_line_only() {
+        let source = b"module top();
+  function int add(input int a, input int b);
+    return a + b;
+  endfunction
+endmodule";
+        let v = parse_visit(source);
+        let sig = &v.functions[0].signature;
+        // The signature is only the declaration's first physical line.
+        assert!(!sig.contains('\n'));
+        assert!(sig.contains("function"));
+        assert!(!sig.contains("return"));
+    }
+
+    #[test]
+    fn test_task_records_body_prefix_and_baseline_complexity() {
+        let source = b"module dut();
+  task quiet();
+    logic x;
+  endtask
+endmodule";
+        let v = parse_visit(source);
+        let f = &v.functions[0];
+        assert!(f.body_prefix.is_some());
+        // A branch-free task keeps baseline cyclomatic complexity 1.
+        assert_eq!(f.complexity.as_ref().unwrap().cyclomatic_complexity, 1);
+    }
+
+    #[test]
+    fn test_interface_method_parent_is_interface() {
+        let source = b"interface my_if;
+  function int width();
+    return 8;
+  endfunction
+endinterface";
+        let v = parse_visit(source);
+        assert_eq!(v.functions.len(), 1);
+        assert_eq!(v.functions[0].name, "width");
+        // A function inside an interface is parented to the interface name.
+        assert_eq!(v.functions[0].parent_class.as_deref(), Some("my_if"));
+    }
+
+    #[test]
+    fn test_module_body_prefix_starts_with_module_keyword() {
+        let v = parse_visit(b"module top(); endmodule");
+        let bp = v.modules[0].body_prefix.as_ref().unwrap();
+        assert!(bp.starts_with("module"));
+    }
+
+    #[test]
+    fn test_package_is_not_interface_or_abstract() {
+        let v = parse_visit(b"package my_pkg; endpackage");
+        let p = &v.modules[0];
+        assert!(!p.is_interface);
+        assert!(!p.is_abstract);
+        assert_eq!(p.visibility, "public");
+    }
+
+    #[test]
+    fn test_class_is_not_flagged_interface() {
+        let v = parse_visit(b"class Packet; int data; endclass");
+        assert!(!v.modules[0].is_interface);
+        assert!(!v.modules[0].is_abstract);
     }
 }

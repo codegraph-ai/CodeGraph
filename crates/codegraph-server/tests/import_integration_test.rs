@@ -4,7 +4,7 @@
 //! Integration test: parse real source → build indexes → query.
 //! Catches bugs where hand-built test graphs don't match parser output.
 
-use codegraph::{CodeGraph, MemoryBackend};
+use codegraph::CodeGraph;
 use codegraph_parser_api::{CodeParser, ParserConfig};
 use std::path::Path;
 

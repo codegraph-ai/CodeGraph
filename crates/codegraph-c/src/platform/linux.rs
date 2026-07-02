@@ -1108,4 +1108,245 @@ mod tests {
         assert_eq!(norms.get("mutex_lock"), Some(&"LockAcquire"));
         assert_eq!(norms.get("printk"), Some(&"Log"));
     }
+
+    #[test]
+    fn test_linux_default_impl_matches_new() {
+        // Default::default() must produce an equivalently-configured platform.
+        let via_default = LinuxPlatform::default();
+        assert_eq!(via_default.id(), "linux");
+        assert_eq!(via_default.name(), "Linux Kernel");
+        assert_eq!(
+            via_default.ops_structs().len(),
+            LinuxPlatform::new().ops_structs().len()
+        );
+        assert_eq!(
+            via_default.call_normalizations().len(),
+            LinuxPlatform::new().call_normalizations().len()
+        );
+    }
+
+    #[test]
+    fn test_linux_file_operations_field_categories() {
+        let platform = LinuxPlatform::new();
+        let ops = platform.ops_structs();
+        let file_ops = ops
+            .iter()
+            .find(|o| o.struct_name == "file_operations")
+            .expect("file_operations present");
+
+        let cat = |name: &str| {
+            file_ops
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| f.category.clone())
+        };
+        assert_eq!(cat("release"), Some(CallbackCategory::Close));
+        assert_eq!(cat("read"), Some(CallbackCategory::Read));
+        assert_eq!(cat("write"), Some(CallbackCategory::Write));
+        assert_eq!(cat("unlocked_ioctl"), Some(CallbackCategory::Ioctl));
+        assert_eq!(cat("compat_ioctl"), Some(CallbackCategory::Ioctl));
+        assert_eq!(cat("mmap"), Some(CallbackCategory::Mmap));
+        assert_eq!(cat("poll"), Some(CallbackCategory::Poll));
+        // llseek/fsync have no dedicated category and fall back to Other.
+        assert_eq!(cat("llseek"), Some(CallbackCategory::Other));
+        assert_eq!(cat("fsync"), Some(CallbackCategory::Other));
+    }
+
+    #[test]
+    fn test_linux_net_device_ops_struct() {
+        let platform = LinuxPlatform::new();
+        let ops = platform.ops_structs();
+        let ndo = ops
+            .iter()
+            .find(|o| o.struct_name == "net_device_ops")
+            .expect("net_device_ops present");
+
+        let cat = |name: &str| {
+            ndo.fields
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| f.category.clone())
+        };
+        assert_eq!(cat("ndo_open"), Some(CallbackCategory::Open));
+        assert_eq!(cat("ndo_stop"), Some(CallbackCategory::Close));
+        assert_eq!(cat("ndo_start_xmit"), Some(CallbackCategory::Write));
+        assert_eq!(cat("ndo_do_ioctl"), Some(CallbackCategory::Ioctl));
+        assert_eq!(cat("ndo_tx_timeout"), Some(CallbackCategory::Timer));
+    }
+
+    #[test]
+    fn test_linux_platform_driver_ops_struct() {
+        let platform = LinuxPlatform::new();
+        let ops = platform.ops_structs();
+        let drv = ops
+            .iter()
+            .find(|o| o.struct_name == "platform_driver")
+            .expect("platform_driver present");
+
+        let cat = |name: &str| {
+            drv.fields
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| f.category.clone())
+        };
+        assert_eq!(cat("probe"), Some(CallbackCategory::Probe));
+        assert_eq!(cat("remove"), Some(CallbackCategory::Remove));
+        assert_eq!(cat("suspend"), Some(CallbackCategory::Suspend));
+        assert_eq!(cat("resume"), Some(CallbackCategory::Resume));
+    }
+
+    #[test]
+    fn test_linux_call_normalizations_memory_variants() {
+        let platform = LinuxPlatform::new();
+        let norms = platform.call_normalizations();
+
+        assert_eq!(norms.get("kzalloc"), Some(&"MemAlloc"));
+        assert_eq!(norms.get("kcalloc"), Some(&"MemAlloc"));
+        assert_eq!(norms.get("vmalloc"), Some(&"MemAlloc"));
+        assert_eq!(norms.get("krealloc"), Some(&"MemRealloc"));
+        assert_eq!(norms.get("vfree"), Some(&"MemFree"));
+        assert_eq!(norms.get("kvfree"), Some(&"MemFree"));
+        assert_eq!(norms.get("dma_alloc_coherent"), Some(&"DmaAlloc"));
+        assert_eq!(norms.get("dma_free_coherent"), Some(&"DmaFree"));
+        assert_eq!(norms.get("memcpy"), Some(&"MemCopy"));
+        assert_eq!(norms.get("memmove"), Some(&"MemCopy"));
+        assert_eq!(norms.get("memset"), Some(&"MemSet"));
+    }
+
+    #[test]
+    fn test_linux_call_normalizations_lock_release_and_copy() {
+        let platform = LinuxPlatform::new();
+        let norms = platform.call_normalizations();
+
+        assert_eq!(norms.get("spin_lock_irqsave"), Some(&"LockAcquire"));
+        assert_eq!(norms.get("read_lock"), Some(&"LockAcquire"));
+        assert_eq!(norms.get("mutex_unlock"), Some(&"LockRelease"));
+        assert_eq!(norms.get("spin_unlock_irqrestore"), Some(&"LockRelease"));
+        assert_eq!(norms.get("get_user"), Some(&"CopyFromUser"));
+        assert_eq!(norms.get("copy_to_user"), Some(&"CopyToUser"));
+        assert_eq!(norms.get("put_user"), Some(&"CopyToUser"));
+    }
+
+    #[test]
+    fn test_linux_call_normalizations_io_irq_device() {
+        let platform = LinuxPlatform::new();
+        let norms = platform.call_normalizations();
+
+        assert_eq!(norms.get("ioremap"), Some(&"IoRemap"));
+        assert_eq!(norms.get("iounmap"), Some(&"IoUnmap"));
+        assert_eq!(norms.get("readl"), Some(&"IoRead"));
+        assert_eq!(norms.get("ioread32"), Some(&"IoRead"));
+        assert_eq!(norms.get("writel"), Some(&"IoWrite"));
+        assert_eq!(norms.get("dma_map_single"), Some(&"DmaMap"));
+        assert_eq!(norms.get("dma_unmap_single"), Some(&"DmaUnmap"));
+        assert_eq!(norms.get("request_irq"), Some(&"InterruptRegister"));
+        assert_eq!(norms.get("free_irq"), Some(&"InterruptUnregister"));
+        assert_eq!(norms.get("pci_register_driver"), Some(&"DeviceRegister"));
+        assert_eq!(norms.get("unregister_netdev"), Some(&"DeviceUnregister"));
+        // Unmapped names return None.
+        assert_eq!(norms.get("some_unknown_call"), None);
+    }
+
+    #[test]
+    fn test_linux_call_normalizations_wait_and_log() {
+        let platform = LinuxPlatform::new();
+        let norms = platform.call_normalizations();
+
+        assert_eq!(norms.get("wait_for_completion"), Some(&"WaitEvent"));
+        assert_eq!(norms.get("wait_event_interruptible"), Some(&"WaitEvent"));
+        assert_eq!(norms.get("complete"), Some(&"SignalEvent"));
+        assert_eq!(norms.get("wake_up"), Some(&"SignalEvent"));
+        assert_eq!(norms.get("pr_err"), Some(&"Log"));
+        assert_eq!(norms.get("dev_dbg"), Some(&"Log"));
+    }
+
+    #[test]
+    fn test_linux_detection_patterns_function_and_type_kinds() {
+        let platform = LinuxPlatform::new();
+        let patterns = platform.detection_patterns();
+
+        let has = |kind: DetectionKind, name: &str| {
+            patterns.iter().any(|p| p.kind == kind && p.pattern == name)
+        };
+        assert!(has(DetectionKind::FunctionCall, "printk"));
+        assert!(has(DetectionKind::FunctionCall, "copy_from_user"));
+        assert!(has(DetectionKind::TypeName, "spinlock_t"));
+        assert!(has(DetectionKind::TypeName, "atomic_t"));
+        assert!(has(DetectionKind::TypeName, "wait_queue_head_t"));
+
+        // Include weights are graded: linux/ outranks asm/ and uapi/.
+        let weight = |name: &str| {
+            patterns
+                .iter()
+                .find(|p| p.kind == DetectionKind::Include && p.pattern == name)
+                .map(|p| p.weight)
+        };
+        assert_eq!(weight("linux/"), Some(3.0));
+        assert_eq!(weight("asm/"), Some(1.5));
+        assert_eq!(weight("uapi/"), Some(1.5));
+    }
+
+    #[test]
+    fn test_linux_additional_header_stubs_present() {
+        let platform = LinuxPlatform::new();
+        let stubs = platform.header_stubs();
+
+        for header in [
+            "linux/mutex.h",
+            "linux/spinlock.h",
+            "linux/wait.h",
+            "linux/interrupt.h",
+            "linux/dma-mapping.h",
+            "linux/io.h",
+            "linux/workqueue.h",
+            "linux/timer.h",
+            "linux/completion.h",
+            "linux/atomic.h",
+            "linux/list.h",
+            "linux/uaccess.h",
+            "linux/string.h",
+            "linux/device.h",
+            "linux/init.h",
+        ] {
+            assert!(stubs.has_stub(header), "missing stub: {header}");
+        }
+        // available_headers surfaces the same set.
+        assert!(stubs.available_headers().contains(&"linux/atomic.h"));
+    }
+
+    #[test]
+    fn test_linux_stub_content_for_slab_and_atomic() {
+        let platform = LinuxPlatform::new();
+        let stubs = platform.header_stubs();
+
+        let source = "#include <linux/slab.h>\n#include <linux/atomic.h>";
+        let content = stubs.get_for_includes(source);
+        assert!(content.contains("GFP_KERNEL"));
+        assert!(content.contains("extern void *kmalloc"));
+        assert!(content.contains("ATOMIC_INIT"));
+        assert!(content.contains("atomic_read"));
+    }
+
+    #[test]
+    fn test_linux_attributes_to_strip_categories() {
+        let platform = LinuxPlatform::new();
+        let attrs = platform.attributes_to_strip();
+
+        // Address space annotations
+        assert!(attrs.contains(&"__rcu"));
+        assert!(attrs.contains(&"__percpu"));
+        assert!(attrs.contains(&"__force"));
+        // Packing/alignment
+        assert!(attrs.contains(&"__packed"));
+        assert!(attrs.contains(&"__aligned"));
+        assert!(attrs.contains(&"__cacheline_aligned"));
+        // Locking annotations
+        assert!(attrs.contains(&"__acquires"));
+        assert!(attrs.contains(&"__releases"));
+        assert!(attrs.contains(&"__must_hold"));
+        // Calling conventions
+        assert!(attrs.contains(&"asmlinkage"));
+        assert!(attrs.contains(&"fastcall"));
+    }
 }

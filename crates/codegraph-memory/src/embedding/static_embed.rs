@@ -227,11 +227,20 @@ mod tests {
         // vocab 2, dim 2: row0 = [3,0], row1 = [0,4].
         let matrix = vec![3.0, 0.0, 0.0, 4.0];
         // unweighted: mean of the two rows
-        assert_eq!(weighted_mean_l2(&matrix, None, &[0, 1], 2, 2, false), vec![1.5, 2.0]);
+        assert_eq!(
+            weighted_mean_l2(&matrix, None, &[0, 1], 2, 2, false),
+            vec![1.5, 2.0]
+        );
         // out-of-vocab id (99) skipped -> only row0 counts
-        assert_eq!(weighted_mean_l2(&matrix, None, &[0, 99], 2, 2, false), vec![3.0, 0.0]);
+        assert_eq!(
+            weighted_mean_l2(&matrix, None, &[0, 99], 2, 2, false),
+            vec![3.0, 0.0]
+        );
         // all-OOV -> zero vector, no NaN even with normalize
-        assert_eq!(weighted_mean_l2(&matrix, None, &[7], 2, 2, true), vec![0.0, 0.0]);
+        assert_eq!(
+            weighted_mean_l2(&matrix, None, &[7], 2, 2, true),
+            vec![0.0, 0.0]
+        );
         // normalize -> unit length
         let v = weighted_mean_l2(&matrix, None, &[0, 1], 2, 2, true);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -241,6 +250,97 @@ mod tests {
         assert_eq!(
             weighted_mean_l2(&matrix, Some(&w), &[0, 1], 2, 2, false),
             vec![3.0, 1.0]
+        );
+        // empty ids -> zero vector, n stays 0 so no divide-by-zero
+        assert_eq!(
+            weighted_mean_l2(&matrix, None, &[], 2, 2, true),
+            vec![0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn tensor_to_f32_decodes_f32() {
+        let bytes: Vec<u8> = [1.5f32, -2.0, 3.25]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        let t = TensorView::new(Dtype::F32, vec![3], &bytes).unwrap();
+        assert_eq!(tensor_to_f32(&t).unwrap(), vec![1.5, -2.0, 3.25]);
+    }
+
+    #[test]
+    fn tensor_to_f32_decodes_f16() {
+        let bytes: Vec<u8> = [1.0f32, 2.0]
+            .iter()
+            .flat_map(|x| half::f16::from_f32(*x).to_le_bytes())
+            .collect();
+        let t = TensorView::new(Dtype::F16, vec![2], &bytes).unwrap();
+        // f16 represents 1.0 and 2.0 exactly.
+        assert_eq!(tensor_to_f32(&t).unwrap(), vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn tensor_to_f32_decodes_f64() {
+        let bytes: Vec<u8> = [0.5f64, 4.0].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let t = TensorView::new(Dtype::F64, vec![2], &bytes).unwrap();
+        assert_eq!(tensor_to_f32(&t).unwrap(), vec![0.5, 4.0]);
+    }
+
+    #[test]
+    fn tensor_to_f32_rejects_unsupported_dtype() {
+        // I32 is not one of the accepted float dtypes.
+        let bytes: Vec<u8> = 7i32.to_le_bytes().to_vec();
+        let t = TensorView::new(Dtype::I32, vec![1], &bytes).unwrap();
+        let err = tensor_to_f32(&t).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported tensor dtype"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn static_config_defaults_and_overrides() {
+        // Empty object -> normalize defaults true, hidden_dim None.
+        let cfg: StaticConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.normalize);
+        assert_eq!(cfg.hidden_dim, None);
+        // Explicit values are honored; unknown fields ignored.
+        let cfg: StaticConfig =
+            serde_json::from_str(r#"{"normalize": false, "hidden_dim": 256, "extra": 1}"#).unwrap();
+        assert!(!cfg.normalize);
+        assert_eq!(cfg.hidden_dim, Some(256));
+    }
+
+    #[test]
+    fn from_pretrained_missing_config_errors() {
+        // An empty directory fails at the very first step: reading config.json.
+        // The load tests above skip when the real models are absent, so this
+        // read-failure arm (and its "read config.json" message prefix) was
+        // otherwise unexercised.
+        let dir = tempfile::TempDir::new().unwrap();
+        let Err(err) = StaticEmbedding::from_pretrained(dir.path()) else {
+            panic!("expected an error loading from an empty directory");
+        };
+        assert!(
+            err.to_string().contains("read config.json"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_pretrained_missing_tokenizer_errors() {
+        // With a valid config.json present, loading advances past the config
+        // read/parse and fails at the next step: loading tokenizer.json. This
+        // reaches the tokenizer-load error arm that the missing-config test
+        // short-circuits before and the model-present tests never hit.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("config.json"), "{}").unwrap();
+        let Err(err) = StaticEmbedding::from_pretrained(dir.path()) else {
+            panic!("expected an error with no tokenizer.json present");
+        };
+        assert!(
+            err.to_string().contains("load tokenizer.json"),
+            "unexpected error: {err}"
         );
     }
 
@@ -255,7 +355,10 @@ mod tests {
         let v = m.embed_text("database connection pool").unwrap();
         assert_eq!(v.len(), expected_dim);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-3, "should be L2-normalized, norm={norm}");
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "should be L2-normalized, norm={norm}"
+        );
 
         let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
         let a = m.embed_text("open a database connection").unwrap();
@@ -277,7 +380,10 @@ mod tests {
             return;
         }
         let m = StaticEmbedding::from_pretrained(&dir).expect("load potion-base-8M");
-        assert!(m.weights.is_none(), "potion-base-8M bakes weights into embeddings");
+        assert!(
+            m.weights.is_none(),
+            "potion-base-8M bakes weights into embeddings"
+        );
         assert_semantically_sane(&m, 256);
     }
 
@@ -289,7 +395,10 @@ mod tests {
             return;
         }
         let m = StaticEmbedding::from_pretrained(&dir).expect("load jina-code-static-256");
-        assert!(m.weights.is_some(), "model2vec 0.7 stores SIF weights separately");
+        assert!(
+            m.weights.is_some(),
+            "model2vec 0.7 stores SIF weights separately"
+        );
         assert_semantically_sane(&m, 256);
     }
 }

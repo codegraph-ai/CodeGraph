@@ -444,6 +444,80 @@ int c;
     }
 
     #[test]
+    fn test_strip_attributes_plain_space() {
+        // Plain attribute followed by a space is removed via replacen; count reflects it.
+        let (out, count) = Pipeline::strip_attributes("static __init int x;", &["__init"]);
+        assert_eq!(out, "static int x;");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_strip_attributes_plain_tab() {
+        // The tab-delimited pattern variant is exercised independently of the space one.
+        let (out, count) = Pipeline::strip_attributes("static __init\tint x;", &["__init"]);
+        assert_eq!(out, "static int x;");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_strip_attributes_function_like() {
+        // The "attr(" branch finds the paren, depth-matches, and drops the whole call.
+        let (out, count) = Pipeline::strip_attributes(
+            "void __attribute__((packed)) foo(void) {}",
+            &["__attribute__"],
+        );
+        assert_eq!(out, "void  foo(void) {}");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_strip_attributes_nested_parens() {
+        // Interior parens must not close the attribute early; depth tracking handles nesting.
+        let (out, count) = Pipeline::strip_attributes(
+            "int __attribute__((aligned(8), packed)) y;",
+            &["__attribute__"],
+        );
+        assert_eq!(out, "int  y;");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_strip_attributes_multiple_occurrences() {
+        // The inner while-loop strips every occurrence of a plain attribute, not just the first.
+        let (out, count) = Pipeline::strip_attributes("__init a; __init b;", &["__init"]);
+        assert_eq!(out, "a; b;");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_strip_attributes_multiple_attributes() {
+        // Each attribute in the list is processed in its own outer-loop pass.
+        let (out, count) = Pipeline::strip_attributes(
+            "static __init __cold int f(void) {}",
+            &["__init", "__cold"],
+        );
+        assert_eq!(out, "static int f(void) {}");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_strip_attributes_absent_delimiter_no_strip() {
+        // An attribute substring with no space/tab/paren delimiter matches none of the patterns,
+        // so nothing is removed and the count stays zero despite the substring appearing.
+        let (out, count) = Pipeline::strip_attributes("int __inited = 0;", &["__init"]);
+        assert_eq!(out, "int __inited = 0;");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_strip_attributes_not_present() {
+        // Attribute wholly absent: source is returned untouched with a zero count.
+        let (out, count) = Pipeline::strip_attributes("int x = 1;", &["__init"]);
+        assert_eq!(out, "int x = 1;");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn test_pipeline_stats() {
         let pipeline = Pipeline::new();
         let config = PipelineConfig::for_kernel_code();

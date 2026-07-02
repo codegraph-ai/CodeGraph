@@ -480,3 +480,796 @@ pub(crate) async fn get_edit_context(
         },
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{EdgeType, NodeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+
+    /// Add a node carrying the given (typed) key/value properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, PropertyValue)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert((*k).to_string(), v.clone());
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn s(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// Wrap a built graph in Arc<RwLock<>> and build the call indexes so
+    /// get_callers/get_callees resolve against a populated index.
+    async fn engine_for(g: CodeGraph) -> (Arc<RwLock<CodeGraph>>, QueryEngine) {
+        let graph = Arc::new(RwLock::new(g));
+        let engine = QueryEngine::new(graph.clone());
+        engine.build_indexes().await;
+        (graph, engine)
+    }
+
+    #[tokio::test]
+    async fn missing_symbol_returns_error() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let err = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/nowhere.rs",
+            "file:///src/nowhere.rs",
+            5,
+            4000,
+        )
+        .await
+        .expect_err("empty graph should yield an error");
+
+        assert!(err.error.contains("No symbols found"));
+        assert_eq!(err.uri.as_deref(), Some("file:///src/nowhere.rs"));
+        assert_eq!(err.line, Some(5));
+    }
+
+    #[tokio::test]
+    async fn resolves_symbol_and_populates_metadata() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("processData")),
+                ("path", s("/src/a.rs")),
+                ("language", s("rust")),
+                ("source", s("fn processData() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(10)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/a.rs",
+            "file:///src/a.rs",
+            5,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.name, "processData");
+        assert_eq!(result.symbol.symbol_type, "function");
+        assert_eq!(result.symbol.language, "rust");
+        assert_eq!(result.symbol.code, "fn processData() {}");
+        assert_eq!(result.symbol.location.uri, "file:///src/a.rs");
+        assert_eq!(result.symbol.location.range.start.line, 1);
+        assert_eq!(result.symbol.location.range.end.line, 10);
+        // Exact containment: no fallback.
+        assert!(result.metadata.used_fallback.is_none());
+        assert!(result.metadata.fallback_message.is_none());
+        assert!(result.metadata.sections.symbol);
+    }
+
+    #[tokio::test]
+    async fn language_falls_back_to_path_extension() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No `language` property: language is derived from the path extension.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("handler")),
+                ("path", s("/src/mod.ts")),
+                ("source", s("function handler() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(3)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/mod.ts",
+            "file:///src/mod.ts",
+            2,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.language, "ts");
+    }
+
+    #[tokio::test]
+    async fn line_outside_range_uses_fallback_message() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // Node spans lines 10..20; querying line 5 has no exact container, so
+        // the nearest-node fallback fires.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("nearby")),
+                ("path", s("/src/b.rs")),
+                ("source", s("fn nearby() {}")),
+                ("line_start", PropertyValue::Int(10)),
+                ("line_end", PropertyValue::Int(20)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/b.rs",
+            "file:///src/b.rs",
+            5,
+            4000,
+        )
+        .await
+        .expect("nearest symbol should resolve");
+
+        assert_eq!(result.metadata.used_fallback, Some(true));
+        let msg = result
+            .metadata
+            .fallback_message
+            .expect("fallback message present");
+        assert!(msg.contains("line 5"));
+        assert!(msg.contains("nearby"));
+    }
+
+    #[tokio::test]
+    async fn caller_section_populated() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ],
+        );
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("caller_fn")),
+                ("path", s("/src/c.rs")),
+                ("source", s("fn caller_fn() { target(); }")),
+                ("line_start", PropertyValue::Int(7)),
+                ("line_end", PropertyValue::Int(9)),
+            ],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.callers.len(), 1);
+        assert_eq!(result.callers[0].name, "caller_fn");
+        assert_eq!(result.callers[0].file, "/src/c.rs");
+        assert_eq!(result.callers[0].line, 7);
+        assert!(result.metadata.sections.callers);
+    }
+
+    #[tokio::test]
+    async fn stage1_test_calling_target_listed() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ],
+        );
+        // A test entry (name prefix test_) that calls the target.
+        let test_fn = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("test_target_behaviour")),
+                ("path", s("/src/t_test.rs")),
+                ("source", s("fn test_target_behaviour() { target(); }")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(4)),
+            ],
+        );
+        edge(&mut g, test_fn, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].name, "test_target_behaviour");
+        assert_eq!(result.tests[0].relationship, "calls_target");
+        assert!(result.metadata.sections.tests);
+    }
+
+    #[tokio::test]
+    async fn same_file_test_function_listed() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(10)),
+            ],
+        );
+        // A same-file test function that does NOT call the target: it is only
+        // discoverable via the stage-2 same-file scan.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("checks_something")),
+                ("path", s("/src/t.rs")),
+                ("is_test", PropertyValue::Bool(true)),
+                ("line_start", PropertyValue::Int(20)),
+                ("line_end", PropertyValue::Int(25)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            5,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.tests.len(), 1);
+        assert_eq!(result.tests[0].name, "checks_something");
+        assert_eq!(result.tests[0].relationship, "same_file");
+        assert!(result.tests[0].code.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_workspace_and_uninitialized_memory_leave_sections_empty() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("solo")),
+                ("path", s("/src/solo.rs")),
+                ("source", s("fn solo() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(3)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/solo.rs",
+            "file:///src/solo.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        // No workspace folder -> no git mining; uninitialized memory -> no memories.
+        assert!(result.recent_changes.is_empty());
+        assert!(!result.metadata.sections.recent_changes);
+        assert!(result.memories.is_empty());
+        assert!(!result.metadata.sections.memories);
+        assert!(result.callers.is_empty());
+        assert!(result.tests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn line_end_zero_falls_back_to_line_start() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // line_end == 0 exercises the `if e == 0 { line_start }` branch: the
+        // reported range end must collapse onto the start line.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("zero_end")),
+                ("path", s("/src/z.rs")),
+                ("source", s("fn zero_end() {}")),
+                ("line_start", PropertyValue::Int(5)),
+                ("line_end", PropertyValue::Int(0)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/z.rs",
+            "file:///src/z.rs",
+            5,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.location.range.start.line, 5);
+        assert_eq!(result.symbol.location.range.end.line, 5);
+    }
+
+    #[tokio::test]
+    async fn language_unknown_when_no_language_and_no_extension() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No `language` property and a path with no file extension: the language
+        // resolution falls all the way through to "unknown".
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("recipe")),
+                ("path", s("/src/Makefile")),
+                ("source", s("recipe:")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(2)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/Makefile",
+            "file:///src/Makefile",
+            1,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.language, "unknown");
+    }
+
+    #[tokio::test]
+    async fn missing_source_yields_placeholder_but_symbol_section_present() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // No inline `source` and a nonexistent path: get_symbol_source returns
+        // None, so the placeholder is substituted. The placeholder is non-empty,
+        // so the symbol section still counts as present.
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("ghost")),
+                ("path", s("/nonexistent/ghost.rs")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(3)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/nonexistent/ghost.rs",
+            "file:///nonexistent/ghost.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.code, "<source not available>");
+        assert!(result.metadata.sections.symbol);
+    }
+
+    #[tokio::test]
+    async fn caller_without_source_listed_with_none_code() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ],
+        );
+        // Caller has no inline source and a nonexistent path, so its source is
+        // unavailable; it is still listed with code = None.
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("bodyless_caller")),
+                ("path", s("/nonexistent/c.rs")),
+                ("line_start", PropertyValue::Int(7)),
+                ("line_end", PropertyValue::Int(9)),
+            ],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.callers.len(), 1);
+        assert_eq!(result.callers[0].name, "bodyless_caller");
+        assert!(result.callers[0].code.is_none());
+    }
+
+    #[tokio::test]
+    async fn multiple_callers_all_listed() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ],
+        );
+        for (name, path) in [("caller_a", "/src/a.rs"), ("caller_b", "/src/b.rs")] {
+            let c = add_node(
+                &mut g,
+                NodeType::Function,
+                &[
+                    ("name", s(name)),
+                    ("path", s(path)),
+                    ("source", s("fn c() { target(); }")),
+                    ("line_start", PropertyValue::Int(1)),
+                    ("line_end", PropertyValue::Int(3)),
+                ],
+            );
+            edge(&mut g, c, target, EdgeType::Calls);
+        }
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.callers.len(), 2);
+        let mut names: Vec<&str> = result.callers.iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["caller_a", "caller_b"]);
+    }
+
+    #[tokio::test]
+    async fn stage1_test_not_calling_target_excluded() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(5)),
+            ],
+        );
+        let other = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("other")),
+                ("path", s("/src/o.rs")),
+                ("source", s("fn other() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(3)),
+            ],
+        );
+        // A test entry in a different file that calls `other`, never the target;
+        // stage 1 must not surface it and stage 2 (same-file) does not apply.
+        let test_fn = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("test_other_only")),
+                ("path", s("/src/o_test.rs")),
+                ("source", s("fn test_other_only() { other(); }")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(4)),
+            ],
+        );
+        edge(&mut g, test_fn, other, EdgeType::Calls);
+        let _ = target;
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert!(result.tests.is_empty());
+        assert!(!result.metadata.sections.tests);
+    }
+
+    #[tokio::test]
+    async fn class_target_type_lowercased() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        // A Class node exercises the `{:?}` -> lowercase node-type rendering.
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[
+                ("name", s("Widget")),
+                ("path", s("/src/w.rs")),
+                ("source", s("struct Widget {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(4)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/w.rs",
+            "file:///src/w.rs",
+            2,
+            4000,
+        )
+        .await
+        .expect("symbol should resolve");
+
+        assert_eq!(result.symbol.symbol_type, "class");
+        assert_eq!(result.symbol.name, "Widget");
+    }
+
+    #[tokio::test]
+    async fn same_file_non_function_test_node_excluded() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("/src/t.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(10)),
+            ],
+        );
+        // A same-file, test-flagged node that is NOT a Function: the stage-2 scan
+        // guards on node_type == Function, so this must be excluded.
+        add_node(
+            &mut g,
+            NodeType::Class,
+            &[
+                ("name", s("TestFixture")),
+                ("path", s("/src/t.rs")),
+                ("is_test", PropertyValue::Bool(true)),
+                ("line_start", PropertyValue::Int(20)),
+                ("line_end", PropertyValue::Int(25)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[],
+            "/src/t.rs",
+            "file:///src/t.rs",
+            5,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert!(result.tests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recent_git_changes_populated_from_workspace_repo() {
+        use std::path::Path;
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        /// Run a git command in `dir`, panicking on failure.
+        fn git(dir: &Path, args: &[&str]) {
+            let output = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git command should run");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // A committed file inside a real git repo drives the section-5 Some(ws)
+        // arm: every other test passes an empty workspace list, so the git
+        // executor + log parsing path was never exercised.
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.name", "Test User"]);
+        git(repo, &["config", "user.email", "test@example.com"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("src.rs"), "fn target() {}\n").unwrap();
+        git(repo, &["add", "src.rs"]);
+        git(repo, &["commit", "-q", "-m", "feat: initial commit"]);
+        let full_hash = {
+            let out = Command::new("git")
+                .current_dir(repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        // The node's `path` is the repo-relative file — it feeds both symbol
+        // resolution (file_path arg) and the git log path filter (sym_path).
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", s("target")),
+                ("path", s("src.rs")),
+                ("source", s("fn target() {}")),
+                ("line_start", PropertyValue::Int(1)),
+                ("line_end", PropertyValue::Int(1)),
+            ],
+        );
+        let (graph, engine) = engine_for(g).await;
+        let mem = MemoryManager::new(None);
+
+        let result = get_edit_context(
+            &graph,
+            &engine,
+            &mem,
+            &[repo.to_path_buf()],
+            "src.rs",
+            "file:///src.rs",
+            1,
+            4000,
+        )
+        .await
+        .expect("target should resolve");
+
+        assert_eq!(result.recent_changes.len(), 1, "one commit touched src.rs");
+        let change = &result.recent_changes[0];
+        // Hash is truncated to the first 8 chars of the full SHA.
+        assert_eq!(change.hash.len(), 8);
+        assert!(full_hash.starts_with(&change.hash));
+        assert_eq!(change.subject, "feat: initial commit");
+        assert_eq!(change.author, "Test User");
+        assert!(!change.date.is_empty());
+        assert!(result.metadata.sections.recent_changes);
+    }
+}

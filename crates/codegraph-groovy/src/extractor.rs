@@ -57,6 +57,10 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        extract(source, Path::new(path), &ParserConfig::default()).expect("extract should succeed")
+    }
+
     #[test]
     fn test_extract_class() {
         let source = r#"
@@ -85,5 +89,83 @@ class UserService {
         let ir = result.unwrap();
         assert_eq!(ir.imports.len(), 1);
         assert_eq!(ir.imports[0].imported, "groovy.json.JsonSlurper");
+    }
+
+    #[test]
+    fn test_extract_top_level_function() {
+        let ir = extract_ok("def standalone(String a) { println a }", "test.groovy");
+        assert_eq!(ir.functions.len(), 1);
+        assert_eq!(ir.functions[0].name, "standalone");
+        assert!(ir.functions[0].parent_class.is_none());
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("def f() {}", "src/Core.groovy");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.name, "Core");
+        assert_eq!(module.language, "groovy");
+    }
+
+    #[test]
+    fn test_module_path_and_line_count() {
+        let source = "def a() {}\ndef b() {}\ndef c() {}";
+        let ir = extract_ok(source, "app/Util.groovy");
+        let module = ir.module.expect("module should be set");
+        assert_eq!(module.path, "app/Util.groovy");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_module_name_unknown_without_stem() {
+        // A path with no file stem falls back to "unknown".
+        let ir = extract_ok("def f() {}", "..");
+        assert_eq!(ir.module.expect("module").name, "unknown");
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "empty.groovy");
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.module.is_some());
+    }
+
+    #[test]
+    fn test_comment_only_source_yields_no_entities() {
+        let ir = extract_ok("// just a comment\n/* another one */", "c.groovy");
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.imports.is_empty());
+    }
+
+    #[test]
+    fn test_calls_empty_by_default() {
+        // The Groovy visitor does not populate call relations, so ir.calls
+        // stays empty even for a body that invokes another method.
+        let ir = extract_ok("def f() { helper() }", "test.groovy");
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_extract_mixed_entities() {
+        let source = "import a.B\n\
+             class Shape {\n    def area() {}\n}\n\
+             def square(int s) { s * s }";
+        let ir = extract_ok(source, "shapes.groovy");
+        assert_eq!(ir.functions.len(), 1);
+        assert_eq!(ir.classes.len(), 1);
+        assert_eq!(ir.classes[0].name, "Shape");
+        assert!(ir.imports.iter().any(|i| i.imported == "a.B"));
+    }
+
+    #[test]
+    fn test_multiple_functions_extracted() {
+        let ir = extract_ok("def a() {}\ndef b() {}", "m.groovy");
+        let names: Vec<&str> = ir.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
     }
 }

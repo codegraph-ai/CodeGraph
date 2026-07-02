@@ -224,3 +224,207 @@ fn build_fallback(
         (None, None)
     }
 }
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{EdgeType, NodeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+
+    /// Add a node with a `name` property, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, name: &str) -> NodeId {
+        let mut props = PropertyMap::new();
+        props.insert("name".to_string(), PropertyValue::String(name.to_string()));
+        graph.add_node(ty, props).expect("add_node")
+    }
+
+    /// Build a shared graph handle plus a `QueryEngine` bound to it.
+    fn engine_over(graph: Arc<RwLock<CodeGraph>>) -> QueryEngine {
+        QueryEngine::new(Arc::clone(&graph))
+    }
+
+    #[tokio::test]
+    async fn get_callers_empty_emits_diagnostic() {
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().expect("in_memory")));
+        let foo = {
+            let mut g = graph.write().await;
+            add_node(&mut g, NodeType::Function, "foo")
+        };
+        let engine = engine_over(Arc::clone(&graph));
+        engine.build_indexes().await;
+
+        let result = get_callers(&graph, &engine, foo, 1, false, None).await;
+
+        assert!(result.callers.is_empty());
+        assert_eq!(result.symbol_name, "foo");
+        let diag = result.diagnostic.expect("diagnostic present when empty");
+        assert!(diag.node_found);
+        assert_eq!(diag.symbol_name, "foo");
+        assert!(diag.note.contains("No callers found"));
+        assert_eq!(result.used_fallback, None);
+        assert_eq!(result.fallback_message, None);
+    }
+
+    #[tokio::test]
+    async fn get_callers_missing_node_yields_empty_symbol_name() {
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().expect("in_memory")));
+        let engine = engine_over(Arc::clone(&graph));
+
+        // 999_999 is a guaranteed-absent NodeId, so name resolution falls back
+        // to the default empty string and the same-name variant search is skipped.
+        let result = get_callers(&graph, &engine, 999_999, 1, false, None).await;
+
+        assert!(result.callers.is_empty());
+        assert_eq!(result.symbol_name, "");
+        assert!(result.diagnostic.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_callers_used_fallback_sets_message() {
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().expect("in_memory")));
+        let bar = {
+            let mut g = graph.write().await;
+            add_node(&mut g, NodeType::Function, "bar")
+        };
+        let engine = engine_over(Arc::clone(&graph));
+
+        let result = get_callers(&graph, &engine, bar, 1, true, Some(7)).await;
+
+        assert_eq!(result.used_fallback, Some(true));
+        let msg = result.fallback_message.expect("fallback message present");
+        assert!(msg.contains("line 7"));
+        assert!(msg.contains("bar"));
+    }
+
+    #[tokio::test]
+    async fn get_callers_with_edge_returns_caller_without_diagnostic() {
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().expect("in_memory")));
+        let (a, b) = {
+            let mut g = graph.write().await;
+            let a = add_node(&mut g, NodeType::Function, "a");
+            let b = add_node(&mut g, NodeType::Function, "b");
+            g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+                .expect("add_edge");
+            (a, b)
+        };
+        let engine = engine_over(Arc::clone(&graph));
+        engine.build_indexes().await;
+
+        // a calls b, so b has a as a caller.
+        let result = get_callers(&graph, &engine, b, 1, false, None).await;
+
+        assert!(!result.callers.is_empty());
+        assert_eq!(result.symbol_name, "b");
+        assert!(result.diagnostic.is_none());
+        let _ = a;
+    }
+
+    #[tokio::test]
+    async fn get_callees_empty_emits_diagnostic() {
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().expect("in_memory")));
+        let leaf = {
+            let mut g = graph.write().await;
+            add_node(&mut g, NodeType::Function, "leaf")
+        };
+        let engine = engine_over(Arc::clone(&graph));
+        engine.build_indexes().await;
+
+        let result = get_callees(&graph, &engine, leaf, 1, false, None).await;
+
+        assert!(result.callees.is_empty());
+        assert_eq!(result.symbol_name, "leaf");
+        let diag = result.diagnostic.expect("diagnostic present when empty");
+        assert!(diag.note.contains("No callees found"));
+    }
+
+    #[tokio::test]
+    async fn get_callees_with_edge_returns_callee_without_diagnostic() {
+        let graph = Arc::new(RwLock::new(CodeGraph::in_memory().expect("in_memory")));
+        let (a, b) = {
+            let mut g = graph.write().await;
+            let a = add_node(&mut g, NodeType::Function, "a");
+            let b = add_node(&mut g, NodeType::Function, "b");
+            g.add_edge(a, b, EdgeType::Calls, PropertyMap::new())
+                .expect("add_edge");
+            (a, b)
+        };
+        let engine = engine_over(Arc::clone(&graph));
+        engine.build_indexes().await;
+
+        // a calls b, so a has b as a callee.
+        let result = get_callees(&graph, &engine, a, 1, false, None).await;
+
+        assert!(!result.callees.is_empty());
+        assert_eq!(result.symbol_name, "a");
+        assert!(result.diagnostic.is_none());
+        let _ = b;
+    }
+
+    #[test]
+    fn variants_finds_same_name_functions_excluding_self() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let f32bit = add_node(&mut g, NodeType::Function, "backdoor");
+        let f64bit = add_node(&mut g, NodeType::Function, "backdoor");
+
+        let variants = find_same_name_variants(&g, "backdoor", f32bit);
+        assert_eq!(variants, vec![f64bit]);
+    }
+
+    #[test]
+    fn variants_excludes_the_query_node_itself() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let only = add_node(&mut g, NodeType::Function, "solo");
+
+        let variants = find_same_name_variants(&g, "solo", only);
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn variants_ignores_different_names() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, "alpha");
+        let _other = add_node(&mut g, NodeType::Function, "beta");
+
+        let variants = find_same_name_variants(&g, "alpha", target);
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn variants_ignores_non_function_nodes_with_same_name() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let func = add_node(&mut g, NodeType::Function, "shared");
+        // A Module sharing the name must not be treated as a call-graph variant.
+        let _module = add_node(&mut g, NodeType::Module, "shared");
+
+        let variants = find_same_name_variants(&g, "shared", func);
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn build_fallback_disabled_returns_none() {
+        let (used, message) = build_fallback(false, Some(42), "foo");
+        assert_eq!(used, None);
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn build_fallback_enabled_includes_line_and_name() {
+        let (used, message) = build_fallback(true, Some(42), "foo");
+        assert_eq!(used, Some(true));
+        assert_eq!(
+            message.as_deref(),
+            Some("No symbol at line 42. Using nearest symbol 'foo' instead.")
+        );
+    }
+
+    #[test]
+    fn build_fallback_missing_line_defaults_to_zero() {
+        let (used, message) = build_fallback(true, None, "bar");
+        assert_eq!(used, Some(true));
+        assert!(message.as_deref().unwrap().contains("line 0"));
+    }
+}

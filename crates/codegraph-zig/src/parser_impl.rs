@@ -270,4 +270,235 @@ mod tests {
         assert!(parser.can_parse(Path::new("main.zig")));
         assert!(!parser.can_parse(Path::new("main.rs")));
     }
+
+    use std::io::Write;
+
+    /// A small but syntactically complete Zig source touching every extracted
+    /// entity kind: one `@import` (import), one `struct` (class), one top-level
+    /// function. Zig has no trait concept. The struct is field-only so the
+    /// visitor's method recursion cannot inflate the function count; this pins
+    /// functions=1/classes=1/traits=0/imports=1 with entity_count=2.
+    const SAMPLE: &str = r#"const std = @import("std");
+
+const Point = struct {
+    x: i32,
+    y: i32,
+};
+
+pub fn add(a: i32, b: i32) i32 {
+    return a + b;
+}
+"#;
+
+    fn graph() -> CodeGraph {
+        CodeGraph::in_memory().expect("in-memory graph")
+    }
+
+    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).expect("create temp file");
+        f.write_all(content.as_bytes()).expect("write temp file");
+        path
+    }
+
+    #[test]
+    fn test_default_matches_new_metrics() {
+        let default = ZigParser::default().metrics();
+        let new = ZigParser::new().metrics();
+        assert_eq!(default.files_attempted, new.files_attempted);
+        assert_eq!(default.files_attempted, 0);
+        assert_eq!(default.total_entities, 0);
+    }
+
+    #[test]
+    fn test_with_config_and_accessor() {
+        let cfg = ParserConfig::default().with_max_file_size(4242);
+        let parser = ZigParser::with_config(cfg);
+        assert_eq!(parser.config().max_file_size, 4242);
+    }
+
+    #[test]
+    fn test_parse_source_extracts_each_entity_kind() {
+        let parser = ZigParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("lib.zig"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.functions.len(), 1, "one top-level function");
+        assert_eq!(info.classes.len(), 1, "struct maps to a class");
+        assert_eq!(info.traits.len(), 0, "Zig has no traits");
+        assert_eq!(info.imports.len(), 1, "one @import");
+        assert_eq!(info.entity_count(), 2, "functions + classes");
+    }
+
+    #[test]
+    fn test_parse_source_records_line_and_byte_counts() {
+        let parser = ZigParser::new();
+        let mut g = graph();
+        let info = parser
+            .parse_source(SAMPLE, Path::new("lib.zig"), &mut g)
+            .expect("parse ok");
+        assert_eq!(info.line_count, SAMPLE.lines().count());
+        assert_eq!(info.byte_count, SAMPLE.len());
+    }
+
+    #[test]
+    fn test_parse_source_comment_only_yields_no_entities() {
+        // Zig is tree-sitter-based and error-tolerant, so a comment-only
+        // source parses cleanly and simply extracts nothing.
+        let parser = ZigParser::new();
+        let mut g = graph();
+        let src = "// just a comment\n";
+        let info = parser
+            .parse_source(src, Path::new("empty.zig"), &mut g)
+            .expect("comment-only source still parses");
+        assert_eq!(info.functions.len(), 0);
+        assert_eq!(info.classes.len(), 0);
+        assert_eq!(info.traits.len(), 0);
+        assert_eq!(info.imports.len(), 0);
+        assert_eq!(info.line_count, 1);
+        assert_eq!(info.byte_count, src.len());
+    }
+
+    #[test]
+    fn test_parse_source_does_not_touch_metrics() {
+        // Only parse_file updates metrics; parse_source is metric-free.
+        let parser = ZigParser::new();
+        let mut g = graph();
+        parser
+            .parse_source(SAMPLE, Path::new("lib.zig"), &mut g)
+            .expect("parse ok");
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.files_succeeded, 0);
+    }
+
+    #[test]
+    fn test_parse_file_success_updates_metrics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "lib.zig", SAMPLE);
+        let parser = ZigParser::new();
+        let mut g = graph();
+        let info = parser.parse_file(&path, &mut g).expect("parse ok");
+        assert_eq!(info.functions.len(), 1);
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 1);
+        assert_eq!(m.files_succeeded, 1);
+        assert_eq!(m.files_failed, 0);
+        assert_eq!(m.total_entities, info.entity_count());
+    }
+
+    #[test]
+    fn test_parse_file_missing_file_is_io_error() {
+        let parser = ZigParser::new();
+        let mut g = graph();
+        let err = parser
+            .parse_file(Path::new("/no/such/file.zig"), &mut g)
+            .expect_err("missing file should error");
+        assert!(matches!(err, ParserError::IoError(..)));
+        // A pre-read failure never reaches update_metrics.
+        assert_eq!(parser.metrics().files_attempted, 0);
+    }
+
+    #[test]
+    fn test_parse_file_too_large() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "big.zig", SAMPLE);
+        let parser = ZigParser::with_config(ParserConfig::default().with_max_file_size(4));
+        let mut g = graph();
+        let err = parser
+            .parse_file(&path, &mut g)
+            .expect_err("oversized file should error");
+        assert!(matches!(err, ParserError::FileTooLarge(..)));
+        // The size guard also short-circuits before metrics are touched.
+        assert_eq!(parser.metrics().files_attempted, 0);
+    }
+
+    #[test]
+    fn test_reset_metrics_zeroes_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_file(dir.path(), "lib.zig", SAMPLE);
+        let mut parser = ZigParser::new();
+        let mut g = graph();
+        parser.parse_file(&path, &mut g).expect("parse ok");
+        assert_eq!(parser.metrics().files_attempted, 1);
+        parser.reset_metrics();
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 0);
+        assert_eq!(m.files_succeeded, 0);
+        assert_eq!(m.total_entities, 0);
+    }
+
+    #[test]
+    fn test_metrics_accumulate_across_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.zig", SAMPLE);
+        let b = write_file(dir.path(), "b.zig", SAMPLE);
+        let parser = ZigParser::new();
+        let mut g = graph();
+        parser.parse_file(&a, &mut g).expect("parse a");
+        parser.parse_file(&b, &mut g).expect("parse b");
+        let m = parser.metrics();
+        assert_eq!(m.files_attempted, 2);
+        assert_eq!(m.files_succeeded, 2);
+    }
+
+    #[test]
+    fn test_parse_files_sequential_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.zig", SAMPLE);
+        let b = write_file(dir.path(), "b.zig", SAMPLE);
+        let parser = ZigParser::new(); // parallel = false by default
+        let mut g = graph();
+        let project = parser.parse_files(&[a, b], &mut g).expect("parse ok");
+        assert_eq!(project.files.len(), 2);
+        assert!(project.failed_files.is_empty());
+        assert_eq!(project.total_functions, 2);
+        assert_eq!(project.total_classes, 2);
+    }
+
+    #[test]
+    fn test_parse_files_partitions_failures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = write_file(dir.path(), "good.zig", SAMPLE);
+        let missing = dir.path().join("missing.zig");
+        let parser = ZigParser::new();
+        let mut g = graph();
+        let project = parser
+            .parse_files(&[good, missing.clone()], &mut g)
+            .expect("parse ok");
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.failed_files.len(), 1);
+        assert_eq!(project.failed_files[0].0, missing);
+    }
+
+    #[test]
+    fn test_parse_files_parallel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.zig", SAMPLE);
+        let b = write_file(dir.path(), "b.zig", SAMPLE);
+        let cfg = ParserConfig::default().with_parallel(true);
+        let parser = ZigParser::with_config(cfg);
+        let mut g = graph();
+        let project = parser.parse_files(&[a, b], &mut g).expect("parse ok");
+        assert_eq!(project.files.len(), 2);
+        assert!(project.failed_files.is_empty());
+        assert_eq!(project.total_functions, 2);
+    }
+
+    #[test]
+    fn test_parse_files_parallel_with_worker_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.zig", SAMPLE);
+        let cfg = ParserConfig {
+            parallel: true,
+            parallel_workers: Some(2),
+            ..ParserConfig::default()
+        };
+        let parser = ZigParser::with_config(cfg);
+        let mut g = graph();
+        let project = parser.parse_files(&[a], &mut g).expect("parse ok");
+        assert_eq!(project.files.len(), 1);
+        assert_eq!(project.total_functions, 1);
+    }
 }

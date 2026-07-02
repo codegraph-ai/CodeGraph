@@ -79,11 +79,8 @@ edition = "2021"
         let ir = extract(source, Path::new("Cargo.toml"), &cfg()).unwrap();
         assert!(!ir.functions.is_empty(), "Expected key-value properties");
         let names: Vec<&str> = ir.functions.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.iter().any(|n| *n == "name"), "Expected 'name' key");
-        assert!(
-            names.iter().any(|n| *n == "version"),
-            "Expected 'version' key"
-        );
+        assert!(names.contains(&"name"), "Expected 'name' key");
+        assert!(names.contains(&"version"), "Expected 'version' key");
     }
 
     #[test]
@@ -143,6 +140,66 @@ path = "src/client.rs"
         // Two [[bin]] sections become two class nodes
         assert_eq!(ir.classes.len(), 2);
         assert!(ir.classes.iter().all(|c| c.name == "bin"));
+    }
+
+    #[test]
+    fn test_module_metadata_fields_full() {
+        // test_extract_module_info only asserts name/language/line_count; pin the
+        // remaining ModuleEntity fields extract() assembles directly.
+        let source = r#"name = "x""#;
+        let ir = extract(source, Path::new("dir/settings.toml"), &cfg()).unwrap();
+        let module = ir.module.unwrap();
+        assert_eq!(module.name, "settings");
+        assert_eq!(
+            module.path,
+            Path::new("dir/settings.toml").display().to_string()
+        );
+        assert_eq!(module.language, "toml");
+        assert_eq!(module.line_count, 1);
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_module_name_fallback() {
+        // An empty path has no file_stem, so the two-arm resolution falls through
+        // to the innermost unwrap_or("unknown").
+        let ir = extract(r#"a = 1"#, Path::new(""), &cfg()).unwrap();
+        assert_eq!(ir.module.unwrap().name, "unknown");
+    }
+
+    #[test]
+    fn test_empty_source_zero_line_count() {
+        // Empty source parses to a valid tree: line_count 0, no entities.
+        let ir = extract("", Path::new("empty.toml"), &cfg()).unwrap();
+        let module = ir.module.unwrap();
+        assert_eq!(module.line_count, 0);
+        assert!(ir.classes.is_empty());
+        assert!(ir.functions.is_empty());
+    }
+
+    #[test]
+    fn test_line_count_tracks_blank_lines() {
+        // line_count follows source.lines().count() independent of entity count.
+        let source = "\n\n\nkey = 1\n\n\n";
+        let ir = extract(source, Path::new("blanks.toml"), &cfg()).unwrap();
+        assert_eq!(ir.module.unwrap().line_count, source.lines().count());
+    }
+
+    #[test]
+    fn test_top_level_keys_produce_no_classes() {
+        // A keys-only document (no [table] headers) leaves ir.classes empty,
+        // the mirror of the table-as-class assertions.
+        let source = r#"
+name = "flat"
+version = "1"
+"#;
+        let ir = extract(source, Path::new("flat.toml"), &cfg()).unwrap();
+        assert!(
+            ir.classes.is_empty(),
+            "Top-level keys should produce no table classes"
+        );
+        assert!(!ir.functions.is_empty());
     }
 
     #[test]

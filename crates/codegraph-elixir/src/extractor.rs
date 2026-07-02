@@ -56,6 +56,94 @@ pub(crate) fn extract(
 mod tests {
     use super::*;
 
+    fn extract_ok(source: &str, path: &str) -> CodeIR {
+        let config = ParserConfig::default();
+        extract(source, Path::new(path), &config).expect("extract should succeed")
+    }
+
+    #[test]
+    fn test_module_name_from_file_stem() {
+        let ir = extract_ok("defmodule M do\nend\n", "my_app.ex");
+        assert_eq!(ir.module.as_ref().unwrap().name, "my_app");
+    }
+
+    #[test]
+    fn test_module_name_unknown_fallback() {
+        let ir = extract_ok("defmodule M do\nend\n", "..");
+        assert_eq!(ir.module.as_ref().unwrap().name, "unknown");
+    }
+
+    #[test]
+    fn test_module_metadata() {
+        let source = "defmodule M do\n  def a() do\n    :ok\n  end\nend\n";
+        let ir = extract_ok(source, "test.ex");
+        let module = ir.module.as_ref().unwrap();
+        assert_eq!(module.path, Path::new("test.ex").display().to_string());
+        assert_eq!(module.language, "elixir");
+        assert_eq!(module.line_count, source.lines().count());
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_empty_source_yields_only_module() {
+        let ir = extract_ok("", "test.ex");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_comment_only_source() {
+        let ir = extract_ok("# just a comment\n", "test.ex");
+        assert!(ir.module.is_some());
+        assert!(ir.functions.is_empty());
+        assert!(ir.calls.is_empty());
+    }
+
+    #[test]
+    fn test_calls_populated_via_caller_callee() {
+        let source = r#"
+defmodule MyApp do
+  def run() do
+    helper()
+  end
+
+  def helper() do
+    :ok
+  end
+end
+"#;
+        let ir = extract_ok(source, "test.ex");
+        assert!(
+            ir.calls.iter().any(|c| c.callee == "helper"),
+            "expected a call to helper, got {:?}",
+            ir.calls
+        );
+    }
+
+    #[test]
+    fn test_multi_function_extraction() {
+        let source = r#"
+defmodule MyApp do
+  def one() do
+    :one
+  end
+
+  def two() do
+    :two
+  end
+
+  def three() do
+    :three
+  end
+end
+"#;
+        let ir = extract_ok(source, "test.ex");
+        assert_eq!(ir.functions.len(), 3);
+    }
+
     #[test]
     fn test_extract_simple_function() {
         let source = r#"

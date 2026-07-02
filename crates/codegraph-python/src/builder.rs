@@ -163,7 +163,21 @@ pub fn build_graph(graph: &mut CodeGraph, ir: &CodeIR, file_path: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_parser_api::{CallRelation, ClassEntity, FunctionEntity, ImportRelation};
+    use codegraph::EdgeType;
+    use codegraph_parser_api::{
+        CallRelation, ClassEntity, ComplexityMetrics, FunctionEntity, ImportRelation,
+    };
+
+    /// Find the first node of the given type whose `name` property matches.
+    fn find_node(graph: &CodeGraph, nt: NodeType, name: &str) -> Option<NodeId> {
+        graph.iter_nodes().find_map(|(id, node)| {
+            if node.node_type == nt && node.properties.get_string("name") == Some(name) {
+                Some(id)
+            } else {
+                None
+            }
+        })
+    }
 
     #[test]
     fn test_build_empty_module() {
@@ -213,5 +227,216 @@ mod tests {
 
         let result = build_graph(&mut graph, &ir, "test.py");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn function_node_carries_all_scalar_props_and_contains_edge() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let mut ir = CodeIR::new(std::path::PathBuf::from("m.py"));
+        let func = FunctionEntity::new("worker", 3, 9)
+            .with_signature("def worker(x)")
+            .with_visibility("private")
+            .with_attributes(vec!["deco".to_string()]);
+        ir.add_function(func);
+
+        let file_id = build_graph(&mut graph, &ir, "m.py").unwrap();
+        let fid = find_node(&graph, NodeType::Function, "worker").expect("function node");
+        let props = &graph.get_node(fid).unwrap().properties;
+        assert_eq!(props.get_string("signature"), Some("def worker(x)"));
+        assert_eq!(props.get_int("line_start"), Some(3));
+        assert_eq!(props.get_int("line_end"), Some(9));
+        assert_eq!(props.get_string("visibility"), Some("private"));
+        assert_eq!(props.get_bool("is_async"), Some(false));
+        assert_eq!(props.get_bool("is_static"), Some(false));
+        assert_eq!(props.get_bool("is_test"), Some(false));
+        assert_eq!(
+            props.get_string_list("attributes"),
+            Some(&["deco".to_string()][..])
+        );
+        // body_prefix/complexity absent when unset
+        assert!(!props.contains_key("body_prefix"));
+        assert!(!props.contains_key("complexity"));
+        // Contains edge file -> function exists
+        let edges = graph.get_edges_between(file_id, fid).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    #[test]
+    fn function_body_prefix_and_complexity_metrics_expand() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let mut ir = CodeIR::new(std::path::PathBuf::from("m.py"));
+        let metrics = ComplexityMetrics::new()
+            .with_branches(4)
+            .with_loops(2)
+            .with_logical_operators(3)
+            .with_nesting_depth(5)
+            .with_exception_handlers(1)
+            .with_early_returns(2)
+            .finalize();
+        let func = FunctionEntity::new("heavy", 1, 40)
+            .with_body_prefix("def heavy():")
+            .with_complexity(metrics.clone());
+        ir.add_function(func);
+
+        build_graph(&mut graph, &ir, "m.py").unwrap();
+        let fid = find_node(&graph, NodeType::Function, "heavy").unwrap();
+        let props = &graph.get_node(fid).unwrap().properties;
+        assert_eq!(props.get_string("body_prefix"), Some("def heavy():"));
+        assert_eq!(
+            props.get_int("complexity"),
+            Some(metrics.cyclomatic_complexity as i64)
+        );
+        assert_eq!(
+            props.get_string("complexity_grade"),
+            Some(metrics.grade().to_string().as_str())
+        );
+        assert_eq!(props.get_int("complexity_branches"), Some(4));
+        assert_eq!(props.get_int("complexity_loops"), Some(2));
+        assert_eq!(props.get_int("complexity_logical_ops"), Some(3));
+        assert_eq!(props.get_int("complexity_nesting"), Some(5));
+        assert_eq!(props.get_int("complexity_exceptions"), Some(1));
+        assert_eq!(props.get_int("complexity_early_returns"), Some(2));
+    }
+
+    #[test]
+    fn class_methods_and_body_prefix_are_wired() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let mut ir = CodeIR::new(std::path::PathBuf::from("m.py"));
+        let class = ClassEntity::new("Widget", 1, 20)
+            .with_body_prefix("class Widget:")
+            .with_methods(vec![FunctionEntity::new("render", 2, 5)]);
+        ir.add_class(class);
+
+        build_graph(&mut graph, &ir, "m.py").unwrap();
+        let cid = find_node(&graph, NodeType::Class, "Widget").expect("class node");
+        assert_eq!(
+            graph
+                .get_node(cid)
+                .unwrap()
+                .properties
+                .get_string("body_prefix"),
+            Some("class Widget:")
+        );
+        // Method exists as a Function node linked to the class via Contains
+        let mid = find_node(&graph, NodeType::Function, "render").expect("method node");
+        let edges = graph.get_edges_between(cid, mid).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            graph.get_edge(edges[0]).unwrap().edge_type,
+            EdgeType::Contains
+        );
+    }
+
+    #[test]
+    fn call_edge_created_only_when_both_endpoints_resolve() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let mut ir = CodeIR::new(std::path::PathBuf::from("m.py"));
+        ir.add_function(FunctionEntity::new("caller", 1, 3));
+        ir.add_function(FunctionEntity::new("callee", 5, 7));
+        // Resolvable call, plus one whose callee is unknown (must be skipped).
+        ir.add_call(CallRelation::new("caller", "callee", 2));
+        ir.add_call(CallRelation::new("caller", "ghost", 4));
+
+        build_graph(&mut graph, &ir, "m.py").unwrap();
+        let caller = find_node(&graph, NodeType::Function, "caller").unwrap();
+        let callee = find_node(&graph, NodeType::Function, "callee").unwrap();
+        let edges = graph.get_edges_between(caller, callee).unwrap();
+        assert_eq!(edges.len(), 1);
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(edge.properties.get_int("line"), Some(2));
+        // The unresolved "ghost" callee never became a node.
+        assert!(find_node(&graph, NodeType::Function, "ghost").is_none());
+        // Exactly one Calls edge in the whole graph.
+        assert_eq!(
+            graph
+                .iter_edges()
+                .filter(|(_, e)| e.edge_type == EdgeType::Calls)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn external_import_creates_module_with_edge_props() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let mut ir = CodeIR::new(std::path::PathBuf::from("m.py"));
+        ir.add_import(
+            ImportRelation::new("m", "numpy")
+                .with_alias("np")
+                .with_symbols(vec!["array".to_string()]),
+        );
+
+        let file_id = build_graph(&mut graph, &ir, "m.py").unwrap();
+        let mid = find_node(&graph, NodeType::Module, "numpy").expect("module node");
+        // is_external is stored as a String, not a bool.
+        assert_eq!(
+            graph
+                .get_node(mid)
+                .unwrap()
+                .properties
+                .get_string("is_external"),
+            Some("true")
+        );
+        let edges = graph.get_edges_between(file_id, mid).unwrap();
+        assert_eq!(edges.len(), 1);
+        let edge = graph.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.edge_type, EdgeType::Imports);
+        assert_eq!(edge.properties.get_string("alias"), Some("np"));
+        assert_eq!(
+            edge.properties.get_string_list("symbols"),
+            Some(&["array".to_string()][..])
+        );
+        assert!(!edge.properties.contains_key("is_wildcard"));
+    }
+
+    #[test]
+    fn relative_wildcard_import_marks_internal_and_wildcard() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let mut ir = CodeIR::new(std::path::PathBuf::from("m.py"));
+        ir.add_import(ImportRelation::new("m", ".sibling").wildcard());
+
+        build_graph(&mut graph, &ir, "m.py").unwrap();
+        let mid = find_node(&graph, NodeType::Module, ".sibling").expect("module node");
+        // A leading dot marks the module as internal.
+        assert_eq!(
+            graph
+                .get_node(mid)
+                .unwrap()
+                .properties
+                .get_string("is_external"),
+            Some("false")
+        );
+        let wildcard_edge = graph
+            .iter_edges()
+            .find(|(_, e)| e.edge_type == EdgeType::Imports)
+            .and_then(|(_, e)| e.properties.get_string("is_wildcard").map(str::to_string));
+        assert_eq!(wildcard_edge, Some("true".to_string()));
+    }
+
+    #[test]
+    fn import_reuses_existing_entity_instead_of_new_module() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let mut ir = CodeIR::new(std::path::PathBuf::from("m.py"));
+        // A function named "helper" already lives in entity_map...
+        ir.add_function(FunctionEntity::new("helper", 1, 2));
+        // ...so importing "helper" must reuse that node, not add a Module.
+        ir.add_import(ImportRelation::new("m", "helper"));
+
+        let file_id = build_graph(&mut graph, &ir, "m.py").unwrap();
+        assert!(find_node(&graph, NodeType::Module, "helper").is_none());
+        let helper = find_node(&graph, NodeType::Function, "helper").unwrap();
+        // The Imports edge targets the existing function node.
+        let import_edges: Vec<_> = graph
+            .get_edges_between(file_id, helper)
+            .unwrap()
+            .into_iter()
+            .filter(|id| graph.get_edge(*id).unwrap().edge_type == EdgeType::Imports)
+            .collect();
+        assert_eq!(import_edges.len(), 1);
     }
 }

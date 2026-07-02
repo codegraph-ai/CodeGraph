@@ -134,18 +134,8 @@ pub(crate) async fn analyze_impact(
                 if let Ok(edge_ids) = g.get_edges_between(source_id, start_node) {
                     for edge_id in edge_ids {
                         if let Ok(edge) = g.get_edge(edge_id) {
-                            let impact_type = match edge.edge_type {
-                                EdgeType::Calls => "caller",
-                                EdgeType::References => "reference",
-                                EdgeType::Extends => "subclass",
-                                EdgeType::Implements => "implementation",
-                                _ => "reference",
-                            };
-                            let severity = match change_type {
-                                "delete" | "rename" => "breaking",
-                                "modify" => "warning",
-                                _ => "info",
-                            };
+                            let impact_type = edge_impact_type(edge.edge_type);
+                            let severity = cross_project_severity(change_type);
                             if let Ok(ref_node) = g.get_node(source_id) {
                                 let name = node_props::name(ref_node).to_string();
                                 let path = node_props::path(ref_node).to_string();
@@ -225,15 +215,7 @@ pub(crate) async fn analyze_impact(
     // Use all_callers (depth 3) for risk_level to account for transitive call exposure
     // Cross-project consumers elevate risk (external breakage is harder to coordinate)
     let caller_count = all_callers.len();
-    let risk_level = match (change_type, caller_count) {
-        ("delete", n) if n > 10 => "critical",
-        ("delete", n) if n > 0 => "high",
-        ("rename", n) if n > 10 => "high",
-        ("rename", n) if n > 0 => "medium",
-        ("modify", n) if n > 20 => "medium",
-        ("modify", _) => "low",
-        _ => "low",
-    };
+    let risk_level = base_risk_level(change_type, caller_count);
 
     let (used_fallback_field, fallback_message) = if used_fallback {
         (
@@ -264,15 +246,7 @@ pub(crate) async fn analyze_impact(
 
     // Elevate risk when cross-project consumers exist — external breakage is
     // harder to coordinate than in-project changes
-    let risk_level = if !cross_project_impacts.is_empty() {
-        match risk_level {
-            "low" => "medium",
-            "medium" => "high",
-            _ => risk_level,
-        }
-    } else {
-        risk_level
-    };
+    let risk_level = escalate_risk_level(risk_level, !cross_project_impacts.is_empty());
 
     let total_impacted = direct_impacted + indirect_impacted.len() + cross_project_impacts.len();
 
@@ -291,6 +265,60 @@ pub(crate) async fn analyze_impact(
         warnings,
         used_fallback: used_fallback_field,
         fallback_message,
+    }
+}
+
+/// Map a change type to the cross-project impact severity label attached to
+/// every consumer found for that change. `delete`/`rename` break downstream
+/// callers (`breaking`), `modify` is a `warning`, and anything else is `info`.
+fn cross_project_severity(change_type: &str) -> &'static str {
+    match change_type {
+        "delete" | "rename" => "breaking",
+        "modify" => "warning",
+        _ => "info",
+    }
+}
+
+/// Classify an incoming edge into the `impact_type` label reported for a direct
+/// impact: callers via `Calls`, `subclass`/`implementation` for inheritance
+/// edges, and everything else (including `References`) as a plain `reference`.
+fn edge_impact_type(edge_type: EdgeType) -> &'static str {
+    match edge_type {
+        EdgeType::Calls => "caller",
+        EdgeType::References => "reference",
+        EdgeType::Extends => "subclass",
+        EdgeType::Implements => "implementation",
+        _ => "reference",
+    }
+}
+
+/// Compute the base risk level from the change type and the transitive caller
+/// count (depth-3 callers). Deletes are the most dangerous, renames next, and
+/// modifies least; a larger caller fan-out escalates within each change type.
+fn base_risk_level(change_type: &str, caller_count: usize) -> &'static str {
+    match (change_type, caller_count) {
+        ("delete", n) if n > 10 => "critical",
+        ("delete", n) if n > 0 => "high",
+        ("rename", n) if n > 10 => "high",
+        ("rename", n) if n > 0 => "medium",
+        ("modify", n) if n > 20 => "medium",
+        ("modify", _) => "low",
+        _ => "low",
+    }
+}
+
+/// Elevate the base risk one notch when cross-project consumers exist, since
+/// external breakage is harder to coordinate than in-project changes. Only
+/// `low`→`medium` and `medium`→`high` escalate; higher levels are unchanged.
+fn escalate_risk_level(base: &'static str, has_cross_project: bool) -> &'static str {
+    if has_cross_project {
+        match base {
+            "low" => "medium",
+            "medium" => "high",
+            _ => base,
+        }
+    } else {
+        base
     }
 }
 
@@ -363,11 +391,7 @@ fn find_cross_project_consumers(
         entries.len()
     );
 
-    let severity = match change_type {
-        "delete" | "rename" => "breaking",
-        "modify" => "warning",
-        _ => "info",
-    };
+    let severity = cross_project_severity(change_type);
 
     // Extract the base file name from source path for include matching
     // e.g., "/path/to/ice_common.h" → "ice_common.h"
@@ -507,4 +531,651 @@ fn find_cross_project_consumers(
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{NodeType, PropertyMap, PropertyValue};
+    use std::sync::Arc;
+
+    /// Slug that `find_cross_project_consumers` treats as ephemeral, so it
+    /// short-circuits before touching the shared on-disk graph.db — keeping
+    /// these tests deterministic and off the filesystem.
+    const EPHEMERAL_SLUG: &str = "codegraph-harness-test";
+
+    /// Add a node carrying the given key/value properties, returning its id.
+    fn add_node(graph: &mut CodeGraph, ty: NodeType, props: &[(&str, PropertyValue)]) -> NodeId {
+        let mut map = PropertyMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), v.clone());
+        }
+        graph.add_node(ty, map).expect("add_node")
+    }
+
+    fn str_prop(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    fn edge(graph: &mut CodeGraph, from: NodeId, to: NodeId, ty: EdgeType) {
+        graph
+            .add_edge(from, to, ty, PropertyMap::new())
+            .expect("add_edge");
+    }
+
+    /// Wrap a built graph in the Arc<RwLock<>> a QueryEngine owns and build the
+    /// call indexes so get_callers resolves depth-3 caller counts from Calls edges.
+    async fn engine_for(g: CodeGraph) -> (Arc<RwLock<CodeGraph>>, QueryEngine) {
+        let graph = Arc::new(RwLock::new(g));
+        let engine = QueryEngine::new(graph.clone());
+        engine.build_indexes().await;
+        (graph, engine)
+    }
+
+    #[tokio::test]
+    async fn missing_start_node_yields_empty_impact() {
+        let g = CodeGraph::in_memory().expect("in_memory");
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            999,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert!(result.symbol_name.is_empty());
+        assert!(result.impacted.is_empty());
+        assert!(result.indirect_impacted.is_empty());
+        assert_eq!(result.total_impacted, 0);
+        assert_eq!(result.direct_impacted, 0);
+        assert_eq!(result.files_affected, 0);
+        assert_eq!(result.risk_level, "low");
+        assert!(result.used_fallback.is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_caller_flagged_as_caller_impact() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.symbol_name, "target");
+        assert_eq!(result.impacted.len(), 1);
+        let sym = &result.impacted[0];
+        assert_eq!(sym.name, "caller");
+        assert_eq!(sym.impact_type, "caller");
+        assert_eq!(sym.severity, "warning");
+        assert_eq!(sym.depth, 1);
+        assert_eq!(sym.edge_type_str, "Calls");
+        assert_eq!(result.breaking_changes, 0);
+        assert_eq!(result.warnings, 1);
+        assert_eq!(result.files_affected, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_change_marks_breaking_and_elevates_risk() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "delete",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted[0].severity, "breaking");
+        assert_eq!(result.breaking_changes, 1);
+        // get_callers finds 1 caller at depth<=3 -> "delete" n>0 -> "high"
+        assert_eq!(result.risk_level, "high");
+    }
+
+    #[tokio::test]
+    async fn reference_edge_maps_to_reference_impact_type() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let referrer = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("referrer")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, referrer, target, EdgeType::References);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted.len(), 1);
+        assert_eq!(result.impacted[0].impact_type, "reference");
+        assert_eq!(result.impacted[0].edge_type_str, "References");
+        // References edges are not Calls, so get_callers is empty -> modify risk "low"
+        assert_eq!(result.risk_level, "low");
+    }
+
+    #[tokio::test]
+    async fn indirect_impact_reached_via_bfs_on_distinct_file() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        let indirect = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("indirect")), ("path", str_prop("b.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        edge(&mut g, indirect, caller, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.direct_impacted, 1);
+        assert_eq!(result.indirect_impacted.len(), 1);
+        let ind = &result.indirect_impacted[0];
+        assert_eq!(ind.path, "b.rs");
+        assert_eq!(ind.via_path, vec!["a.rs".to_string(), "b.rs".to_string()]);
+        assert_eq!(ind.severity, "warning");
+        // total = direct(1) + indirect(1); warnings = direct warning(1) + indirect(1)
+        assert_eq!(result.total_impacted, 2);
+        assert_eq!(result.warnings, 2);
+    }
+
+    #[tokio::test]
+    async fn indirect_impact_skipped_when_same_file_as_direct() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        // indirect shares the direct impact's file, so it is excluded
+        let indirect = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("indirect")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        edge(&mut g, indirect, caller, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.direct_impacted, 1);
+        assert!(result.indirect_impacted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn used_fallback_populates_message_with_requested_line() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            true,
+            Some(42),
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.used_fallback, Some(true));
+        let msg = result.fallback_message.expect("fallback message present");
+        assert!(msg.contains("line 42"), "message was: {msg}");
+        assert!(msg.contains("target"), "message was: {msg}");
+    }
+
+    #[tokio::test]
+    async fn distinct_caller_files_counted_once_each() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let c1 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("c1")), ("path", str_prop("a.rs"))],
+        );
+        let c2 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("c2")), ("path", str_prop("a.rs"))],
+        );
+        let c3 = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("c3")), ("path", str_prop("b.rs"))],
+        );
+        edge(&mut g, c1, target, EdgeType::Calls);
+        edge(&mut g, c2, target, EdgeType::Calls);
+        edge(&mut g, c3, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.direct_impacted, 3);
+        // three callers across two distinct files
+        assert_eq!(result.files_affected, 2);
+    }
+
+    #[tokio::test]
+    async fn test_caller_sets_is_test_flag() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("test_caller")),
+                ("path", str_prop("a_test.rs")),
+                ("is_test", PropertyValue::Bool(true)),
+            ],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted.len(), 1);
+        assert!(result.impacted[0].is_test);
+    }
+
+    #[tokio::test]
+    async fn extends_edge_maps_to_subclass_impact_type() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let base = add_node(&mut g, NodeType::Class, &[("name", str_prop("Base"))]);
+        let derived = add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", str_prop("Derived")), ("path", str_prop("d.rs"))],
+        );
+        edge(&mut g, derived, base, EdgeType::Extends);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            base,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted.len(), 1);
+        assert_eq!(result.impacted[0].impact_type, "subclass");
+        assert_eq!(result.impacted[0].edge_type_str, "Extends");
+        // Extends is not a Calls edge, so get_callers is empty -> modify risk "low"
+        assert_eq!(result.risk_level, "low");
+    }
+
+    #[tokio::test]
+    async fn implements_edge_maps_to_implementation_impact_type() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let iface = add_node(&mut g, NodeType::Interface, &[("name", str_prop("Iface"))]);
+        let impl_node = add_node(
+            &mut g,
+            NodeType::Class,
+            &[("name", str_prop("Impl")), ("path", str_prop("i.rs"))],
+        );
+        edge(&mut g, impl_node, iface, EdgeType::Implements);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            iface,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted.len(), 1);
+        assert_eq!(result.impacted[0].impact_type, "implementation");
+        assert_eq!(result.impacted[0].edge_type_str, "Implements");
+    }
+
+    #[tokio::test]
+    async fn contains_edge_falls_back_to_reference_impact_type() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let container = add_node(
+            &mut g,
+            NodeType::Module,
+            &[("name", str_prop("mod")), ("path", str_prop("m.rs"))],
+        );
+        // Contains has no explicit arm, so it falls through to the "reference" default
+        edge(&mut g, container, target, EdgeType::Contains);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted.len(), 1);
+        assert_eq!(result.impacted[0].impact_type, "reference");
+        assert_eq!(result.impacted[0].edge_type_str, "Contains");
+    }
+
+    #[tokio::test]
+    async fn rename_change_marks_breaking_with_medium_risk() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "rename",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.impacted[0].severity, "breaking");
+        assert_eq!(result.breaking_changes, 1);
+        // "rename" with 1 caller (0 < n <= 10) -> "medium"
+        assert_eq!(result.risk_level, "medium");
+    }
+
+    #[tokio::test]
+    async fn line_and_column_positions_propagate_to_impacted_symbol() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[
+                ("name", str_prop("caller")),
+                ("path", str_prop("a.rs")),
+                ("line_start", PropertyValue::Int(12)),
+                ("line_end", PropertyValue::Int(20)),
+                ("col_start", PropertyValue::Int(4)),
+                ("col_end", PropertyValue::Int(8)),
+            ],
+        );
+        edge(&mut g, caller, target, EdgeType::Calls);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        let sym = &result.impacted[0];
+        assert_eq!(sym.line_start, 12);
+        assert_eq!(sym.line_end, 20);
+        assert_eq!(sym.col_start, 4);
+        assert_eq!(sym.col_end, 8);
+    }
+
+    #[tokio::test]
+    async fn used_fallback_with_no_requested_line_reports_line_zero() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            true,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.used_fallback, Some(true));
+        let msg = result.fallback_message.expect("fallback message present");
+        assert!(msg.contains("line 0"), "message was: {msg}");
+    }
+
+    #[tokio::test]
+    async fn multiple_edges_between_pair_yield_two_impacts() {
+        let mut g = CodeGraph::in_memory().expect("in_memory");
+        let target = add_node(&mut g, NodeType::Function, &[("name", str_prop("target"))]);
+        let caller = add_node(
+            &mut g,
+            NodeType::Function,
+            &[("name", str_prop("caller")), ("path", str_prop("a.rs"))],
+        );
+        // Two distinct edge types between the same pair; get_edges_between returns
+        // both, so each yields its own impacted entry.
+        edge(&mut g, caller, target, EdgeType::Calls);
+        edge(&mut g, caller, target, EdgeType::References);
+        let (graph, engine) = engine_for(g).await;
+
+        let result = analyze_impact(
+            &graph,
+            &engine,
+            target,
+            "modify",
+            false,
+            None,
+            Some(EPHEMERAL_SLUG),
+        )
+        .await;
+
+        assert_eq!(result.direct_impacted, 2);
+        let types: HashSet<&str> = result
+            .impacted
+            .iter()
+            .map(|i| i.impact_type.as_str())
+            .collect();
+        assert!(types.contains("caller"));
+        assert!(types.contains("reference"));
+        // both edges emanate from the same file
+        assert_eq!(result.files_affected, 1);
+    }
+
+    // ---- find_cross_project_consumers early-return guards --------------
+
+    #[test]
+    fn cross_project_empty_symbol_short_circuits_before_any_lookup() {
+        // An empty symbol name returns no consumers regardless of the slug —
+        // this guard runs before the ephemeral-slug check and any graph.db
+        // access, so a non-ephemeral slug here proves the empty-name branch
+        // (not the slug branch) is what short-circuits.
+        let out =
+            find_cross_project_consumers("", Some("src/lib.rs"), "modify", Some("real-project"));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn cross_project_ephemeral_slug_short_circuits_with_nonempty_symbol() {
+        // A non-empty symbol under an ephemeral (harness tempdir) slug still
+        // yields nothing: cross-project answers from leftover slugs in the
+        // shared graph.db are noise for an isolated test workspace. Pinned
+        // directly here rather than only via analyze_impact.
+        let out = find_cross_project_consumers(
+            "do_work",
+            Some("src/lib.rs"),
+            "delete",
+            Some(EPHEMERAL_SLUG),
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn cross_project_severity_breaking_for_delete_and_rename() {
+        // Both destructive changes break downstream callers.
+        assert_eq!(cross_project_severity("delete"), "breaking");
+        assert_eq!(cross_project_severity("rename"), "breaking");
+    }
+
+    #[test]
+    fn cross_project_severity_warning_for_modify() {
+        assert_eq!(cross_project_severity("modify"), "warning");
+    }
+
+    #[test]
+    fn cross_project_severity_info_for_unknown_and_used() {
+        // Anything outside the known destructive/modify set is informational,
+        // including the "used" fallback change type and empty/arbitrary input.
+        assert_eq!(cross_project_severity("used"), "info");
+        assert_eq!(cross_project_severity(""), "info");
+        assert_eq!(cross_project_severity("Delete"), "info"); // case-sensitive
+    }
+
+    #[test]
+    fn edge_impact_type_maps_each_edge_kind() {
+        assert_eq!(edge_impact_type(EdgeType::Calls), "caller");
+        assert_eq!(edge_impact_type(EdgeType::References), "reference");
+        assert_eq!(edge_impact_type(EdgeType::Extends), "subclass");
+        assert_eq!(edge_impact_type(EdgeType::Implements), "implementation");
+    }
+
+    #[test]
+    fn edge_impact_type_falls_back_to_reference_for_other_edges() {
+        // Any edge type outside the four classified kinds is a plain reference.
+        assert_eq!(edge_impact_type(EdgeType::Imports), "reference");
+        assert_eq!(edge_impact_type(EdgeType::Contains), "reference");
+    }
+
+    #[test]
+    fn base_risk_level_delete_scales_with_caller_count() {
+        assert_eq!(base_risk_level("delete", 11), "critical"); // n > 10
+        assert_eq!(base_risk_level("delete", 10), "high"); // 0 < n <= 10
+        assert_eq!(base_risk_level("delete", 1), "high");
+        assert_eq!(base_risk_level("delete", 0), "low"); // no callers -> catch-all
+    }
+
+    #[test]
+    fn base_risk_level_rename_scales_with_caller_count() {
+        assert_eq!(base_risk_level("rename", 11), "high"); // n > 10
+        assert_eq!(base_risk_level("rename", 10), "medium"); // 0 < n <= 10
+        assert_eq!(base_risk_level("rename", 1), "medium");
+        assert_eq!(base_risk_level("rename", 0), "low"); // no callers -> catch-all
+    }
+
+    #[test]
+    fn base_risk_level_modify_and_unknown() {
+        assert_eq!(base_risk_level("modify", 21), "medium"); // n > 20
+        assert_eq!(base_risk_level("modify", 20), "low"); // modify catch-all
+        assert_eq!(base_risk_level("modify", 0), "low");
+        assert_eq!(base_risk_level("used", 999), "low"); // unknown change type
+    }
+
+    #[test]
+    fn escalate_risk_level_bumps_one_notch_only_with_cross_project() {
+        // With cross-project consumers, low->medium and medium->high.
+        assert_eq!(escalate_risk_level("low", true), "medium");
+        assert_eq!(escalate_risk_level("medium", true), "high");
+        // High and critical are already the ceiling and stay put.
+        assert_eq!(escalate_risk_level("high", true), "high");
+        assert_eq!(escalate_risk_level("critical", true), "critical");
+    }
+
+    #[test]
+    fn escalate_risk_level_no_change_without_cross_project() {
+        assert_eq!(escalate_risk_level("low", false), "low");
+        assert_eq!(escalate_risk_level("medium", false), "medium");
+        assert_eq!(escalate_risk_level("critical", false), "critical");
+    }
 }

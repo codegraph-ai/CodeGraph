@@ -165,4 +165,78 @@ proc caller {} {
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn test_extract_module_metadata_fields() {
+        // The name/language pair is pinned by test_extract_module_info; this pins the
+        // remaining ModuleEntity fields extract() assembles directly: path, line_count,
+        // doc_comment and attributes.
+        let source = "proc foo {} {}\nproc bar {} {}\n";
+        let config = ParserConfig::default();
+        let (ir, _extra) = extract(source, Path::new("dir/mod.tcl"), &config).unwrap();
+
+        let module = ir.module.expect("module should be present");
+        assert_eq!(module.path, Path::new("dir/mod.tcl").display().to_string());
+        assert_eq!(module.line_count, source.lines().count());
+        assert_eq!(module.line_count, 2);
+        assert!(module.doc_comment.is_none());
+        assert!(module.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_extract_unknown_module_fallback() {
+        // An empty path has no file_stem, so the module name resolves to the "unknown"
+        // literal fallback — a branch every other test skips by passing a real filename.
+        let config = ParserConfig::default();
+        let (ir, _extra) = extract("proc foo {} {}", Path::new(""), &config).unwrap();
+
+        let module = ir.module.expect("module should be present");
+        assert_eq!(module.name, "unknown");
+        assert_eq!(module.language, "tcl");
+    }
+
+    #[test]
+    fn test_extract_empty_source() {
+        // Empty source parses to a valid empty tree (no ParseError); line_count is 0 and
+        // no entities of any kind are produced.
+        let config = ParserConfig::default();
+        let (ir, extra) = extract("", Path::new("empty.tcl"), &config).unwrap();
+
+        let module = ir.module.expect("module should be present");
+        assert_eq!(module.name, "empty");
+        assert_eq!(module.line_count, 0);
+        assert!(ir.functions.is_empty());
+        assert!(ir.classes.is_empty());
+        assert!(ir.imports.is_empty());
+        assert!(ir.calls.is_empty());
+        assert!(extra.sdc.clocks.is_empty());
+        assert!(extra.eda.design_reads.is_empty());
+    }
+
+    #[test]
+    fn test_extract_line_count_tracks_source_lines() {
+        // line_count is derived from source.lines().count(), independent of how many
+        // entities are extracted — a blank-line-heavy source with a single proc.
+        let source = "\n\n\nproc solo {} {}\n\n";
+        let config = ParserConfig::default();
+        let (ir, _extra) = extract(source, Path::new("blanks.tcl"), &config).unwrap();
+
+        let module = ir.module.expect("module should be present");
+        assert_eq!(module.line_count, source.lines().count());
+        assert_eq!(module.line_count, 5);
+        assert_eq!(ir.functions.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_no_imports_for_plain_proc() {
+        // ir.imports is populated from visitor.imports; a plain proc with no package
+        // require or EDA design-read command leaves it empty — the mirror of the
+        // non-empty import assertion in test_extract_eda_flow.
+        let source = "proc foo {} {\n    set x 1\n}";
+        let config = ParserConfig::default();
+        let (ir, _extra) = extract(source, Path::new("plain.tcl"), &config).unwrap();
+
+        assert!(ir.imports.is_empty());
+        assert_eq!(ir.functions.len(), 1);
+    }
 }
