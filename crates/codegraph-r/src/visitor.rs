@@ -604,6 +604,15 @@ mod tests {
     }
 
     #[test]
+    fn test_vectorized_or_not_counted() {
+        // A single `|` is R's vectorized OR and must not raise complexity,
+        // unlike the scalar `||`.
+        let plain = b"f <- function(a, b) {\n    a\n}";
+        let vectorized = b"g <- function(a, b) {\n    a | b\n}";
+        assert_eq!(complexity_of(vectorized), complexity_of(plain));
+    }
+
+    #[test]
     fn test_trycatch_exception_handler_complexity() {
         let plain = b"f <- function(x) {\n    x\n}";
         let guarded = b"g <- function(x) {\n    tryCatch(x, error = function(e) NULL)\n}";

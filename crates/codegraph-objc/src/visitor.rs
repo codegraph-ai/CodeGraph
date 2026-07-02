@@ -953,6 +953,29 @@ mod tests {
     }
 
     #[test]
+    fn test_method_complexity_logical_or_operator() {
+        let source = br#"
+@implementation MyClass
+- (void)either:(BOOL)a with:(BOOL)b {
+    if (a || b) {
+        return;
+    }
+}
+@end
+"#;
+        let visitor = parse_and_visit(source);
+        let m = visitor
+            .functions
+            .iter()
+            .find(|f| f.name == "either")
+            .unwrap();
+        let complexity = m.complexity.as_ref().unwrap();
+        // if branch (+1) plus the || logical operator (+1) over the base of 1.
+        assert!(complexity.logical_operators >= 1);
+        assert!(complexity.cyclomatic_complexity >= 3);
+    }
+
+    #[test]
     fn test_multiple_imports_order() {
         let source = br#"
 #import <Foundation/Foundation.h>
