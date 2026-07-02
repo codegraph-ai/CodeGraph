@@ -294,6 +294,17 @@ pub(crate) async fn analyze_impact(
     }
 }
 
+/// Map a change type to the cross-project impact severity label attached to
+/// every consumer found for that change. `delete`/`rename` break downstream
+/// callers (`breaking`), `modify` is a `warning`, and anything else is `info`.
+fn cross_project_severity(change_type: &str) -> &'static str {
+    match change_type {
+        "delete" | "rename" => "breaking",
+        "modify" => "warning",
+        _ => "info",
+    }
+}
+
 /// Search other indexed projects for functions that call, reference, or include
 /// the given symbol.
 ///
@@ -363,11 +374,7 @@ fn find_cross_project_consumers(
         entries.len()
     );
 
-    let severity = match change_type {
-        "delete" | "rename" => "breaking",
-        "modify" => "warning",
-        _ => "info",
-    };
+    let severity = cross_project_severity(change_type);
 
     // Extract the base file name from source path for include matching
     // e.g., "/path/to/ice_common.h" → "ice_common.h"
@@ -1076,5 +1083,26 @@ mod tests {
             Some(EPHEMERAL_SLUG),
         );
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn cross_project_severity_breaking_for_delete_and_rename() {
+        // Both destructive changes break downstream callers.
+        assert_eq!(cross_project_severity("delete"), "breaking");
+        assert_eq!(cross_project_severity("rename"), "breaking");
+    }
+
+    #[test]
+    fn cross_project_severity_warning_for_modify() {
+        assert_eq!(cross_project_severity("modify"), "warning");
+    }
+
+    #[test]
+    fn cross_project_severity_info_for_unknown_and_used() {
+        // Anything outside the known destructive/modify set is informational,
+        // including the "used" fallback change type and empty/arbitrary input.
+        assert_eq!(cross_project_severity("used"), "info");
+        assert_eq!(cross_project_severity(""), "info");
+        assert_eq!(cross_project_severity("Delete"), "info"); // case-sensitive
     }
 }
