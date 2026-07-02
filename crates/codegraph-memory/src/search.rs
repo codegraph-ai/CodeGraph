@@ -614,4 +614,111 @@ mod tests {
         assert!(MemoryKindFilter::DebugContext.matches(&kind));
         assert!(!MemoryKindFilter::ArchitecturalDecision.matches(&kind));
     }
+
+    /// Build a store backed by a real (cached) engine and seed it with memories.
+    async fn store_with_memories(mems: Vec<MemoryNode>) -> Arc<MemoryStore> {
+        use crate::embedding::VectorEngine;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = Arc::new(MemoryStore::new(temp_dir.path(), engine).expect("create store"));
+        std::mem::forget(temp_dir);
+        for m in mems {
+            store.put(m).await.expect("put memory");
+        }
+        store
+    }
+
+    #[tokio::test]
+    async fn test_search_ranks_matches_and_reports_reasons() {
+        // The full hybrid `search` path had no coverage: prior tests only
+        // exercised the BM25 index and the private graph-score helper in
+        // isolation. Two clearly distinct memories plus a query overlapping the
+        // first should rank it above the second and attach both a text and a
+        // semantic match reason.
+        let store = store_with_memories(vec![
+            mem(
+                "database migration",
+                "how to run the schema migration tool",
+                &[],
+            ),
+            mem(
+                "holiday recipe",
+                "baking cookies with sugar and butter",
+                &[],
+            ),
+        ])
+        .await;
+        let search = MemorySearch::new(store).expect("create search");
+
+        let results = search
+            .search("database migration schema", &[], &SearchConfig::default())
+            .expect("search");
+
+        assert!(!results.is_empty(), "expected at least one result");
+        assert_eq!(
+            results[0].memory.title, "database migration",
+            "the text-overlapping memory should rank first"
+        );
+        // The top result matched both on text (BM25 index built from the
+        // corpus) and semantically, so both reasons fire.
+        assert!(results[0]
+            .match_reasons
+            .iter()
+            .any(|r| matches!(r, MatchReason::TextMatch { .. })));
+        assert!(results[0]
+            .match_reasons
+            .iter()
+            .any(|r| matches!(r, MatchReason::SemanticSimilarity { .. })));
+        // A weighted score is strictly positive once any reason fired.
+        assert!(results[0].score > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_index_registers_new_memory_for_text_match() {
+        // `rebuild_index` had no direct coverage. Its sole effect is refreshing
+        // the BM25 index from the store: the semantic (HNSW) side updates on
+        // `put`, but BM25 stays stale until rebuilt. Insert a memory after the
+        // index was built, then confirm a text match only appears post-rebuild.
+        let store = store_with_memories(vec![]).await;
+        let mut search = MemorySearch::new(store.clone()).expect("create search");
+
+        store
+            .put(mem(
+                "rustlang parser",
+                "tree-sitter incremental parsing engine",
+                &[],
+            ))
+            .await
+            .expect("put");
+
+        let query = "rustlang parser tree-sitter";
+        let before = search
+            .search(query, &[], &SearchConfig::default())
+            .expect("search before rebuild");
+        // Found semantically, but with no TextMatch since BM25 is stale.
+        assert_eq!(before.len(), 1);
+        assert!(
+            !before[0]
+                .match_reasons
+                .iter()
+                .any(|r| matches!(r, MatchReason::TextMatch { .. })),
+            "BM25 index should not know the memory before rebuild"
+        );
+
+        search.rebuild_index().expect("rebuild");
+
+        let after = search
+            .search(query, &[], &SearchConfig::default())
+            .expect("search after rebuild");
+        assert_eq!(after.len(), 1);
+        assert!(
+            after[0]
+                .match_reasons
+                .iter()
+                .any(|r| matches!(r, MatchReason::TextMatch { .. })),
+            "rebuilt BM25 index should now yield a text match"
+        );
+    }
 }
