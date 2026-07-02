@@ -812,4 +812,73 @@ mod tests {
         assert_eq!(result["functions"], json!([]));
         assert_eq!(result["fileSummary"]["totalFunctions"], json!(0));
     }
+
+    // The final two dispatch arms — getAIContext and getDetailedSymbolInfo — differ
+    // from the arms above: on an empty graph their handlers map a not-found symbol to
+    // an error, so the `serde_to_value` line never runs. Populating the graph with a
+    // real indexed function lets a valid request thread all the way through
+    // deserialize → handle → to_value, covering the success arm end-to-end.
+
+    /// Index a single-function source file into `backend` and return its file:// URI.
+    async fn index_hello_fn(backend: &CodeGraphBackend) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("sample.rs");
+        std::fs::write(&file, "fn hello() -> i32 { 1 }\n").expect("write file");
+        let result = backend
+            .handle_custom_request(
+                "codegraph/indexFiles",
+                json!({ "files": [file.to_string_lossy()] }),
+            )
+            .await
+            .expect("indexing should dispatch");
+        assert_eq!(result["files_indexed"], json!(1));
+        let uri = tower_lsp::lsp_types::Url::from_file_path(&file)
+            .expect("file path should form a URI")
+            .to_string();
+        (dir, uri)
+    }
+
+    /// Look up the graph NodeId of the indexed `hello` function by name.
+    async fn hello_node_id(backend: &CodeGraphBackend) -> String {
+        let graph = backend.graph.read().await;
+        let id = graph
+            .nodes_iter()
+            .find(|(_, node)| node.properties.get_string("name") == Some("hello"))
+            .map(|(id, _)| *id)
+            .expect("indexed graph should contain the hello function node");
+        id.to_string()
+    }
+
+    #[tokio::test]
+    async fn get_ai_context_dispatch_returns_primary_context_for_indexed_symbol() {
+        let backend = test_backend();
+        let (_dir, uri) = index_hello_fn(&backend).await;
+        // With the graph populated, the nearest-node lookup resolves to `hello`, so the
+        // handler returns Ok and the dispatch arm serializes a full response. The domain
+        // resolver compares the raw `line` against 1-indexed graph rows, so line 1 lands
+        // inside hello's tightest range.
+        let result = backend
+            .handle_custom_request("codegraph/getAIContext", json!({ "uri": uri, "line": 1 }))
+            .await
+            .expect("valid params over a populated graph should dispatch and serialize");
+        assert_eq!(result["primaryContext"]["name"], json!("hello"));
+    }
+
+    #[tokio::test]
+    async fn get_detailed_symbol_info_dispatch_returns_symbol_for_indexed_node() {
+        let backend = test_backend();
+        let (_dir, _uri) = index_hello_fn(&backend).await;
+        // A directly-supplied NodeId parses without touching the symbol index (which
+        // indexFiles does not populate), so get_symbol_info yields Some(..) and the
+        // dispatch arm reaches the final to_value serialization.
+        let node_id = hello_node_id(&backend).await;
+        let result = backend
+            .handle_custom_request(
+                "codegraph/getDetailedSymbolInfo",
+                json!({ "nodeId": node_id }),
+            )
+            .await
+            .expect("valid params over a populated graph should dispatch and serialize");
+        assert_eq!(result["symbol"]["name"], json!("hello"));
+    }
 }
