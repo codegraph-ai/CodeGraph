@@ -1064,4 +1064,47 @@ mod tests {
         );
         assert!(results.iter().any(|(rid, _)| rid == &id));
     }
+
+    /// Invalidating an id the store has never seen is a silent no-op: the
+    /// `if let Some(entry) = get_mut(id)` guard in `invalidate` takes its None
+    /// arm, so nothing is written and no error is raised. Every prior
+    /// invalidate test operated on an id returned by a preceding `put`, so the
+    /// missing-id arm was never exercised.
+    #[tokio::test]
+    async fn test_invalidate_missing_id_is_noop() {
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        // No memory with this id exists; invalidate must succeed and change nothing.
+        store
+            .invalidate("never-stored", "no such memory")
+            .expect("invalidate of missing id returns Ok");
+
+        let stats = store.stats();
+        assert_eq!(stats["totalMemories"], 0);
+        assert_eq!(stats["currentMemories"], 0);
+        assert_eq!(stats["invalidatedMemories"], 0);
+        assert!(store.get_all_memories(false).is_empty());
+    }
+
+    /// On a fresh store the HNSW index is `None` (no memories have been put),
+    /// so `semantic_search` takes the `None => linear_search(...)` fallback arm
+    /// rather than the HNSW path. With an empty vector cache the linear search
+    /// yields nothing. The existing search test always puts a memory first,
+    /// building the index and covering only the `Some(idx)` arm.
+    #[tokio::test]
+    async fn test_semantic_search_empty_store_uses_linear_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let engine = Arc::new(VectorEngine::new(None).expect("create engine"));
+        let store = MemoryStore::new(temp_dir.path(), engine).expect("create store");
+
+        // An arbitrary query vector: the linear fallback over an empty vector
+        // cache returns empty regardless of dimension.
+        let results = store.semantic_search(&[0.1_f32; 8], 5);
+        assert!(
+            results.is_empty(),
+            "empty store must return no search results via the linear fallback"
+        );
+    }
 }
