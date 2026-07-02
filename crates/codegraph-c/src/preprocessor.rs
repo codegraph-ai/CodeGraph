@@ -1058,4 +1058,44 @@ typedef struct { int x; } inline_struct;";
         sorted.sort();
         assert_eq!(names, sorted);
     }
+
+    #[test]
+    fn test_process_line_returns_blank_line_verbatim() {
+        let pp = CPreprocessor::new();
+        // The empty/whitespace-only guard returns the original line untouched,
+        // preserving its leading whitespace (no trimming applied to the output).
+        assert_eq!(pp.process_line("    "), "    ");
+        assert_eq!(pp.process_line(""), "");
+    }
+
+    #[test]
+    fn test_process_line_strips_function_like_attribute_macro() {
+        let pp = CPreprocessor::new();
+        // __section is a registered attribute macro; the function-like `__section(...)`
+        // form is removed via paren matching (the pattern-ends-with-'(' arm), unlike
+        // the plain `__init` form which is a simple substring replace.
+        let out = pp.process_line("int foo __section(\".text\") bar;");
+        assert!(!out.contains("__section"));
+        assert!(out.contains("int foo"));
+        assert!(out.contains("bar;"));
+    }
+
+    #[test]
+    fn test_process_line_leaves_unbalanced_offsetof_unchanged() {
+        let pp = CPreprocessor::new();
+        // An offsetof with no matching close paren hits the end_paren==0 break arm,
+        // leaving the line unchanged rather than rewriting to 0.
+        let line = "int x = offsetof(struct s";
+        assert_eq!(pp.process_line(line), line);
+    }
+
+    #[test]
+    fn test_process_line_container_of_without_comma_defaults_ptr() {
+        let pp = CPreprocessor::new();
+        // With no first comma, container_of's ptr argument defaults to the literal
+        // "ptr" rather than the (absent) first argument text.
+        let out = pp.process_line("x = container_of(single);");
+        assert!(!out.contains("container_of"));
+        assert!(out.contains("((void*)ptr)"));
+    }
 }
