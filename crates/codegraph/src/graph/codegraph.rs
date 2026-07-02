@@ -1038,6 +1038,20 @@ mod tests {
     }
 
     #[test]
+    fn update_node_properties_on_missing_node_errors() {
+        // The merge-and-overwrite test only exercises the happy path; the
+        // NodeNotFound arm that update_node_properties propagates from
+        // get_node_mut (before any storage.put) is otherwise unhit.
+        let mut g = graph();
+        match g.update_node_properties(404, named("ghost")) {
+            Err(GraphError::NodeNotFound { node_id }) => assert_eq!(node_id, "404"),
+            other => panic!("expected NodeNotFound, got {other:?}"),
+        }
+        // Nothing was written, so the node still doesn't exist.
+        assert!(g.get_node(404).is_err());
+    }
+
+    #[test]
     fn add_and_get_edge_roundtrips() {
         let mut g = graph();
         let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
@@ -1171,6 +1185,17 @@ mod tests {
         let between = g.get_edges_between(a, b).unwrap();
         assert_eq!(between.len(), 2);
         assert!(between.contains(&e1) && between.contains(&e2));
+    }
+
+    #[test]
+    fn get_edges_between_isolated_nodes_is_empty() {
+        // filters_by_target always has an adjacency_out entry for the source;
+        // two nodes with no edges at all drive the `if let Some(out_edges)`
+        // None arm, which returns an empty vec instead of iterating.
+        let mut g = graph();
+        let a = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        let b = g.add_node(NodeType::Function, PropertyMap::new()).unwrap();
+        assert!(g.get_edges_between(a, b).unwrap().is_empty());
     }
 
     #[test]
