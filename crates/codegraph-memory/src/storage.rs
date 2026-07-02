@@ -555,6 +555,44 @@ mod tests {
         assert_eq!(cosine_similarity(&zero, &zero), 0.0);
     }
 
+    #[test]
+    fn memory_point_distance_is_one_minus_cosine_similarity() {
+        // MemoryPoint::distance is the HNSW metric: cosine *distance* = 1 - similarity,
+        // so that the index's minimum-distance search returns the most-similar points.
+        let p = |v: Vec<f32>| MemoryPoint {
+            id: "p".to_string(),
+            vector: v,
+        };
+        // Identical direction -> similarity 1.0 -> distance 0.0.
+        assert!((p(vec![1.0, 0.0, 0.0]).distance(&p(vec![1.0, 0.0, 0.0]))).abs() < 0.001);
+        // Orthogonal -> similarity 0.0 -> distance 1.0.
+        assert!((p(vec![1.0, 0.0, 0.0]).distance(&p(vec![0.0, 1.0, 0.0])) - 1.0).abs() < 0.001);
+        // Opposite -> similarity -1.0 -> distance 2.0 (the metric's maximum).
+        assert!((p(vec![1.0, 0.0, 0.0]).distance(&p(vec![-1.0, 0.0, 0.0])) - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn memory_point_distance_degenerate_operands_fall_back_to_one() {
+        // When cosine_similarity short-circuits to 0.0 (dimension mismatch or a
+        // zero-norm operand), the derived distance is 1 - 0.0 = 1.0 rather than
+        // NaN or a panic, keeping the HNSW metric well-defined.
+        let mismatched = MemoryPoint {
+            id: "a".to_string(),
+            vector: vec![1.0, 0.0, 0.0],
+        };
+        let shorter = MemoryPoint {
+            id: "b".to_string(),
+            vector: vec![1.0, 0.0],
+        };
+        assert_eq!(mismatched.distance(&shorter), 1.0);
+
+        let zero = MemoryPoint {
+            id: "z".to_string(),
+            vector: vec![0.0, 0.0, 0.0],
+        };
+        assert_eq!(mismatched.distance(&zero), 1.0);
+    }
+
     /// Test that MemoryNode serializes/deserializes correctly with JSON
     #[test]
     fn test_memory_node_json_roundtrip() {
