@@ -345,4 +345,44 @@ mod tests {
         assert_eq!(meta.commit_hash, deserialized.commit_hash);
         assert_eq!(meta.version_tag, deserialized.version_tag);
     }
+
+    #[test]
+    fn test_was_current_at() {
+        // was_current_at is the transaction-time analogue of was_valid_at but was
+        // never exercised; it gates on created_at/superseded_at rather than
+        // valid_at/invalid_at.
+        let mut meta = TemporalMetadata::new_current();
+        let now = Utc::now();
+        meta.created_at = now - Duration::hours(2);
+
+        // superseded_at == None: current at any instant at/after creation...
+        assert!(meta.was_current_at(now));
+        assert!(meta.was_current_at(now - Duration::hours(1)));
+        // ...but not before the record existed (created_before false arm).
+        assert!(!meta.was_current_at(now - Duration::hours(3)));
+
+        // superseded_at == Some: current only strictly before supersession.
+        meta.superseded_at = Some(now - Duration::hours(1));
+        assert!(meta.was_current_at(now - Duration::minutes(90)));
+        assert!(!meta.was_current_at(now));
+    }
+
+    #[test]
+    fn test_code_change_type_action_confidence_and_remaining_actions() {
+        use CodeChangeType::*;
+
+        // action_confidence was entirely untested; pin every variant's weight.
+        assert_eq!(Deleted.action_confidence(), 1.0);
+        assert_eq!(SignatureChanged.action_confidence(), 0.9);
+        assert_eq!(MajorRefactor.action_confidence(), 0.8);
+        assert_eq!(MinorEdit.action_confidence(), 0.0);
+        assert_eq!(Renamed.action_confidence(), 0.7);
+        assert_eq!(Moved.action_confidence(), 0.7);
+
+        // suggested_action arms the existing test omitted (only Deleted /
+        // SignatureChanged / MinorEdit were covered).
+        assert_eq!(MajorRefactor.suggested_action(), SuggestedAction::Review);
+        assert_eq!(Renamed.suggested_action(), SuggestedAction::Update);
+        assert_eq!(Moved.suggested_action(), SuggestedAction::Update);
+    }
 }
