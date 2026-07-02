@@ -448,6 +448,43 @@ mod tests {
     }
 
     #[test]
+    fn make_workspace_multi_file_from_file_copies_parent_dir() {
+        // MultiFile layout pointed at a *file* (not a directory) copies the
+        // file's parent directory tree — the `else` arm of the is_dir()
+        // branch (line ~230), which every prior multi_file test skipped by
+        // pointing the fixture straight at a directory.
+        let fixtures = tempfile::tempdir().unwrap();
+        let proj = fixtures.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(proj.join("helper.rs"), "fn help() {}").unwrap();
+        // Fixture names a single file inside the directory.
+        let s = setup("proj/main.rs", WorkspaceLayout::MultiFile);
+
+        let ws = make_workspace(&s, fixtures.path()).expect("make_workspace");
+        // Both siblings land in the workspace root because the whole parent
+        // directory was copied, not just the named file.
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("main.rs")).unwrap(),
+            "fn main() {}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("helper.rs")).unwrap(),
+            "fn help() {}"
+        );
+    }
+
+    #[test]
+    fn resolve_fixture_path_errors_when_fixture_has_no_filename() {
+        // A fixture string with no final path component (empty here) makes
+        // Path::file_name() return None, hitting the error arm — untested
+        // because every other case supplies a real filename.
+        let s = setup("", WorkspaceLayout::SingleFile);
+        let err = resolve_fixture_path(&s, Path::new("/tmp/ws")).unwrap_err();
+        assert!(err.to_string().contains("fixture has no filename"));
+    }
+
+    #[test]
     fn copy_dir_recursive_preserves_nested_structure() {
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
