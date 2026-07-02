@@ -1141,6 +1141,21 @@ end
     }
 
     #[test]
+    fn test_complexity_word_logical_operators() {
+        // Ruby's word forms `and`/`or` count as logical operators like &&/||
+        let source = b"def valid?(a, b)\n  a and b or false\nend";
+        let visitor = parse_and_visit(source);
+
+        assert_eq!(visitor.functions.len(), 1);
+        let complexity = visitor.functions[0].complexity.as_ref().unwrap();
+        assert!(
+            complexity.logical_operators >= 2,
+            "expected `and` and `or` counted, got {}",
+            complexity.logical_operators
+        );
+    }
+
+    #[test]
     fn test_visitor_body_prefix_truncated() {
         // An oversized method body is truncated to exactly BODY_PREFIX_MAX_CHARS
         let filler = "a".repeat(BODY_PREFIX_MAX_CHARS + 100);
