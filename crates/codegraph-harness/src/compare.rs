@@ -452,4 +452,57 @@ mod tests {
         // The truncation marker proves the >80-byte branch ran.
         assert!(r.diff.contains("..."), "diff: {}", r.diff);
     }
+
+    #[test]
+    fn truncate_for_diff_passes_short_values_through() {
+        // A short scalar stays under the 80-byte threshold, so the else
+        // branch returns the JSON rendering verbatim (quotes included).
+        assert_eq!(truncate_for_diff(&json!("hello")), "\"hello\"");
+        assert_eq!(truncate_for_diff(&json!(42)), "42");
+    }
+
+    #[test]
+    fn truncate_for_diff_cuts_ascii_at_77_bytes() {
+        // A 100-char string renders to 102 bytes with quotes, over 80.
+        // Every byte is a char boundary, so the slice is taken at 77:
+        // the opening quote plus 76 'a's, then the "..." marker.
+        let v = json!("a".repeat(100));
+        let expected = format!("\"{}...", "a".repeat(76));
+        assert_eq!(truncate_for_diff(&v), expected);
+    }
+
+    #[test]
+    fn truncate_for_diff_backs_off_to_char_boundary() {
+        // 40 euro signs -> 122 bytes with quotes. Byte 77 lands mid-char,
+        // so the boundary loop walks back to 76: quote + 25 full euros.
+        let v = json!("€".repeat(40));
+        let expected = format!("\"{}...", "€".repeat(25));
+        assert_eq!(truncate_for_diff(&v), expected);
+    }
+
+    #[test]
+    fn prefix_lines_prefixes_every_line() {
+        assert_eq!(prefix_lines("a\nb\nc", "> "), "> a\n> b\n> c");
+        // A single line with no newline still gets the prefix.
+        assert_eq!(prefix_lines("solo", "# "), "# solo");
+    }
+
+    #[test]
+    fn format_diff_includes_value_blocks_only_in_exact_mode() {
+        let errors = vec!["root.a: mismatch".to_string()];
+        let actual = json!({"a": 2});
+        let expected = json!({"a": 1});
+
+        let exact = format_diff(&errors, &actual, &expected, MatchMode::Exact);
+        assert!(exact.contains("match mode: Exact"));
+        assert!(exact.contains("root.a: mismatch"));
+        assert!(exact.contains("--- expected"));
+        assert!(exact.contains("+++ actual"));
+
+        // Non-exact modes list mismatches but omit the expected/actual dumps.
+        let structural = format_diff(&errors, &actual, &expected, MatchMode::Structural);
+        assert!(structural.contains("root.a: mismatch"));
+        assert!(!structural.contains("--- expected"));
+        assert!(!structural.contains("+++ actual"));
+    }
 }
