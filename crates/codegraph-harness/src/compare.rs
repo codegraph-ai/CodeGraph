@@ -372,4 +372,42 @@ mod tests {
         assert!(!r.passed);
         assert!(r.diff.contains("string"));
     }
+
+    #[test]
+    fn substitute_placeholders_replaces_in_nested_structures() {
+        // Exercises all four arms of substitute_placeholders: String (both
+        // ${fixture} and ${workspace} tokens), Array recursion, Object
+        // recursion, and the `other` passthrough for non-string leaves.
+        let input = json!({
+            "path": "${workspace}/src/${fixture}.rs",
+            "list": ["${fixture}", "plain", 7],
+            "count": 3,
+            "flag": true,
+            "nothing": null,
+            "nested": { "file": "${workspace}/a" }
+        });
+        let out = substitute_placeholders(&input, "myfix", "/ws");
+        assert_eq!(out["path"], json!("/ws/src/myfix.rs"));
+        assert_eq!(out["list"][0], json!("myfix"));
+        assert_eq!(out["list"][1], json!("plain"));
+        // Non-string leaves pass through unchanged (the `other` arm).
+        assert_eq!(out["list"][2], json!(7));
+        assert_eq!(out["count"], json!(3));
+        assert_eq!(out["flag"], json!(true));
+        assert_eq!(out["nothing"], json!(null));
+        assert_eq!(out["nested"]["file"], json!("/ws/a"));
+    }
+
+    #[test]
+    fn diff_truncates_long_multibyte_scalar_without_panicking() {
+        // 40 euro signs -> ~122 bytes as a JSON string, over the 80-byte
+        // truncate_for_diff threshold. Byte 77 lands mid-char, so the
+        // char-boundary backoff loop must fire (a raw &s[..77] would panic).
+        let long_a = "€".repeat(40);
+        let long_b = "£".repeat(40);
+        let r = compare(&json!(long_a), &json!(long_b), MatchMode::Exact).unwrap();
+        assert!(!r.passed);
+        // The truncation marker proves the >80-byte branch ran.
+        assert!(r.diff.contains("..."), "diff: {}", r.diff);
+    }
 }
