@@ -1031,4 +1031,52 @@ mod tests {
             .get("is_entry_point")
             .is_none());
     }
+
+    #[test]
+    fn apply_kernel_macros_unknown_names_touch_nothing() {
+        // Non-empty lists (past the early-return guard) whose names match no
+        // function in the graph exercise the `func_map.get(name)` None arm of
+        // both loops: the existing function must stay unannotated.
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("real_fn", 1, 5));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.c").as_path()).unwrap();
+
+        apply_kernel_macros(
+            &mut graph,
+            &["ghost_init".to_string()],
+            &["ghost_export".to_string()],
+        );
+
+        let props = &graph.get_node(info.functions[0]).unwrap().properties;
+        assert!(props.get("is_entry_point").is_none());
+        assert!(props.get("is_exported").is_none());
+    }
+
+    #[test]
+    fn apply_kernel_macros_marks_only_the_matching_name() {
+        // One real entry-point name plus an unknown exported name: the real
+        // function is marked as an entry point while the miss on the exported
+        // loop leaves it without export annotations.
+        let mut ir = CodeIR::new(PathBuf::from("test.c"));
+        ir.add_function(FunctionEntity::new("my_init", 1, 5));
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let info = ir_to_graph(&ir, &mut graph, PathBuf::from("test.c").as_path()).unwrap();
+
+        apply_kernel_macros(
+            &mut graph,
+            &["my_init".to_string()],
+            &["not_here".to_string()],
+        );
+
+        let props = &graph.get_node(info.functions[0]).unwrap().properties;
+        assert_eq!(
+            props.get("is_entry_point"),
+            Some(&PropertyValue::Bool(true))
+        );
+        assert!(
+            props.get("is_exported").is_none(),
+            "unknown exported name must not annotate the entry-point function"
+        );
+    }
 }
