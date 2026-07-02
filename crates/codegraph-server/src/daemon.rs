@@ -413,6 +413,7 @@ mod tests {
     fn heartbeat_path_is_slug_json_under_daemons_dir() {
         // heartbeat_path only fails if no HOME/USERPROFILE is set; in the test
         // environment one is always present.
+        let _guard = crate::test_env::lock();
         let path = heartbeat_path("my-slug").expect("home is set in test env");
         assert_eq!(path.file_name().unwrap(), "my-slug.json");
         assert_eq!(path.parent().unwrap(), daemons_dir().unwrap());
@@ -423,6 +424,7 @@ mod tests {
     fn write_read_remove_round_trip() {
         // Use a distinctive slug so we never collide with a real daemon file,
         // and clean it up regardless of assertion outcome ordering.
+        let _guard = crate::test_env::lock();
         let slug = "codegraph-unit-test-daemon-rw";
         let mut hb = DaemonHeartbeat::new(PathBuf::from("/tmp/round-trip-ws"), slug.to_string());
         hb.mark_indexed();
@@ -442,6 +444,8 @@ mod tests {
 
     #[test]
     fn live_daemon_for_returns_fresh_and_prunes_stale() {
+        let _guard = crate::test_env::lock();
+
         // Fresh heartbeat: live_daemon_for surfaces it.
         let fresh_slug = "codegraph-unit-test-daemon-fresh";
         let mut fresh = DaemonHeartbeat::new(PathBuf::from("/tmp/live-ws"), fresh_slug.to_string());
@@ -463,6 +467,7 @@ mod tests {
     #[test]
     fn no_daemon_when_heartbeat_absent() {
         // A slug that was never written has no live daemon and reads as None.
+        let _guard = crate::test_env::lock();
         let slug = "codegraph-unit-test-daemon-never-written";
         DaemonHeartbeat::remove(slug).ok();
         assert!(DaemonHeartbeat::read(slug).is_none());

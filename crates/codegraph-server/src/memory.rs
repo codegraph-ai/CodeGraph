@@ -719,6 +719,7 @@ mod tests {
     #[test]
     fn test_project_data_dir_format() {
         // Uses a path that exists so canonicalize works
+        let _guard = crate::test_env::lock();
         let dir = project_data_dir(Path::new("/tmp")).unwrap();
         let dir_str = dir.to_string_lossy();
 
@@ -744,6 +745,7 @@ mod tests {
 
     #[test]
     fn test_project_data_dir_different_paths_different_hashes() {
+        let _guard = crate::test_env::lock();
         let dir1 = project_data_dir(Path::new("/tmp/project-a")).unwrap();
         let dir2 = project_data_dir(Path::new("/tmp/project-b")).unwrap();
         assert_ne!(dir1, dir2);
@@ -751,6 +753,7 @@ mod tests {
 
     #[test]
     fn test_project_data_dir_same_name_different_parent() {
+        let _guard = crate::test_env::lock();
         let dir1 = project_data_dir(Path::new("/tmp/a/app")).unwrap();
         let dir2 = project_data_dir(Path::new("/tmp/b/app")).unwrap();
         // Same base name but different hashes
@@ -773,8 +776,10 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires model files"]
+    #[allow(clippy::await_holding_lock)]
     async fn test_memory_manager_lifecycle() {
         use tempfile::TempDir;
+        let _guard = crate::test_env::lock();
         let temp_dir = TempDir::new().unwrap();
         let manager = MemoryManager::new(None);
 
