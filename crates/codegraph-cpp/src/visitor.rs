@@ -1576,4 +1576,24 @@ mod tests {
 
         assert_eq!(visitor.imports[0].importer, "file");
     }
+
+    #[test]
+    fn test_qualify_name_no_namespace_returns_verbatim() {
+        // With an empty current_namespace, qualify_name returns the name unchanged.
+        let visitor = CppVisitor::new(b"");
+        assert!(visitor.current_namespace.is_empty());
+        assert_eq!(visitor.qualify_name("Foo"), "Foo");
+    }
+
+    #[test]
+    fn test_qualify_name_nested_namespaces_join_with_scope_resolution() {
+        // A single namespace prefixes with `::`; nested namespaces join with `::`
+        // between each segment before the trailing name.
+        let mut visitor = CppVisitor::new(b"");
+        visitor.current_namespace.push("outer".to_string());
+        assert_eq!(visitor.qualify_name("Bar"), "outer::Bar");
+
+        visitor.current_namespace.push("inner".to_string());
+        assert_eq!(visitor.qualify_name("Baz"), "outer::inner::Baz");
+    }
 }
