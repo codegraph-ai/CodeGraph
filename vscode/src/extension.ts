@@ -18,6 +18,7 @@ import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath } from './server';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
+import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from './funnel';
 
 let client: LanguageClient;
 let aiProvider: CodeGraphAIProvider;
@@ -494,7 +495,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Register Language Model Tools for autonomous AI agent access
     try {
-        toolManager = new CodeGraphToolManager(client, reporter);
+        toolManager = new CodeGraphToolManager(client, reporter, context);
         toolManager.registerTools();
         const lmAvailable = !!(vscode as any).lm;
         reporter.activationToolRegistration({
@@ -537,7 +538,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             command: 'codegraph.symbolSearch',
             arguments: [{ query: '*', limit: 1 }],
         });
-        if (!check?.results?.length) {
+        const alreadyIndexed = !!check?.results?.length;
+        // Drives the codegraphSymbols empty-state welcome (index CTA vs.
+        // "open a file") and any `codegraph.indexed`-gated UI.
+        void vscode.commands.executeCommand('setContext', 'codegraph.indexed', alreadyIndexed);
+        if (!alreadyIndexed) {
             const choice = await vscode.window.showInformationMessage(
                 'CodeGraph: Workspace not indexed. Index now for full code intelligence?',
                 'Index Workspace',
@@ -554,8 +559,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                                 command: 'codegraph.reindexWorkspace',
                                 arguments: [{}],
                             });
-                            reportIndexCompleted(reporter, startedAt, result);
-                            vscode.window.showInformationMessage(`Indexed ${result?.files_indexed ?? 0} files`);
+                            reportIndexTelemetry(reporter, startedAt, result);
+                            const fileCount = filesIndexed(result);
+                            // handleIndexOutcome syncs the codegraph.indexed
+                            // context key and shows zero-file recovery or the
+                            // one-time first-index steer. Confirm success here
+                            // only when it didn't show its own prompt.
+                            const action = await handleIndexOutcome(context, reporter, fileCount);
+                            if (action === 'none' && fileCount > 0) {
+                                vscode.window.showInformationMessage(
+                                    `CodeGraph: Indexed ${fileCount.toLocaleString()} file${fileCount === 1 ? '' : 's'}`,
+                                );
+                            }
                         } catch (err) {
                             reporter.indexCompleted({
                                 outcome: 'error',
@@ -672,30 +687,3 @@ export async function deactivate(): Promise<void> {
     }
 }
 
-/**
- * Map the reindex-RPC response (which now ships `by_language` /
- * `parser_errors_by_language` / `duration_ms` from the server) into
- * the appropriate telemetry events. Two events fire per index:
- *   - `index.completed` with the aggregate numbers
- *   - `index.languageBreakdown` with the per-language file counts
- * The wall-clock duration is computed locally for cancel/error paths
- * but the server-side `duration_ms` is used when present (it excludes
- * network RTT and is more accurate for product-decision purposes).
- */
-function reportIndexCompleted(r: Reporter, localStartedAt: number, result: any): void {
-    const fileCount = typeof result?.files_indexed === 'number' ? result.files_indexed : 0;
-    const durationMs =
-        typeof result?.duration_ms === 'number'
-            ? Number(result.duration_ms)
-            : Date.now() - localStartedAt;
-    r.indexCompleted({ outcome: 'ok', durationMs, fileCount });
-
-    const byLanguage = result?.by_language;
-    if (byLanguage && typeof byLanguage === 'object') {
-        const map = new Map<any, number>();
-        for (const [lang, count] of Object.entries(byLanguage)) {
-            if (typeof count === 'number') map.set(lang as any, count);
-        }
-        if (map.size > 0) r.indexLanguageBreakdown(map as any);
-    }
-}

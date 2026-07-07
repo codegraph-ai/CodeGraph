@@ -76,6 +76,11 @@
                 "category": "CodeGraph"
             },
             {
+                "command": "codegraph.openWalkthrough",
+                "title": "Open Getting Started Walkthrough",
+                "category": "CodeGraph"
+            },
+            {
                 "command": "codegraph.debugTools",
                 "title": "Debug Language Model Tools",
                 "category": "CodeGraph"
@@ -1688,8 +1693,68 @@
         },
         "viewsWelcome": [
             {
+                "view": "codegraphSymbols",
+                "when": "!codegraph.indexed",
+                "contents": "CodeGraph turns your codebase into a searchable graph - callers, dependencies, impact, and complexity.\n[Index Workspace](command:codegraph.reindex)\n[Open Walkthrough](command:codegraph.openWalkthrough)\nIndexing runs locally; nothing leaves your machine."
+            },
+            {
+                "view": "codegraphSymbols",
+                "when": "codegraph.indexed",
+                "contents": "No symbols to show here yet. Open a source file to browse its symbols, or [reindex the workspace](command:codegraph.reindex)."
+            },
+            {
                 "view": "codegraphMemories",
                 "contents": "No memories stored yet.\n[Store Memory](command:codegraph.storeMemory)\n[Mine Git History](command:codegraph.mineGitHistory)"
+            }
+        ],
+        "walkthroughs": [
+            {
+                "id": "codegraph.gettingStarted",
+                "title": "Get Started with CodeGraph",
+                "description": "Turn your codebase into a queryable graph - then explore it and hand it to your AI assistant.",
+                "steps": [
+                    {
+                        "id": "index",
+                        "title": "Index your workspace",
+                        "description": "Build a local graph of your code.\n[Index Workspace](command:codegraph.reindex)",
+                        "media": {
+                            "markdown": "media/walkthrough/index.md"
+                        },
+                        "completionEvents": [
+                            "onContext:codegraph.indexed"
+                        ]
+                    },
+                    {
+                        "id": "explore",
+                        "title": "Explore symbols",
+                        "description": "Browse and pivot through your code as a graph.\n[Explore Symbols](command:codegraphSymbols.focus)",
+                        "media": {
+                            "markdown": "media/walkthrough/explore.md"
+                        },
+                        "completionEvents": [
+                            "onCommand:codegraphSymbols.focus"
+                        ]
+                    },
+                    {
+                        "id": "callgraph",
+                        "title": "Visualize the call graph",
+                        "description": "See what calls what, several levels deep.\n[Show Call Graph](command:codegraph.showCallGraph)",
+                        "media": {
+                            "markdown": "media/walkthrough/callgraph.md"
+                        },
+                        "completionEvents": [
+                            "onCommand:codegraph.showCallGraph"
+                        ]
+                    },
+                    {
+                        "id": "ai",
+                        "title": "Power your AI assistant",
+                        "description": "Let your AI assistant query the graph directly.",
+                        "media": {
+                            "markdown": "media/walkthrough/ai.md"
+                        }
+                    }
+                ]
             }
         ]
     },

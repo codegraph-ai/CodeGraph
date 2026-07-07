@@ -32,12 +32,16 @@ import {
     type CommandId,
     categorizeError,
     type ErrorCategory,
+    type FirstIndexCta,
     type GraphPanel,
     type IndexOutcome,
     type IndexTrigger,
     isCommandId,
     isToolName,
     type Language,
+    normalizeZeroFileReason,
+    type ZeroFileCta,
+    type ZeroFileReason,
     normalizeCrashCause,
     normalizeCrashPhase,
     normalizeExitSignal,
@@ -106,6 +110,13 @@ export interface Reporter {
         errorCategory?: ErrorCategory;
     }): void;
     indexLanguageBreakdown(languageFileCounts: Map<Language, number>): void;
+
+    /** An index run produced zero files — records the diagnosed reason. */
+    funnelZeroFileIndex(props: { reason: ZeroFileReason; hadWorkspace: boolean }): void;
+    /** User's choice on the zero-file recovery prompt (or that it was dismissed). */
+    funnelZeroFileCta(props: { reason: ZeroFileReason; action: ZeroFileCta }): void;
+    /** User's choice on the one-time post-first-index prompt (or that it was dismissed). */
+    funnelFirstIndexCta(props: { action: FirstIndexCta; fileCount: number }): void;
 
     toolInvoke(toolName: string, argShape: string): void;
     toolResult(props: {
@@ -312,6 +323,33 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
                 breakdown[`lang_${lang}`] = fileCountBucket(count);
             }
             send('index.languageBreakdown', breakdown, false);
+        },
+
+        funnelZeroFileIndex(props) {
+            // 100% capture (isError=true): this is the primary funnel leak we
+            // are trying to close, so we never want it sampled away.
+            send(
+                'funnel.zeroFileIndex',
+                {
+                    reason: normalizeZeroFileReason(props.reason),
+                    hadWorkspace: props.hadWorkspace,
+                },
+                true,
+            );
+        },
+        funnelZeroFileCta(props) {
+            send(
+                'funnel.zeroFileCta',
+                { reason: normalizeZeroFileReason(props.reason), action: props.action },
+                false,
+            );
+        },
+        funnelFirstIndexCta(props) {
+            send(
+                'funnel.firstIndexCta',
+                { action: props.action, fileCountBucket: fileCountBucket(props.fileCount) },
+                false,
+            );
         },
 
         toolInvoke(toolName, argShape) {

@@ -29,6 +29,7 @@ import {
     MemoryStatsResponse,
 } from '../types';
 import { describeArgShape, type Reporter } from '../telemetry/reporter';
+import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from '../funnel';
 
 /**
  * Map an LSP command name to the corresponding language-model tool name.
@@ -68,7 +69,11 @@ export class CodeGraphToolManager {
         return this._lastToolName;
     }
 
-    constructor(private client: LanguageClient, private reporter?: Reporter) {}
+    constructor(
+        private client: LanguageClient,
+        private reporter?: Reporter,
+        private context?: vscode.ExtensionContext,
+    ) {}
 
     /**
      * Check if workspace is indexed. Prompt to index on first tool use.
@@ -108,8 +113,28 @@ export class CodeGraphToolManager {
                             { command: 'codegraph.reindexWorkspace', arguments: [{}] },
                         );
                         this.isIndexed = true;
-                        this.reportIndexCompleted(startedAt, result);
-                        vscode.window.showInformationMessage(`Indexed ${result?.files_indexed ?? 0} files`);
+                        reportIndexTelemetry(this.reporter, startedAt, result);
+                        const fileCount = filesIndexed(result);
+                        if (this.context) {
+                            // Agent-driven index: sync the codegraph.indexed
+                            // context key and (for a zero-file result) show
+                            // recovery, but don't steer to a surface mid-task.
+                            // handleIndexOutcome shows its prompts fire-and-
+                            // forget, so this await never blocks on user input.
+                            const action = await handleIndexOutcome(
+                                this.context,
+                                this.reporter,
+                                fileCount,
+                                { offerSurfaceCta: false },
+                            );
+                            if (action === 'none' && fileCount > 0) {
+                                vscode.window.showInformationMessage(
+                                    `CodeGraph: Indexed ${fileCount.toLocaleString()} file${fileCount === 1 ? '' : 's'}`,
+                                );
+                            }
+                        } else {
+                            vscode.window.showInformationMessage(`Indexed ${fileCount} files`);
+                        }
                     } catch (err) {
                         this.reporter?.indexCompleted({
                             outcome: 'error',
@@ -124,23 +149,6 @@ export class CodeGraphToolManager {
         }
     }
 
-    /** Map a reindex RPC response → `index.completed` + `index.languageBreakdown`. */
-    private reportIndexCompleted(localStartedAt: number, result: any): void {
-        const fileCount = typeof result?.files_indexed === 'number' ? result.files_indexed : 0;
-        const durationMs =
-            typeof result?.duration_ms === 'number'
-                ? Number(result.duration_ms)
-                : Date.now() - localStartedAt;
-        this.reporter?.indexCompleted({ outcome: 'ok', durationMs, fileCount });
-        const byLanguage = result?.by_language;
-        if (byLanguage && typeof byLanguage === 'object') {
-            const map = new Map<any, number>();
-            for (const [lang, count] of Object.entries(byLanguage)) {
-                if (typeof count === 'number') map.set(lang as any, count);
-            }
-            if (map.size > 0) this.reporter?.indexLanguageBreakdown(map as any);
-        }
-    }
 
     /**
      * Execute an LSP command with a small retry/backoff to smooth over transient timeouts.

@@ -16,6 +16,7 @@ import {
 } from '../types';
 import { GraphVisualizationPanel } from '../views/graphPanel';
 import type { Reporter } from '../telemetry/reporter';
+import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from '../funnel';
 
 // Define custom request types (used for LSP type inference)
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -253,24 +254,52 @@ export function registerCommands(
 
     // Reindex Workspace
     safeRegisterCommand('codegraph.reindex', async () => {
+            const startedAt = Date.now();
             try {
-                await vscode.window.withProgress(
+                const result = await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
                         title: 'CodeGraph: Reindexing workspace...',
                         cancellable: false,
                     },
                     async () => {
-                        await client.sendRequest('workspace/executeCommand', {
+                        return await client.sendRequest<any>('workspace/executeCommand', {
                             command: 'codegraph.reindexWorkspace',
                             arguments: []
                         });
                     }
                 );
-                vscode.window.showInformationMessage('CodeGraph: Workspace reindexed successfully');
+                reportIndexTelemetry(reporter, startedAt, result);
+                const fileCount = filesIndexed(result);
+                // handleIndexOutcome syncs the codegraph.indexed context key
+                // and shows zero-file recovery or the one-time first-index
+                // steer. The user explicitly triggered this reindex, so confirm
+                // the result when the funnel handler didn't show its own prompt.
+                const action = await handleIndexOutcome(context, reporter, fileCount);
+                if (action === 'none') {
+                    vscode.window.showInformationMessage(
+                        `CodeGraph: Reindexed ${fileCount.toLocaleString()} file${fileCount === 1 ? '' : 's'}`,
+                    );
+                }
             } catch (error) {
+                reporter?.indexCompleted({
+                    outcome: 'error',
+                    durationMs: Date.now() - startedAt,
+                    fileCount: 0,
+                    errorCategory: 'other',
+                });
                 vscode.window.showErrorMessage(`CodeGraph: Failed to reindex workspace: ${error}`);
             }
+    });
+
+    // Open the first-run getting-started walkthrough on demand (also linked
+    // from the Symbols view empty state).
+    safeRegisterCommand('codegraph.openWalkthrough', async () => {
+            await vscode.commands.executeCommand(
+                'workbench.action.openWalkthrough',
+                'aStudioPlus.codegraph#codegraph.gettingStarted',
+                false,
+            );
     });
 
     // Index Directory - pick folders to index on demand
@@ -303,6 +332,9 @@ export function registerCommands(
                         });
                     }
                 );
+                // Indexing specific directories means the graph now has
+                // content - clear the "not indexed" empty state.
+                void vscode.commands.executeCommand('setContext', 'codegraph.indexed', true);
                 vscode.window.showInformationMessage(
                     `CodeGraph: Indexed ${paths.length} director${paths.length === 1 ? 'y' : 'ies'} successfully`
                 );
