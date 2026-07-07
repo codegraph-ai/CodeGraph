@@ -23,6 +23,7 @@ import * as vscode from 'vscode';
 import type { Reporter } from './telemetry/reporter';
 import type { Language } from './telemetry/allowlists';
 import type { ZeroFileReason } from './telemetry/allowlists';
+import { refreshCodeLenses } from './views/codeLensRefresh';
 
 /** globalState key: set once the first-index CTA has been shown. */
 export const FIRST_INDEX_CTA_SHOWN_KEY = 'codegraph.funnel.firstIndexCtaShown';
@@ -185,6 +186,10 @@ export async function handleIndexOutcome(
     // walkthrough in sync without duplicating the setContext call.
     void vscode.commands.executeCommand('setContext', INDEXED_CONTEXT_KEY, fileCount > 0);
 
+    // Counts behind CodeLens/hover just changed - drop the per-document cache
+    // so the editor re-fetches fresh caller/test/complexity stats.
+    refreshCodeLenses();
+
     if (fileCount === 0) {
         // Detached: an agent-triggered index must not hang awaiting a dialog
         // the agent can't answer. The recovery prompt still shows to the human.
@@ -273,7 +278,7 @@ async function showFirstIndexCta(reporter: Reporter | undefined, fileCount: numb
 
     if (choice === EXPLORE) {
         reporter?.funnelFirstIndexCta({ action: 'explore_symbols', fileCount });
-        // Reveal the Symbols tree in the Explorer sidebar.
+        // Reveal the Symbols tree in the CodeGraph activity-bar container.
         await vscode.commands.executeCommand('codegraphSymbols.focus');
     } else if (choice === CALL_GRAPH) {
         reporter?.funnelFirstIndexCta({ action: 'show_call_graph', fileCount });

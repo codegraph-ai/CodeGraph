@@ -206,6 +206,18 @@
                     "scope": "resource",
                     "description": "Index workspace on startup. When false, use 'Index Directory' command to index specific folders on demand."
                 },
+                "codegraph.codeLens.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Show inline CodeLens above functions with caller count, related test count, and cyclomatic complexity. Click to open the call graph."
+                },
+                "codegraph.hover.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Show CodeGraph stats (callers, tests, complexity) when hovering a function declaration."
+                },
                 "codegraph.maxFileSizeKB": {
                     "type": "number",
                     "default": 1024,
@@ -1677,16 +1689,25 @@
                 }
             ]
         },
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "codegraph",
+                    "title": "CodeGraph",
+                    "icon": "media/codegraph-activitybar.svg"
+                }
+            ]
+        },
         "views": {
-            "explorer": [
+            "codegraph": [
                 {
                     "id": "codegraphSymbols",
-                    "name": "CodeGraph Symbols",
+                    "name": "Symbols",
                     "when": "codegraph.enabled"
                 },
                 {
                     "id": "codegraphMemories",
-                    "name": "CodeGraph Memories",
+                    "name": "Memories",
                     "when": "codegraph.enabled"
                 }
             ]

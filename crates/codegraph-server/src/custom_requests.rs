@@ -81,6 +81,13 @@ impl CodeGraphBackend {
                 serde_json::to_value(response).map_err(|_| Error::internal_error())
             }
 
+            "codegraph/getDocumentCodeLens" => {
+                let params: DocumentCodeLensParams = serde_json::from_value(params)
+                    .map_err(|e| Error::invalid_params(format!("Invalid params: {e}")))?;
+                let response = self.handle_get_document_code_lens(params).await?;
+                serde_json::to_value(response).map_err(|_| Error::internal_error())
+            }
+
             "codegraph/analyzeComplexity" => {
                 let params: ComplexityParams = serde_json::from_value(params)
                     .map_err(|e| Error::invalid_params(format!("Invalid params: {e}")))?;

@@ -44,6 +44,14 @@ vi.mock('vscode', () => {
             }),
         },
         RelativePattern,
+        // codeLensRefresh.ts constructs an EventEmitter at module load.
+        EventEmitter: class {
+            fire() {}
+            get event() {
+                return () => ({ dispose() {} });
+            }
+            dispose() {}
+        },
         Uri: { parse: (s: string) => ({ toString: () => s }) },
         commands: { executeCommand: vi.fn() },
         window: { showWarningMessage: vi.fn(), showInformationMessage: vi.fn() },

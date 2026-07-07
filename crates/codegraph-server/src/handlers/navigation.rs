@@ -101,6 +101,32 @@ pub struct WorkspaceSymbolsResponse {
     pub symbols: Vec<SymbolInfo>,
 }
 
+/// Request for per-document CodeLens / hover stats.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentCodeLensParams {
+    pub uri: String,
+}
+
+/// Graph-derived stats for one function/method, shown inline as a CodeLens and
+/// on hover. Counts only; the editor formats them.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeLensSymbol {
+    pub name: String,
+    /// 0-based start line (LSP convention), so the client anchors without math.
+    pub line: u32,
+    pub caller_count: u32,
+    pub test_count: u32,
+    pub complexity: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentCodeLensResponse {
+    pub symbols: Vec<CodeLensSymbol>,
+}
+
 impl CodeGraphBackend {
     /// Get workspace symbols, optionally filtered by query.
     pub async fn handle_get_workspace_symbols(
@@ -180,6 +206,73 @@ impl CodeGraphBackend {
         }
 
         Ok(WorkspaceSymbolsResponse { symbols })
+    }
+
+    /// Compute per-function CodeLens stats for a single document in one pass:
+    /// caller count, test count, and cyclomatic complexity for every function
+    /// or method symbol in the file. Batched so the editor issues one request
+    /// per document rather than N per-symbol calls. Test functions are skipped
+    /// (a CodeLens on a test is noise), and incoming callers are split into
+    /// test vs non-test using the same rule as PR review.
+    pub async fn handle_get_document_code_lens(
+        &self,
+        params: DocumentCodeLensParams,
+    ) -> Result<DocumentCodeLensResponse> {
+        let path = Url::parse(&params.uri)
+            .ok()
+            .and_then(|u| u.to_file_path().ok())
+            .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Invalid uri"))?;
+
+        let graph = self.graph.read().await;
+        let node_ids = self.symbol_index.get_file_symbols(&path);
+
+        let mut symbols = Vec::new();
+        for node_id in node_ids {
+            let Ok(node) = graph.get_node(node_id) else {
+                continue;
+            };
+            if node.node_type != codegraph::NodeType::Function || node_props::is_test(node) {
+                continue;
+            }
+
+            let mut caller_count = 0u32;
+            let mut test_count = 0u32;
+            if let Ok(neighbors) = graph.get_neighbors(node_id, codegraph::Direction::Incoming) {
+                for caller_id in neighbors {
+                    // Only genuine call edges count - a raw incoming-neighbor
+                    // scan also returns the containing file/class `Contains`
+                    // edge, which would inflate every function by one. Mirror
+                    // the canonical `helpers::get_callers` Calls-edge filter.
+                    let calls = graph
+                        .get_edges_between(caller_id, node_id)
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|eid| graph.get_edge(eid).ok())
+                        .any(|edge| edge.edge_type == codegraph::EdgeType::Calls);
+                    if !calls {
+                        continue;
+                    }
+                    if let Ok(caller) = graph.get_node(caller_id) {
+                        if node_props::is_test_like(caller) {
+                            test_count += 1;
+                        } else {
+                            caller_count += 1;
+                        }
+                    }
+                }
+            }
+
+            symbols.push(CodeLensSymbol {
+                name: node_props::name(node).to_string(),
+                line: node_props::line_start(node).saturating_sub(1),
+                caller_count,
+                test_count,
+                complexity: node.properties.get_int("complexity").unwrap_or(0).max(0) as u32,
+            });
+        }
+
+        Ok(DocumentCodeLensResponse { symbols })
     }
 }
 
@@ -455,5 +548,93 @@ mod tests {
         assert_eq!(symbol.kind, "Function");
         assert_eq!(symbol.language, "rust");
         assert!(!symbol.uri.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_document_code_lens_counts_callers_tests_complexity() {
+        use codegraph::EdgeType;
+
+        let graph = Arc::new(RwLock::new(
+            CodeGraph::in_memory().expect("Failed to create graph"),
+        ));
+
+        let target_path = "/test/lens.rs";
+        let (target_id, _prod_caller, _test_caller, _skipped_test) = {
+            let mut g = graph.write().await;
+
+            let mk = |g: &mut CodeGraph, name: &str, path: &str, line: i64, is_test: bool| {
+                let mut p = PropertyMap::new();
+                p.insert("name".to_string(), PropertyValue::String(name.to_string()));
+                p.insert("path".to_string(), PropertyValue::String(path.to_string()));
+                p.insert("start_line".to_string(), PropertyValue::Int(line));
+                p.insert("end_line".to_string(), PropertyValue::Int(line + 5));
+                p.insert("complexity".to_string(), PropertyValue::Int(7));
+                p.insert("is_test".to_string(), PropertyValue::Bool(is_test));
+                g.add_node(NodeType::Function, p).unwrap()
+            };
+
+            // Symbol under inspection, plus a test function in the same file
+            // (must be skipped in the output).
+            let target = mk(&mut g, "do_work", target_path, 5, false);
+            let skipped_test = mk(&mut g, "test_does_work", target_path, 40, true);
+            // A production caller and a test caller, both in other files.
+            let prod_caller = mk(&mut g, "run", "/test/main.rs", 3, false);
+            let test_caller = mk(&mut g, "test_do_work", "/test/lens_test.rs", 3, true);
+
+            g.add_edge(prod_caller, target, EdgeType::Calls, PropertyMap::new())
+                .unwrap();
+            g.add_edge(test_caller, target, EdgeType::Calls, PropertyMap::new())
+                .unwrap();
+
+            // The containing file's `Contains` edge is an incoming neighbor but
+            // must NOT be counted as a caller (regression guard).
+            let mut file_props = PropertyMap::new();
+            file_props.insert(
+                "name".to_string(),
+                PropertyValue::String("lens.rs".to_string()),
+            );
+            file_props.insert(
+                "path".to_string(),
+                PropertyValue::String(target_path.to_string()),
+            );
+            let file_id = g.add_node(NodeType::CodeFile, file_props).unwrap();
+            g.add_edge(file_id, target, EdgeType::Contains, PropertyMap::new())
+                .unwrap();
+
+            (target, prod_caller, test_caller, skipped_test)
+        };
+
+        let query_engine = Arc::new(QueryEngine::new(Arc::clone(&graph)));
+        let backend = CodeGraphBackend::new_for_test(graph, query_engine);
+        let path = std::path::Path::new(target_path);
+        add_node_to_index(&backend, path, target_id, "do_work", "Function", 5, 10);
+        // The skipped in-file test must be indexed too, to prove it's filtered.
+        add_node_to_index(&backend, path, _skipped_test, "test_does_work", "Function", 40, 45);
+
+        let uri = Url::from_file_path(target_path).unwrap().to_string();
+        let response = backend
+            .handle_get_document_code_lens(DocumentCodeLensParams { uri })
+            .await
+            .unwrap();
+
+        // Only the non-test function is reported.
+        assert_eq!(response.symbols.len(), 1);
+        let s = &response.symbols[0];
+        assert_eq!(s.name, "do_work");
+        assert_eq!(s.line, 4); // 1-based 5 -> 0-based 4
+        assert_eq!(s.caller_count, 1); // run, not the test caller
+        assert_eq!(s.test_count, 1); // test_do_work
+        assert_eq!(s.complexity, 7);
+    }
+
+    #[tokio::test]
+    async fn test_get_document_code_lens_invalid_uri_errors() {
+        let (backend, _, _) = create_backend_with_nodes().await;
+        let result = backend
+            .handle_get_document_code_lens(DocumentCodeLensParams {
+                uri: "not a uri".to_string(),
+            })
+            .await;
+        assert!(result.is_err());
     }
 }

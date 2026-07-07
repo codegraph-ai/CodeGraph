@@ -13,6 +13,7 @@ import {
 } from 'vscode-languageclient/node';
 import { registerCommands } from './commands';
 import { registerTreeDataProviders } from './views/treeProviders';
+import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath } from './server';
@@ -617,6 +618,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Register commands, tree providers, etc.
     registerCommands(context, client, aiProvider, reporter);
     registerTreeDataProviders(context, client, reporter);
+    registerCodeLens(context, client, reporter);
 
     // Add debug command to verify tool registration
     context.subscriptions.push(

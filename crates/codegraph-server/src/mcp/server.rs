@@ -4108,16 +4108,10 @@ impl McpServer {
                                 if let Ok(caller) = graph.get_node(caller_id) {
                                     let cname = crate::domain::node_props::name(caller);
                                     let cfile = caller.properties.get_string("path").unwrap_or("");
-                                    // Prefer the structural is_test marker recorded at index time
-                                    // (#[test]/#[cfg(test)], @Test, …); fall back to name/path
-                                    // heuristics only for languages that don't populate it. The
-                                    // heuristics alone miss idiomatic Rust tests with descriptive
-                                    // names inside `#[cfg(test)] mod tests`.
-                                    let is_test = crate::domain::node_props::is_test(caller)
-                                        || cname.to_lowercase().starts_with("test_")
-                                        || cname.to_lowercase().contains("_test")
-                                        || cfile.contains("/tests/")
-                                        || cfile.contains("/test_");
+                                    // Shared classifier (structural is_test marker + name/path
+                                    // heuristics) so PR-review and CodeLens agree on what a test
+                                    // caller is.
+                                    let is_test = crate::domain::node_props::is_test_like(caller);
                                     // Callers under examples/ (and doctests) exercise the
                                     // function at runtime — count them as coverage, not as
                                     // breakable production callers. This is what covers code

@@ -413,6 +413,8 @@ export const SETTINGS_SNAPSHOT_KEYS = {
         'memory.enabled',
         'memory.autoInvalidate',
         'memory.gitMining.enabled',
+        'codeLens.enabled',
+        'hover.enabled',
     ] as const,
     enum: ['embeddingModel', 'ai.contextStrategy'] as const,
     bucketedNumber: [

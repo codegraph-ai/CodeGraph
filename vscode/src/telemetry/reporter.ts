@@ -141,6 +141,8 @@ export interface Reporter {
 
     engagementTreeViewOpened(view: TreeView): void;
     engagementGraphPanelOpened(panel: GraphPanel): void;
+    /** User clicked an inline CodeGraph CodeLens (callers/tests/complexity). */
+    engagementCodeLensClicked(): void;
     engagementSettingsSnapshot(): void;
     /** One-time machine fingerprint (bucketed/enum only) to triage the graph_load crash cohort. */
     engagementMachineProfile(profile: { dataDirKind: string; machineKind: string; totalRamGb: number; antivirusKind: string }): void;
@@ -420,6 +422,9 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
         },
         engagementGraphPanelOpened(panel) {
             send('engagement.graphPanelOpened', { panelType: panel }, false);
+        },
+        engagementCodeLensClicked() {
+            send('engagement.codeLensClicked', {}, false);
         },
         engagementSettingsSnapshot() {
             const cfg = vscode.workspace.getConfiguration('codegraph');

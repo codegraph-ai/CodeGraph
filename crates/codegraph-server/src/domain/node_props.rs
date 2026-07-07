@@ -117,3 +117,19 @@ pub(crate) fn is_public(node: &Node) -> bool {
 pub(crate) fn is_test(node: &Node) -> bool {
     node.properties.get_bool("is_test").unwrap_or(false)
 }
+
+/// Whether a caller node looks like test code: the structural [`is_test`]
+/// marker, or a name/path heuristic for languages that don't record it. Shared
+/// by CodeLens per-symbol stats and PR-review coverage so the two classify
+/// callers identically and can't silently diverge.
+pub(crate) fn is_test_like(node: &Node) -> bool {
+    if is_test(node) {
+        return true;
+    }
+    let name = name(node).to_lowercase();
+    if name.starts_with("test_") || name.contains("_test") {
+        return true;
+    }
+    let path = node.properties.get_string("path").unwrap_or("");
+    path.contains("/tests/") || path.contains("/test_")
+}
