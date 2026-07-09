@@ -4,6 +4,59 @@ All notable changes to CodeGraph are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). Each release is tagged as
 `vscode/vX.Y.Z` in the git history.
 
+## [Unreleased]
+
+### MCP Server Fixes
+
+Symbol resolution and call-graph accuracy fixes, plus lower token cost on
+existing tools.
+
+- **Memory-gate fix** — `available_memory == 0` (a real `sysinfo` reading
+  under memory pressure) was treated as "no memory available" and forced
+  graph-only mode. Now treated as "unknown" so the embedding model still
+  loads.
+- **`nodeId` as a number was silently rejected** — tools required
+  `nodeId` as a string, but `codegraph_symbol_search` returns it as a
+  number; passing it straight back caused false "node not found" errors.
+  Fixed across `get_callers`, `get_callees`, `traverse_graph`,
+  `get_symbol_info`, `get_detailed_symbol`.
+- **Relative vs `file://` path mismatch** — path comparisons used strict
+  `==` between workspace-relative and `file://`-resolved paths, so they
+  never matched; a URI-parse failure could even resolve to an unrelated
+  symbol silently. Fixed with boundary-aware path matching across all
+  `uri`-resolving tools.
+- **`codegraph_reindex_workspace` false success** — a soft reindex could
+  report `success` on an empty graph; now reports `degraded` and
+  auto-retries once with `force=true`.
+- **Structured "symbol not found" reasons** — replaced a single generic
+  error with `InvalidUri` / `WorkspaceNotIndexed` / `FileNotIndexed`,
+  each with an actionable hint and suggested next query.
+- **`match_confidence` field** — `"exact" | "fallback"` now always present
+  on `uri+line`-resolving tool responses (previously only present as an
+  optional `used_fallback` flag).
+- **`codegraph_probe_symbol`** (new) — lightweight resolution check
+  (name/type/node_id/uri/line range/confidence only, no source or
+  callers/callees) for verifying a query hit the right symbol cheaply.
+- **`get_detailed_symbol` deduplication** — callers/callees were computed
+  and serialized twice (once nested, once top-level); now computed once.
+  Added opt-in `compact: bool` to truncate long lists.
+- **`get_edit_context` section toggles** — added
+  `includeSymbol`/`includeCallers`/`includeTests`/`includeMemories`/
+  `includeRecentChanges` and `maxCallers`/`maxTests`, skipped at
+  computation time rather than only at serialization. Default behavior
+  unchanged.
+- **`find_nearest_node` file-node fallback** — a file node with no
+  `line_start`/`line_end` could "win" as nearest match for `line: 0`
+  queries, returning the file instead of a symbol. Now skips nodes
+  without an explicit line range.
+- **Python `self.`/`cls.` calls missing from the call graph** — method
+  calls inside a class weren't registered as `Calls` edges due to a
+  node-map key mismatch and an unstripped callee name; fixed, along with
+  `Contains` edge mislinking for same-named methods in different classes.
+- **`codegraph_index_health`** (new) — diagnostics tool reporting graph
+  state, generation, git HEAD, file drift since last index, and other
+  known namespaces in one call.
+
 ## [0.17.0] — 2026-05-25
 
 ### Documentation Intelligence (new)

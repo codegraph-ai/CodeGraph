@@ -719,6 +719,7 @@ impl CodeGraphBackend {
             include_source,
             include_callers,
             include_callees,
+            false, // compact: LSP callers don't yet expose this knob
             used_fallback,
             params.line,
         )

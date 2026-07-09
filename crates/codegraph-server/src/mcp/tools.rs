@@ -59,6 +59,7 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
         Core => matches!(
             name,
             "codegraph_symbol_search"
+                | "codegraph_probe_symbol"
                 | "codegraph_get_symbol_info"
                 | "codegraph_get_detailed_symbol"
                 | "codegraph_get_ai_context"
@@ -103,7 +104,7 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
 /// Get all available CodeGraph tools
 pub fn get_all_tools() -> Vec<Tool> {
     vec![
-        // Analysis Tools (11)
+        // Analysis Tools (12)
         get_dependency_graph_tool(),
         get_call_graph_tool(),
         analyze_impact_tool(),
@@ -112,6 +113,7 @@ pub fn get_all_tools() -> Vec<Tool> {
         get_curated_context_tool(),
         find_related_tests_tool(),
         get_symbol_info_tool(),
+        probe_symbol_tool(),
         analyze_complexity_tool(),
         get_module_summary_tool(),
         find_circular_deps_tool(),
@@ -140,10 +142,11 @@ pub fn get_all_tools() -> Vec<Tool> {
         find_dead_imports_tool(),
         // Ops Struct Tools (1)
         find_implementors_tool(),
-        // Admin Tools (3)
+        // Admin Tools (4)
         reindex_workspace_tool(),
         index_files_tool(),
         index_directory_tool(),
+        index_health_tool(),
         // PR / Change Analysis (1)
         pr_context_tool(),
         // Docs Tools (7)
@@ -401,10 +404,43 @@ fn get_edit_context_tool() -> Tool {
             Some(8000.0),
         ),
     );
+    properties.insert(
+        "includeSymbol".to_string(),
+        boolean_prop(
+            "Include the target symbol's source code (name/type/location are always \
+             returned regardless). Disable when you already have the source and \
+             only need callers/tests/memories/git history.",
+            true,
+        ),
+    );
+    properties.insert(
+        "includeCallers".to_string(),
+        boolean_prop("Include the callers section", true),
+    );
+    properties.insert(
+        "includeTests".to_string(),
+        boolean_prop("Include the related-tests section", true),
+    );
+    properties.insert(
+        "includeMemories".to_string(),
+        boolean_prop("Include the memories section", true),
+    );
+    properties.insert(
+        "includeRecentChanges".to_string(),
+        boolean_prop("Include the recent git changes section", true),
+    );
+    properties.insert(
+        "maxCallers".to_string(),
+        number_prop("Maximum number of callers to include (default: 10)", Some(10.0)),
+    );
+    properties.insert(
+        "maxTests".to_string(),
+        number_prop("Maximum number of related tests to include (default: 5)", Some(5.0)),
+    );
 
     Tool {
         name: "codegraph_get_edit_context".to_string(),
-        description: Some("Assembles everything needed to edit code at a specific location in a single call. USE WHEN: you are about to modify, refactor, or fix code and need full context before making changes. PREFER THIS over codegraph_get_ai_context when you are about to write or modify code — it includes callers (impact), tests (what to update), and git history (recent context) that get_ai_context does not. Use get_ai_context instead when you only need to understand or explain code. Returns 5 sections: (1) symbol — full source code of the function/method at the given line, (2) callers — functions that call this symbol (to assess impact of changes), (3) tests — related test functions (to know what to update/run), (4) memories — relevant debug notes, architectural decisions, and known issues, (5) recentChanges — recent git commits that touched this file. EXAMPLE: Before modifying a function's signature, call this to see all callers that would break, tests that need updating, and whether someone recently changed this code. Token budget controls total context size with priority: symbol > callers > tests > memories > git history. Requires uri and line parameters.".to_string()),
+        description: Some("Assembles everything needed to edit code at a specific location in a single call. USE WHEN: you are about to modify, refactor, or fix code and need full context before making changes. PREFER THIS over codegraph_get_ai_context when you are about to write or modify code — it includes callers (impact), tests (what to update), and git history (recent context) that get_ai_context does not. Use get_ai_context instead when you only need to understand or explain code. Returns up to 5 sections, each independently toggleable via includeSymbol/includeCallers/includeTests/includeMemories/includeRecentChanges (skipping a section skips its underlying queries too, not just its output — the cheapest way to shrink this call): (1) symbol — source code of the function/method at the given line, (2) callers — functions that call this symbol (to assess impact of changes, capped via maxCallers), (3) tests — related test functions (to know what to update/run, capped via maxTests), (4) memories — relevant debug notes, architectural decisions, and known issues, (5) recentChanges — recent git commits that touched this file. EXAMPLE: Before modifying a function's signature, call this to see all callers that would break, tests that need updating, and whether someone recently changed this code. Token budget controls total context size with priority: symbol > callers > tests > memories > git history. Requires uri and line parameters.".to_string()),
         input_schema: ToolInputSchema {
             schema_type: "object".to_string(),
             properties: Some(properties),
@@ -504,6 +540,34 @@ fn get_symbol_info_tool() -> Tool {
             schema_type: "object".to_string(),
             properties: Some(properties),
             required: Some(vec!["uri".to_string(), "line".to_string()]),
+        },
+    }
+}
+
+fn probe_symbol_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "uri".to_string(),
+        string_prop(
+            "The file URI containing the symbol (e.g. file:///Users/me/project/src/main.rs)",
+        ),
+    );
+    properties.insert(
+        "line".to_string(),
+        number_prop("Line number of the symbol (0-indexed)", None),
+    );
+    properties.insert(
+        "nodeId".to_string(),
+        string_prop("Internal node ID from symbol_search. Alternative to uri+line."),
+    );
+
+    Tool {
+        name: "codegraph_probe_symbol".to_string(),
+        description: Some("Cheapest possible symbol lookup — confirms what you'd resolve to before paying for a heavier call. USE WHEN: you're about to call get_symbol_info/get_detailed_symbol/get_edit_context and want to check first whether uri+line lands on the symbol you expect, or whether it'll fall back to a nearby one. Returns only: name, type, node_id, uri, line_start, line_end, used_fallback, match_confidence (\"exact\" | \"fallback\") — no source, no callers/callees, no graph traversal. Requires uri+line or nodeId.".to_string()),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: None,
         },
     }
 }
@@ -900,10 +964,19 @@ fn get_detailed_symbol_tool() -> Tool {
         "includeCallees".to_string(),
         boolean_prop("Include list of callees", true),
     );
+    properties.insert(
+        "compact".to_string(),
+        boolean_prop(
+            "Cap callers/callees at 5 entries each (with a *_truncated count) — \
+             use for symbols with large caller/callee lists to avoid paying for \
+             hundreds of entries you won't read",
+            false,
+        ),
+    );
 
     Tool {
         name: "codegraph_get_detailed_symbol".to_string(),
-        description: Some("Gets comprehensive symbol details including source code and relationships. USE WHEN: you need full context about a symbol — source code, callers, callees, complexity, and metadata together. MORE COMPLETE than get_symbol_info but heavier. Returns: symbol (name, kind, signature, visibility, uri, line_range, properties), source (full source code string), callers (array), callees (array). Toggle includeSource/includeCallers/includeCallees to control response size. Identify symbol via uri+line or nodeId.".to_string()),
+        description: Some("Gets comprehensive symbol details including source code and relationships. USE WHEN: you need full context about a symbol — source code, callers, callees, complexity, and metadata together. MORE COMPLETE than get_symbol_info but heavier. Returns: symbol (name, kind, signature, visibility, uri, line_range, properties — no duplicate callers/callees here, see top-level fields), source (full source code string), callers (array), callees (array). Toggle includeSource/includeCallers/includeCallees to control response size, or set compact=true to cap callers/callees at 5 entries each. Identify symbol via uri+line or nodeId.".to_string()),
         input_schema: ToolInputSchema {
             schema_type: "object".to_string(),
             properties: Some(properties),
@@ -1159,6 +1232,18 @@ fn reindex_workspace_tool() -> Tool {
         input_schema: ToolInputSchema {
             schema_type: "object".to_string(),
             properties: Some(properties),
+            required: None,
+        },
+    }
+}
+
+fn index_health_tool() -> Tool {
+    Tool {
+        name: "codegraph_index_health".to_string(),
+        description: Some("Cheap health/freshness check for the current index — no full reindex, safe to call before any risky sequence of queries. USE WHEN: you got surprisingly few/no results and want to know whether the index is stale or empty before assuming the code doesn't exist, or before a multi-step task where you want to confirm the index is trustworthy up front. Returns: namespace, workspace_root, node_count, edge_count, generation, index_generated_at (unix seconds of last persist), workspace_revision_hint (short git HEAD, if a git repo), files_tracked, files_changed_since_index (cheap re-hash of already-tracked files — does not detect brand-new/deleted files, that needs a full reindex), potentially_stale, other_namespaces (other indexed projects sharing this machine's graph database, for cross-namespace comparison), and suggested_next_queries when the index looks unhealthy. No parameters.".to_string()),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: None,
             required: None,
         },
     }
@@ -1728,14 +1813,15 @@ mod tests {
     #[test]
     fn test_get_all_tools_count() {
         let tools = get_all_tools();
-        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 7, PR: 1 = 42 community tools
+        // Analysis: 12 (incl. probe_symbol), Search: 8, Navigation: 3, Memory: 7,
+        // Dead Imports: 1, Ops: 1, Admin: 4 (incl. index_health), Docs: 7, PR: 1 = 44 community tools
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
         assert_eq!(
             tools.len(),
-            42,
-            "Expected 42 community tools, got {}",
+            44,
+            "Expected 44 community tools, got {}",
             tools.len()
         );
     }
@@ -1825,7 +1911,7 @@ mod tests {
             .iter()
             .filter(|t| tool_in_profile(&t.name, ToolProfile::Core))
             .collect();
-        assert_eq!(kept.len(), 8, "Core profile should expose 8 tools");
+        assert_eq!(kept.len(), 9, "Core profile should expose 9 tools");
         // Spot-check key inclusions.
         assert!(kept.iter().any(|t| t.name == "codegraph_symbol_search"));
         assert!(kept.iter().any(|t| t.name == "codegraph_get_ai_context"));

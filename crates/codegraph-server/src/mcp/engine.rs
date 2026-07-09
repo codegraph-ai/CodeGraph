@@ -219,7 +219,7 @@ mod imp {
         let shared_engine = {
             let mut sys = sysinfo::System::new();
             sys.refresh_memory();
-            if sys.available_memory() < 1_500_000_000 {
+            if crate::memory::should_skip_embeddings_for_available_memory(sys.available_memory()) {
                 tracing::warn!("Engine: <1.5 GB free — running graph-only (no shared model)");
                 None
             } else {

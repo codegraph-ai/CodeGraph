@@ -189,6 +189,12 @@ pub struct MemoryManager {
     embedding_model: codegraph_memory::EmbeddingBackend,
 }
 
+const MIN_EMBEDDING_FREE_BYTES: u64 = 1_500_000_000; // ~1.5 GB for model + ort runtime
+
+pub(crate) fn should_skip_embeddings_for_available_memory(avail: u64) -> bool {
+    avail != 0 && avail < MIN_EMBEDDING_FREE_BYTES
+}
+
 impl MemoryManager {
     /// Create a new MemoryManager
     pub fn new(extension_path: Option<PathBuf>) -> Self {
@@ -284,12 +290,11 @@ impl MemoryManager {
             let mut sys = sysinfo::System::new();
             sys.refresh_memory();
             let avail = sys.available_memory();
-            const MIN_FREE_BYTES: u64 = 1_500_000_000; // ~1.5 GB for model + ort runtime
             tracing::info!(
                 "[MemoryManager::initialize] available memory: {} MB",
                 avail / 1_000_000
             );
-            if avail < MIN_FREE_BYTES {
+            if should_skip_embeddings_for_available_memory(avail) {
                 crate::crash_phase::mark("onnx_skipped_lowmem");
                 tracing::warn!(
                     "[MemoryManager::initialize] only {} MB free — skipping embedding model to avoid OOM; semantic search disabled (graph-only)",
@@ -721,5 +726,15 @@ mod tests {
 
         // Invalidate it
         manager.invalidate(&id, "testing").await.unwrap();
+    }
+
+    #[test]
+    fn zero_available_memory_is_treated_as_unknown_not_low_memory() {
+        assert!(
+            !should_skip_embeddings_for_available_memory(0),
+            "a zero reading from sysinfo means unknown/broken probe, not OOM"
+        );
+        assert!(should_skip_embeddings_for_available_memory(1_499_999_999));
+        assert!(!should_skip_embeddings_for_available_memory(1_500_000_000));
     }
 }

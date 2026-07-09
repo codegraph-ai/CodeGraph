@@ -155,6 +155,16 @@ impl PythonParser {
                 .map_err(|e| ParserError::GraphError(e.to_string()))?;
 
             node_map.insert(func.name.clone(), func_id);
+            // Methods are extracted with a qualified caller name
+            // ("ClassName.method_name", see extractor.rs) for their own call
+            // sites, but were only ever registered here under the bare name
+            // — so `node_map.get(&call.caller)` below always missed for
+            // calls originating inside a method, and every such call was
+            // silently dropped into `unresolved_calls` instead of becoming
+            // a same-file Calls edge. Register the qualified name too.
+            if let Some(parent) = &func.parent_class {
+                node_map.insert(format!("{parent}.{}", func.name), func_id);
+            }
             function_ids.push(func_id);
 
             // Link function to file
@@ -193,10 +203,16 @@ impl PythonParser {
                 .map_err(|e| ParserError::GraphError(e.to_string()))?;
 
             // Methods are already added via ir.functions with parent_class set
-            // Just create edges from class to its methods
+            // Just create edges from class to its methods. Prefer the
+            // qualified key — two classes with a same-named method (e.g.
+            // `__init__`) would otherwise both resolve to whichever one
+            // `node_map`'s bare-name entry happened to be last written by.
             for method in &class.methods {
-                let method_name = method.name.clone();
-                if let Some(&method_id) = node_map.get(&method_name) {
+                let qualified = format!("{}.{}", class.name, method.name);
+                let method_id = node_map
+                    .get(&qualified)
+                    .or_else(|| node_map.get(&method.name));
+                if let Some(&method_id) = method_id {
                     // Link method to class
                     graph
                         .add_edge(class_id, method_id, EdgeType::Contains, PropertyMap::new())
@@ -586,6 +602,51 @@ mod tests {
         assert_eq!(metrics.files_attempted, 0);
         assert_eq!(metrics.files_succeeded, 0);
         assert_eq!(metrics.files_failed, 0);
+    }
+
+    #[test]
+    fn test_call_from_inside_method_creates_local_calls_edge() {
+        use codegraph::EdgeType;
+
+        // Regression test: calls made from inside a class method were never
+        // wired as Calls edges because the extractor emits a qualified
+        // caller name ("Foo.caller_method") for method-body calls, but
+        // `node_map` only ever registered functions under their bare name.
+        // `get_callers`/`get_callees` on any method silently returned
+        // nothing for same-file calls.
+        let source = "\
+class Foo:
+    def helper(self):
+        return 1
+
+    def caller_method(self):
+        return self.helper()
+";
+        let parser = PythonParser::new();
+        let mut graph = codegraph::CodeGraph::in_memory().unwrap();
+        let file_info = parser
+            .parse_source(source, Path::new("test.py"), &mut graph)
+            .unwrap();
+
+        let node_named = |name: &str| {
+            file_info
+                .functions
+                .iter()
+                .copied()
+                .find(|&id| graph.get_node(id).unwrap().properties.get_string("name") == Some(name))
+                .unwrap_or_else(|| panic!("no function node named {name}"))
+        };
+
+        let helper_id = node_named("helper");
+        let caller_id = node_named("caller_method");
+
+        let edges = graph.get_edges_between(caller_id, helper_id).unwrap();
+        assert!(
+            edges
+                .iter()
+                .any(|&eid| graph.get_edge(eid).unwrap().edge_type == EdgeType::Calls),
+            "expected a Calls edge from caller_method to helper"
+        );
     }
 
     #[test]

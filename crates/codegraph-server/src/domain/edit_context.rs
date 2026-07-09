@@ -46,7 +46,11 @@ pub(crate) struct EditContextSymbol {
     pub name: String,
     #[serde(rename = "type")]
     pub symbol_type: String,
-    pub code: String,
+    /// Absent when `includeSymbol=false` was passed — name/type/location are
+    /// still returned (needed to orient the caller) but the source body,
+    /// the single most expensive field in this response, is skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub language: String,
     pub location: EditContextLocation,
 }
@@ -141,6 +145,35 @@ pub(crate) struct EditContextError {
 // Domain Function
 // ============================================================
 
+/// Which sections to assemble and how many list entries to allow per
+/// section. Disabling a section skips its underlying queries entirely
+/// (not just its serialization) — that's where the token *and* compute
+/// savings come from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EditContextOptions {
+    pub include_symbol_source: bool,
+    pub include_callers: bool,
+    pub include_tests: bool,
+    pub include_memories: bool,
+    pub include_recent_changes: bool,
+    pub max_callers: usize,
+    pub max_tests: usize,
+}
+
+impl Default for EditContextOptions {
+    fn default() -> Self {
+        EditContextOptions {
+            include_symbol_source: true,
+            include_callers: true,
+            include_tests: true,
+            include_memories: true,
+            include_recent_changes: true,
+            max_callers: 10,
+            max_tests: 5,
+        }
+    }
+}
+
 /// Assemble comprehensive edit context for a file + line in a single call.
 ///
 /// `file_path` should be the resolved filesystem path (not a URI).
@@ -158,6 +191,7 @@ pub(crate) async fn get_edit_context(
     uri: &str,
     line: u32,
     max_tokens: usize,
+    options: EditContextOptions,
 ) -> Result<EditContextResult, EditContextError> {
     use crate::domain::node_resolution;
 
@@ -223,12 +257,16 @@ pub(crate) async fn get_edit_context(
     };
 
     // --- Section 1: Symbol source code (budget: up to 30%) ---
-    let source_code_str = {
+    let source_code_str = if options.include_symbol_source {
         let g = graph.read().await;
-        source_code::get_symbol_source(&g, target)
-            .unwrap_or_else(|| "<source not available>".to_string())
+        Some(
+            source_code::get_symbol_source(&g, target)
+                .unwrap_or_else(|| "<source not available>".to_string()),
+        )
+    } else {
+        None
     };
-    let source_tokens = source_code_str.len() / 4;
+    let source_tokens = source_code_str.as_ref().map(|s| s.len() / 4).unwrap_or(0);
     let mut budget_remaining = max_tokens.saturating_sub(source_tokens);
 
     let symbol = EditContextSymbol {
@@ -253,12 +291,14 @@ pub(crate) async fn get_edit_context(
 
     // --- Section 2: Callers (budget: up to 25% of original) ---
     let caller_budget = max_tokens / 4;
-    let callers: Vec<EditContextCaller> = {
+    let callers: Vec<EditContextCaller> = if !options.include_callers {
+        Vec::new()
+    } else {
         let callers = query_engine.get_callers(target, 1).await;
         let mut caller_tokens_used = 0usize;
         let mut caller_list = Vec::new();
 
-        for caller in callers.iter().take(10) {
+        for caller in callers.iter().take(options.max_callers) {
             if caller_tokens_used >= caller_budget {
                 break;
             }
@@ -282,7 +322,9 @@ pub(crate) async fn get_edit_context(
 
     // --- Section 3: Related tests (budget: up to 20% of original) ---
     let test_budget = max_tokens / 5;
-    let tests: Vec<EditContextTest> = {
+    let tests: Vec<EditContextTest> = if !options.include_tests {
+        Vec::new()
+    } else {
         let mut test_list = Vec::new();
         let mut test_tokens_used = 0usize;
         let mut seen_ids = std::collections::HashSet::<NodeId>::new();
@@ -293,7 +335,7 @@ pub(crate) async fn get_edit_context(
         let tests = query_engine.find_entry_points(&entry_types).await;
 
         for test in tests.iter().take(20) {
-            if test_list.len() >= 5 || test_tokens_used >= test_budget {
+            if test_list.len() >= options.max_tests || test_tokens_used >= test_budget {
                 break;
             }
             let callees = query_engine.get_callees(test.node_id, 3).await;
@@ -314,11 +356,11 @@ pub(crate) async fn get_edit_context(
         }
 
         // Stage 2: Same-file test functions (if room)
-        if test_list.len() < 5 {
+        if test_list.len() < options.max_tests {
             let g = graph.read().await;
             if let Ok(file_nodes) = g.query().property("path", sym_path.clone()).execute() {
                 for node_id in file_nodes {
-                    if test_list.len() >= 5 || test_tokens_used >= test_budget {
+                    if test_list.len() >= options.max_tests || test_tokens_used >= test_budget {
                         break;
                     }
                     if !seen_ids.insert(node_id) {
@@ -345,7 +387,9 @@ pub(crate) async fn get_edit_context(
     };
 
     // --- Section 4: Memories (budget: up to 15% of original) ---
-    let memories: Vec<EditContextMemory> = {
+    let memories: Vec<EditContextMemory> = if !options.include_memories {
+        Vec::new()
+    } else {
         let search_query = if sym_path.is_empty() {
             name.clone()
         } else {
@@ -392,7 +436,9 @@ pub(crate) async fn get_edit_context(
     };
 
     // --- Section 5: Recent git changes (budget: up to 10% of original) ---
-    let recent_changes: Vec<EditContextGitChange> = {
+    let recent_changes: Vec<EditContextGitChange> = if !options.include_recent_changes {
+        Vec::new()
+    } else {
         match workspace_folders.first().cloned() {
             Some(ws) => {
                 let file_path_clone = sym_path.clone();
@@ -452,7 +498,7 @@ pub(crate) async fn get_edit_context(
     };
 
     // Capture section presence booleans before moving the Vecs.
-    let has_symbol = !source_code_str.is_empty();
+    let has_symbol = source_code_str.is_some();
     let has_callers = !callers.is_empty();
     let has_tests = !tests.is_empty();
     let has_memories = !memories.is_empty();
