@@ -2402,6 +2402,10 @@ impl McpServer {
                     .or_else(|| args.get("include_callees"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
+                let compact = args
+                    .get("compact")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 // Use fallback for uri+line, exact match for node_id
                 let (target_node, used_fallback) = if let Some(id) = node_id {
@@ -2423,6 +2427,7 @@ impl McpServer {
                         include_source,
                         include_callers,
                         include_callees,
+                        compact,
                         used_fallback,
                         line,
                     )

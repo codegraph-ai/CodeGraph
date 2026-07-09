@@ -930,10 +930,19 @@ fn get_detailed_symbol_tool() -> Tool {
         "includeCallees".to_string(),
         boolean_prop("Include list of callees", true),
     );
+    properties.insert(
+        "compact".to_string(),
+        boolean_prop(
+            "Cap callers/callees at 5 entries each (with a *_truncated count) — \
+             use for symbols with large caller/callee lists to avoid paying for \
+             hundreds of entries you won't read",
+            false,
+        ),
+    );
 
     Tool {
         name: "codegraph_get_detailed_symbol".to_string(),
-        description: Some("Gets comprehensive symbol details including source code and relationships. USE WHEN: you need full context about a symbol — source code, callers, callees, complexity, and metadata together. MORE COMPLETE than get_symbol_info but heavier. Returns: symbol (name, kind, signature, visibility, uri, line_range, properties), source (full source code string), callers (array), callees (array). Toggle includeSource/includeCallers/includeCallees to control response size. Identify symbol via uri+line or nodeId.".to_string()),
+        description: Some("Gets comprehensive symbol details including source code and relationships. USE WHEN: you need full context about a symbol — source code, callers, callees, complexity, and metadata together. MORE COMPLETE than get_symbol_info but heavier. Returns: symbol (name, kind, signature, visibility, uri, line_range, properties — no duplicate callers/callees here, see top-level fields), source (full source code string), callers (array), callees (array). Toggle includeSource/includeCallers/includeCallees to control response size, or set compact=true to cap callers/callees at 5 entries each. Identify symbol via uri+line or nodeId.".to_string()),
         input_schema: ToolInputSchema {
             schema_type: "object".to_string(),
             properties: Some(properties),
