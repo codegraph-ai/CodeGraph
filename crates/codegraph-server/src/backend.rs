@@ -2009,6 +2009,18 @@ impl LanguageServer for CodeGraphBackend {
                 Ok(Some(serde_json::to_value(response).unwrap()))
             }
 
+            "codegraph.getDocumentCodeLens" => {
+                let args = params.arguments.first().ok_or_else(|| {
+                    tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")
+                })?;
+                let params: crate::handlers::DocumentCodeLensParams =
+                    serde_json::from_value(args.clone()).map_err(|e| {
+                        tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid params: {e}"))
+                    })?;
+                let response = self.handle_get_document_code_lens(params).await?;
+                Ok(Some(serde_json::to_value(response).unwrap()))
+            }
+
             "codegraph.analyzeComplexity" => {
                 let args = params.arguments.first().ok_or_else(|| {
                     tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")

@@ -9,7 +9,7 @@
 //! request per document backs both the lenses and the hovers.
 
 import * as vscode from 'vscode';
-import { LanguageClient, RequestType } from 'vscode-languageclient/node';
+import { LanguageClient } from 'vscode-languageclient/node';
 import type { Reporter } from '../telemetry/reporter';
 import { onDidRefreshCodeLenses, refreshCodeLenses } from './codeLensRefresh';
 
@@ -25,12 +25,6 @@ interface CodeLensSymbol {
 
 interface DocumentCodeLensResponse {
     symbols: CodeLensSymbol[];
-}
-
-namespace GetDocumentCodeLensRequest {
-    export const type = new RequestType<{ uri: string }, DocumentCodeLensResponse, void>(
-        'codegraph/getDocumentCodeLens',
-    );
 }
 
 // Register for all on-disk files rather than an enumerated language list (which
@@ -75,9 +69,16 @@ class DocumentStatsCache {
             return cached.symbols;
         }
         try {
-            const response = await this.client.sendRequest(GetDocumentCodeLensRequest.type, {
-                uri: document.uri.toString(),
-            });
+            // Dispatched via workspace/executeCommand (the server's live custom
+            // command path); the `codegraph/*` LSP request namespace is not
+            // registered on the service.
+            const response = await this.client.sendRequest<DocumentCodeLensResponse>(
+                'workspace/executeCommand',
+                {
+                    command: 'codegraph.getDocumentCodeLens',
+                    arguments: [{ uri: document.uri.toString() }],
+                },
+            );
             const symbols = response?.symbols ?? [];
             this.entries.set(key, { version: document.version, symbols });
             return symbols;

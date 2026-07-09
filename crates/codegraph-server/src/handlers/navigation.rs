@@ -231,7 +231,11 @@ impl CodeGraphBackend {
             let Ok(node) = graph.get_node(node_id) else {
                 continue;
             };
-            if node.node_type != codegraph::NodeType::Function || node_props::is_test(node) {
+            // Skip non-functions and test functions themselves - a CodeLens on
+            // a test is noise. Use is_test_like (structural marker + name/path
+            // heuristic) so languages without a structural test marker (e.g.
+            // Python `test_*`) are skipped too, matching caller classification.
+            if node.node_type != codegraph::NodeType::Function || node_props::is_test_like(node) {
                 continue;
             }
 
