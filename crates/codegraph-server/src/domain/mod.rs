@@ -23,6 +23,7 @@ pub(crate) mod module_summary;
 pub(crate) mod node_props;
 pub(crate) mod node_resolution;
 pub(crate) mod pattern_search;
+pub(crate) mod probe_symbol;
 pub(crate) mod related_tests;
 pub(crate) mod source_code;
 pub(crate) mod symbol_info;

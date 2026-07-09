@@ -2291,6 +2291,43 @@ impl McpServer {
                 }
             }
 
+            "codegraph_probe_symbol" => {
+                let uri = args.get("uri").and_then(|v| v.as_str());
+                let line = args.get("line").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let node_id = args
+                    .get("nodeId")
+                    .or_else(|| args.get("node_id"))
+                    .and_then(arg_node_id);
+
+                let (target_node, used_fallback) = if let Some(id) = node_id {
+                    (Some(id), false)
+                } else if let (Some(u), Some(l)) = (uri, line) {
+                    match self.find_nearest_node_with_fallback(u, l).await {
+                        Some((id, fallback)) => (Some(id), fallback),
+                        None => (None, false),
+                    }
+                } else {
+                    (None, false)
+                };
+
+                if let Some(node_id) = target_node {
+                    let graph = self.backend.graph.read().await;
+                    match crate::domain::probe_symbol::probe_symbol(&graph, node_id, used_fallback)
+                    {
+                        Some(result) => Ok(serde_json::to_value(&result).unwrap_or_default()),
+                        None => Ok(serde_json::json!({ "error": "Symbol not found" })),
+                    }
+                } else {
+                    let reason = self.diagnose_not_found_reason(uri).await;
+                    Ok(Self::attach_not_found_reason(
+                        serde_json::json!({
+                            "error": "Could not find symbol. Provide either nodeId or uri+line."
+                        }),
+                        reason,
+                    ))
+                }
+            }
+
             "codegraph_get_symbol_info" => {
                 let uri = args.get("uri").and_then(|v| v.as_str());
                 let line = args.get("line").and_then(|v| v.as_u64()).map(|v| v as u32);

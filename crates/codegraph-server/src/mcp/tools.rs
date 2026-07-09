@@ -59,6 +59,7 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
         Core => matches!(
             name,
             "codegraph_symbol_search"
+                | "codegraph_probe_symbol"
                 | "codegraph_get_symbol_info"
                 | "codegraph_get_detailed_symbol"
                 | "codegraph_get_ai_context"
@@ -103,7 +104,7 @@ pub fn tool_in_profile(name: &str, profile: ToolProfile) -> bool {
 /// Get all available CodeGraph tools
 pub fn get_all_tools() -> Vec<Tool> {
     vec![
-        // Analysis Tools (11)
+        // Analysis Tools (12)
         get_dependency_graph_tool(),
         get_call_graph_tool(),
         analyze_impact_tool(),
@@ -112,6 +113,7 @@ pub fn get_all_tools() -> Vec<Tool> {
         get_curated_context_tool(),
         find_related_tests_tool(),
         get_symbol_info_tool(),
+        probe_symbol_tool(),
         analyze_complexity_tool(),
         get_module_summary_tool(),
         find_circular_deps_tool(),
@@ -504,6 +506,34 @@ fn get_symbol_info_tool() -> Tool {
             schema_type: "object".to_string(),
             properties: Some(properties),
             required: Some(vec!["uri".to_string(), "line".to_string()]),
+        },
+    }
+}
+
+fn probe_symbol_tool() -> Tool {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "uri".to_string(),
+        string_prop(
+            "The file URI containing the symbol (e.g. file:///Users/me/project/src/main.rs)",
+        ),
+    );
+    properties.insert(
+        "line".to_string(),
+        number_prop("Line number of the symbol (0-indexed)", None),
+    );
+    properties.insert(
+        "nodeId".to_string(),
+        string_prop("Internal node ID from symbol_search. Alternative to uri+line."),
+    );
+
+    Tool {
+        name: "codegraph_probe_symbol".to_string(),
+        description: Some("Cheapest possible symbol lookup — confirms what you'd resolve to before paying for a heavier call. USE WHEN: you're about to call get_symbol_info/get_detailed_symbol/get_edit_context and want to check first whether uri+line lands on the symbol you expect, or whether it'll fall back to a nearby one. Returns only: name, type, node_id, uri, line_start, line_end, used_fallback, match_confidence (\"exact\" | \"fallback\") — no source, no callers/callees, no graph traversal. Requires uri+line or nodeId.".to_string()),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(properties),
+            required: None,
         },
     }
 }
@@ -1728,14 +1758,15 @@ mod tests {
     #[test]
     fn test_get_all_tools_count() {
         let tools = get_all_tools();
-        // Analysis: 11, Search: 8, Navigation: 3, Memory: 7, Dead Imports: 1, Ops: 1, Admin: 3, Docs: 7, PR: 1 = 42 community tools
+        // Analysis: 12 (incl. probe_symbol), Search: 8, Navigation: 3, Memory: 7,
+        // Dead Imports: 1, Ops: 1, Admin: 3, Docs: 7, PR: 1 = 43 community tools
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
         assert_eq!(
             tools.len(),
-            42,
-            "Expected 42 community tools, got {}",
+            43,
+            "Expected 43 community tools, got {}",
             tools.len()
         );
     }
@@ -1825,7 +1856,7 @@ mod tests {
             .iter()
             .filter(|t| tool_in_profile(&t.name, ToolProfile::Core))
             .collect();
-        assert_eq!(kept.len(), 8, "Core profile should expose 8 tools");
+        assert_eq!(kept.len(), 9, "Core profile should expose 9 tools");
         // Spot-check key inclusions.
         assert!(kept.iter().any(|t| t.name == "codegraph_symbol_search"));
         assert!(kept.iter().any(|t| t.name == "codegraph_get_ai_context"));
