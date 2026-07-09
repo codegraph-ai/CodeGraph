@@ -36,6 +36,7 @@ pub(crate) struct CallersResult {
     pub used_fallback: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_message: Option<String>,
+    pub match_confidence: &'static str,
 }
 
 /// Result of `get_callees`.
@@ -49,6 +50,7 @@ pub(crate) struct CalleesResult {
     pub used_fallback: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_message: Option<String>,
+    pub match_confidence: &'static str,
 }
 
 // ============================================================
@@ -117,6 +119,7 @@ pub(crate) async fn get_callers(
         diagnostic,
         used_fallback: used_fallback_field,
         fallback_message,
+        match_confidence: crate::domain::node_resolution::match_confidence(used_fallback),
     }
 }
 
@@ -180,6 +183,7 @@ pub(crate) async fn get_callees(
         diagnostic,
         used_fallback: used_fallback_field,
         fallback_message,
+        match_confidence: crate::domain::node_resolution::match_confidence(used_fallback),
     }
 }
 

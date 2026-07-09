@@ -90,6 +90,7 @@ pub(crate) struct ImpactResult {
     pub used_fallback: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_message: Option<String>,
+    pub match_confidence: &'static str,
 }
 
 // ============================================================
@@ -291,6 +292,7 @@ pub(crate) async fn analyze_impact(
         warnings,
         used_fallback: used_fallback_field,
         fallback_message,
+        match_confidence: crate::domain::node_resolution::match_confidence(used_fallback),
     }
 }
 

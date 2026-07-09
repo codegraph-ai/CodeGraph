@@ -7,7 +7,7 @@ use crate::backend::CodeGraphBackend;
 use crate::domain::ai_context::AiContextResult;
 use serde::{Deserialize, Serialize};
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::{Position, Range, Url};
+use tower_lsp::lsp_types::{Position, Range};
 
 // ==========================================
 // AI Context Request Types (public — used externally)
@@ -51,12 +51,8 @@ impl CodeGraphBackend {
         &self,
         params: AIContextParams,
     ) -> Result<AIContextResponse> {
-        let uri = Url::parse(&params.uri)
-            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid URI"))?;
-
-        let path = uri
-            .to_file_path()
-            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid file path"))?;
+        let path_str = crate::domain::node_resolution::resolve_uri_to_path(&params.uri)
+            .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("Invalid URI"))?;
 
         let line = if let Some(l) = params.line {
             l
@@ -68,7 +64,6 @@ impl CodeGraphBackend {
 
         let intent = params.intent.as_deref().unwrap_or("explain");
         let max_tokens = params.max_tokens.unwrap_or(4000);
-        let path_str = path.to_string_lossy().to_string();
 
         let graph = self.graph.read().await;
 

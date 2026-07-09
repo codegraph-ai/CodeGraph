@@ -40,6 +40,7 @@ pub(crate) struct SymbolInfoResult {
     pub used_fallback: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_message: Option<String>,
+    pub match_confidence: &'static str,
 }
 
 /// Result of `get_detailed_symbol`.
@@ -117,6 +118,7 @@ pub(crate) async fn get_symbol_info(
         reference_count: info.reference_count,
         used_fallback: used_fallback_field,
         fallback_message,
+        match_confidence: crate::domain::node_resolution::match_confidence(used_fallback),
     })
 }
 

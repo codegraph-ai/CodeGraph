@@ -2057,7 +2057,7 @@ impl McpServer {
                 let node_id = args
                     .get("nodeId")
                     .or_else(|| args.get("node_id"))
-                    .and_then(|v| v.as_str());
+                    .and_then(arg_node_id);
                 let depth = args
                     .get("depth")
                     .and_then(|v| v.as_u64())
@@ -2065,8 +2065,8 @@ impl McpServer {
                     .unwrap_or(1);
 
                 // Use fallback for uri+line, exact match for node_id
-                let (start_node, used_fallback) = if let Some(id_str) = node_id {
-                    (parse_node_id(id_str), false)
+                let (start_node, used_fallback) = if let Some(id) = node_id {
+                    (Some(id), false)
                 } else if let (Some(u), Some(l)) = (uri, line) {
                     match self.find_nearest_node_with_fallback(u, l).await {
                         Some((id, fallback)) => (Some(id), fallback),
@@ -2088,10 +2088,14 @@ impl McpServer {
                     .await;
                     Ok(serde_json::to_value(&result).unwrap_or_default())
                 } else {
-                    Ok(serde_json::json!({
-                        "callers": [],
-                        "message": "Could not find starting node. Provide either nodeId or uri+line."
-                    }))
+                    let reason = self.diagnose_not_found_reason(uri).await;
+                    Ok(Self::attach_not_found_reason(
+                        serde_json::json!({
+                            "callers": [],
+                            "message": "Could not find starting node. Provide either nodeId or uri+line."
+                        }),
+                        reason,
+                    ))
                 }
             }
 
@@ -2101,7 +2105,7 @@ impl McpServer {
                 let node_id = args
                     .get("nodeId")
                     .or_else(|| args.get("node_id"))
-                    .and_then(|v| v.as_str());
+                    .and_then(arg_node_id);
                 let depth = args
                     .get("depth")
                     .and_then(|v| v.as_u64())
@@ -2109,8 +2113,8 @@ impl McpServer {
                     .unwrap_or(1);
 
                 // Use fallback for uri+line, exact match for node_id
-                let (start_node, used_fallback) = if let Some(id_str) = node_id {
-                    (parse_node_id(id_str), false)
+                let (start_node, used_fallback) = if let Some(id) = node_id {
+                    (Some(id), false)
                 } else if let (Some(u), Some(l)) = (uri, line) {
                     match self.find_nearest_node_with_fallback(u, l).await {
                         Some((id, fallback)) => (Some(id), fallback),
@@ -2132,10 +2136,14 @@ impl McpServer {
                     .await;
                     Ok(serde_json::to_value(&result).unwrap_or_default())
                 } else {
-                    Ok(serde_json::json!({
-                        "callees": [],
-                        "message": "Could not find starting node. Provide either nodeId or uri+line."
-                    }))
+                    let reason = self.diagnose_not_found_reason(uri).await;
+                    Ok(Self::attach_not_found_reason(
+                        serde_json::json!({
+                            "callees": [],
+                            "message": "Could not find starting node. Provide either nodeId or uri+line."
+                        }),
+                        reason,
+                    ))
                 }
             }
 
@@ -2146,7 +2154,7 @@ impl McpServer {
                     .get("startNodeId")
                     .or_else(|| args.get("nodeId"))
                     .or_else(|| args.get("node_id"))
-                    .and_then(|v| v.as_str());
+                    .and_then(arg_node_id);
                 let direction_str = args
                     .get("direction")
                     .and_then(|v| v.as_str())
@@ -2164,8 +2172,8 @@ impl McpServer {
                     .unwrap_or(100);
 
                 // Use fallback for uri+line, exact match for node_id
-                let (start_node, used_fallback) = if let Some(id_str) = node_id {
-                    (parse_node_id(id_str), false)
+                let (start_node, used_fallback) = if let Some(id) = node_id {
+                    (Some(id), false)
                 } else if let (Some(u), Some(l)) = (uri, line) {
                     match self.find_nearest_node_with_fallback(u, l).await {
                         Some((id, fallback)) => (Some(id), fallback),
@@ -2271,11 +2279,15 @@ impl McpServer {
                         Ok(response)
                     }
                 } else {
-                    Ok(serde_json::json!({
-                        "nodes": [],
-                        "edges": [],
-                        "message": "Could not find starting node. Provide either startNodeId or uri+line."
-                    }))
+                    let reason = self.diagnose_not_found_reason(uri).await;
+                    Ok(Self::attach_not_found_reason(
+                        serde_json::json!({
+                            "nodes": [],
+                            "edges": [],
+                            "message": "Could not find starting node. Provide either startNodeId or uri+line."
+                        }),
+                        reason,
+                    ))
                 }
             }
 
@@ -2285,7 +2297,7 @@ impl McpServer {
                 let node_id = args
                     .get("nodeId")
                     .or_else(|| args.get("node_id"))
-                    .and_then(|v| v.as_str());
+                    .and_then(arg_node_id);
                 let include_refs = args
                     .get("includeReferences")
                     .or_else(|| args.get("include_references"))
@@ -2293,8 +2305,8 @@ impl McpServer {
                     .unwrap_or(false);
 
                 // Use fallback for uri+line, exact match for node_id
-                let (target_node, used_fallback) = if let Some(id_str) = node_id {
-                    (parse_node_id(id_str), false)
+                let (target_node, used_fallback) = if let Some(id) = node_id {
+                    (Some(id), false)
                 } else if let (Some(u), Some(l)) = (uri, line) {
                     match self.find_nearest_node_with_fallback(u, l).await {
                         Some((id, fallback)) => (Some(id), fallback),
@@ -2321,9 +2333,13 @@ impl McpServer {
                         })),
                     }
                 } else {
-                    Ok(serde_json::json!({
-                        "error": "Could not find symbol. Provide either nodeId or uri+line."
-                    }))
+                    let reason = self.diagnose_not_found_reason(uri).await;
+                    Ok(Self::attach_not_found_reason(
+                        serde_json::json!({
+                            "error": "Could not find symbol. Provide either nodeId or uri+line."
+                        }),
+                        reason,
+                    ))
                 }
             }
 
@@ -2333,7 +2349,7 @@ impl McpServer {
                 let node_id = args
                     .get("nodeId")
                     .or_else(|| args.get("node_id"))
-                    .and_then(|v| v.as_str());
+                    .and_then(arg_node_id);
                 let include_source = args
                     .get("includeSource")
                     .or_else(|| args.get("include_source"))
@@ -2351,8 +2367,8 @@ impl McpServer {
                     .unwrap_or(true);
 
                 // Use fallback for uri+line, exact match for node_id
-                let (target_node, used_fallback) = if let Some(id_str) = node_id {
-                    (parse_node_id(id_str), false)
+                let (target_node, used_fallback) = if let Some(id) = node_id {
+                    (Some(id), false)
                 } else if let (Some(u), Some(l)) = (uri, line) {
                     match self.find_nearest_node_with_fallback(u, l).await {
                         Some((id, fallback)) => (Some(id), fallback),
@@ -2376,9 +2392,13 @@ impl McpServer {
                     .await;
                     Ok(serde_json::to_value(&result).unwrap_or_default())
                 } else {
-                    Ok(serde_json::json!({
-                        "error": "Could not find symbol. Provide either nodeId or uri+line."
-                    }))
+                    let reason = self.diagnose_not_found_reason(uri).await;
+                    Ok(Self::attach_not_found_reason(
+                        serde_json::json!({
+                            "error": "Could not find symbol. Provide either nodeId or uri+line."
+                        }),
+                        reason,
+                    ))
                 }
             }
 
@@ -2408,12 +2428,8 @@ impl McpServer {
                     .unwrap_or(false);
 
                 let typed_result = {
-                    let url = tower_lsp::lsp_types::Url::parse(uri)
-                        .map_err(|_| "Invalid URI".to_string())?;
-                    let path = url
-                        .to_file_path()
-                        .map_err(|_| "Invalid file path".to_string())?;
-                    let path_str = path.to_string_lossy().to_string();
+                    let path_str = crate::domain::node_resolution::resolve_uri_to_path(uri)
+                        .ok_or("Invalid URI")?;
                     let graph = self.backend.graph.read().await;
                     crate::domain::dependency_graph::get_dependency_graph(
                         &graph, &path_str, depth, direction,
@@ -2480,11 +2496,17 @@ impl McpServer {
                         .await;
                         serde_json::to_value(&typed).unwrap_or_default()
                     }
-                    None => serde_json::json!({
-                        "nodes": [],
-                        "edges": [],
-                        "message": "Could not find symbol at location"
-                    }),
+                    None => {
+                        let reason = self.diagnose_not_found_reason(Some(uri)).await;
+                        Self::attach_not_found_reason(
+                            serde_json::json!({
+                                "nodes": [],
+                                "edges": [],
+                                "message": "Could not find symbol at location"
+                            }),
+                            reason,
+                        )
+                    }
                 };
 
                 if summary {
@@ -2567,11 +2589,17 @@ impl McpServer {
                         .await;
                         serde_json::to_value(&typed).unwrap_or_default()
                     }
-                    None => serde_json::json!({
-                        "impacted": [],
-                        "risk_level": "unknown",
-                        "message": "Could not find symbol at location"
-                    }),
+                    None => {
+                        let reason = self.diagnose_not_found_reason(Some(uri)).await;
+                        Self::attach_not_found_reason(
+                            serde_json::json!({
+                                "impacted": [],
+                                "risk_level": "unknown",
+                                "message": "Could not find symbol at location"
+                            }),
+                            reason,
+                        )
+                    }
                 };
 
                 if summary {
@@ -2633,19 +2661,21 @@ impl McpServer {
                     .map(|v| v as usize)
                     .unwrap_or(4000);
 
-                let url =
-                    tower_lsp::lsp_types::Url::parse(uri).map_err(|_| "Invalid URI".to_string())?;
-                let path = url
-                    .to_file_path()
-                    .map_err(|_| "Invalid file path".to_string())?;
-                let path_str = path.to_string_lossy().to_string();
+                let path_str = crate::domain::node_resolution::resolve_uri_to_path(uri)
+                    .ok_or_else(|| "Invalid URI".to_string())?;
+                let path = std::path::Path::new(&path_str);
 
                 let graph = self.backend.graph.read().await;
                 let result = crate::domain::ai_context::get_ai_context(
                     &graph, &path_str, line, intent, max_tokens,
                 )
                 .ok_or_else(|| {
-                    format!("No symbols found in '{uri}'. Try indexing the workspace first.")
+                    let reason = crate::domain::node_resolution::diagnose_not_found(&graph, uri);
+                    format!(
+                        "No symbols found in '{uri}' ({}). {}",
+                        reason.code(),
+                        reason.hint()
+                    )
                 })?;
 
                 let mut json = serde_json::to_value(result).map_err(|e| e.to_string())?;
@@ -2713,11 +2743,8 @@ impl McpServer {
                     .map(|v| v as usize)
                     .unwrap_or(8000);
 
-                let file_path = tower_lsp::lsp_types::Url::parse(uri)
-                    .ok()
-                    .and_then(|u| u.to_file_path().ok())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
+                let file_path = crate::domain::node_resolution::resolve_uri_to_path(uri)
+                    .ok_or("Invalid URI")?;
                 let result = crate::domain::edit_context::get_edit_context(
                     &self.backend.graph,
                     &self.backend.query_engine,
@@ -2754,12 +2781,8 @@ impl McpServer {
                     .map(|v| v as usize)
                     .unwrap_or(5);
 
-                let anchor_path: Option<String> = uri.and_then(|u| {
-                    tower_lsp::lsp_types::Url::parse(u)
-                        .ok()
-                        .and_then(|parsed| parsed.to_file_path().ok())
-                        .map(|p| p.to_string_lossy().to_string())
-                });
+                let anchor_path: Option<String> =
+                    uri.and_then(crate::domain::node_resolution::resolve_uri_to_path);
                 let result = crate::domain::curated_context::get_curated_context(
                     &self.backend.graph,
                     &self.backend.query_engine,
@@ -2792,46 +2815,40 @@ impl McpServer {
                     .map(|v| v as usize)
                     .unwrap_or(10);
 
-                // Resolve file path
-                let url = match tower_lsp::lsp_types::Url::parse(uri) {
-                    Ok(u) => u,
-                    Err(_) => {
+                // Resolve file path (accepts file:// URIs and plain paths)
+                let path_str = match crate::domain::node_resolution::resolve_uri_to_path(uri) {
+                    Some(p) => p,
+                    None => {
                         return Ok(serde_json::json!({
                             "tests": [],
                             "message": "Invalid URI"
                         }))
                     }
                 };
-                let file_path = match url.to_file_path() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        return Ok(serde_json::json!({
-                            "tests": [],
-                            "message": "Invalid file path"
-                        }))
-                    }
-                };
-                let path_str = file_path.to_string_lossy().to_string();
 
-                // Resolve target node (with fallback to nearest symbol)
-                let (target_node_id, used_fallback, symbol_name) =
+                // Resolve target node (with fallback to nearest symbol). Prefer the
+                // node's own stored `path` property over the resolved URI for the
+                // exact-match query below, since the graph may index files under a
+                // relative path while the resolved URI is absolute (or vice versa).
+                let (target_node_id, used_fallback, symbol_name, resolved_path) =
                     match self.find_nearest_node_with_fallback(uri, line).await {
                         Some((id, fallback)) => {
-                            let name = {
-                                let graph = self.backend.graph.read().await;
-                                graph
-                                    .get_node(id)
-                                    .ok()
-                                    .map(|n| node_props::name(n).to_string())
-                                    .unwrap_or_default()
-                            };
-                            (Some(id), fallback, name)
+                            let graph = self.backend.graph.read().await;
+                            let node = graph.get_node(id).ok();
+                            let name = node
+                                .map(|n| node_props::name(n).to_string())
+                                .unwrap_or_default();
+                            let node_path = node
+                                .map(|n| node_props::path(n).to_string())
+                                .filter(|p| !p.is_empty())
+                                .unwrap_or_else(|| path_str.clone());
+                            (Some(id), fallback, name, node_path)
                         }
-                        None => (None, false, String::new()),
+                        None => (None, false, String::new(), path_str.clone()),
                     };
 
                 let params = crate::domain::related_tests::FindRelatedTestsParams {
-                    path: path_str.clone(),
+                    path: resolved_path,
                     target_node_id,
                     limit,
                 };
@@ -2903,18 +2920,19 @@ impl McpServer {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
-                let url =
-                    tower_lsp::lsp_types::Url::parse(uri).map_err(|_| "Invalid URI".to_string())?;
-                let path = url
-                    .to_file_path()
-                    .map_err(|_| "Invalid file path".to_string())?;
+                let path_str = crate::domain::node_resolution::resolve_uri_to_path(uri)
+                    .ok_or("Invalid URI")?;
                 let graph = self.backend.graph.read().await;
-                let path_str = path.to_string_lossy().to_string();
-                let file_nodes = graph
-                    .query()
-                    .property("path", path_str)
-                    .execute()
-                    .unwrap_or_default();
+                let file_nodes: Vec<codegraph::NodeId> = graph
+                    .nodes_iter()
+                    .filter(|(_, node)| {
+                        crate::domain::node_resolution::paths_match(
+                            node_props::path(node),
+                            &path_str,
+                        )
+                    })
+                    .map(|(&id, _)| id)
+                    .collect();
                 let result = crate::handlers::metrics::analyze_file_complexity(
                     &graph,
                     &file_nodes,
@@ -3132,12 +3150,8 @@ impl McpServer {
                     .unwrap_or(5);
 
                 // Find code nodes at the given location and search for related memories
-                let url =
-                    tower_lsp::lsp_types::Url::parse(uri).map_err(|_| "Invalid URI".to_string())?;
-                let path = url
-                    .to_file_path()
-                    .map_err(|_| "Invalid file path".to_string())?;
-                let path_str = path.to_string_lossy().to_string();
+                let path_str =
+                    crate::domain::node_resolution::resolve_uri_to_path(uri).ok_or("Invalid URI")?;
 
                 // Search for memories related to this file
                 let current_only = args
@@ -3323,48 +3337,69 @@ impl McpServer {
             // ==================== Admin Tools ====================
             "codegraph_reindex_workspace" => {
                 let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-                tracing::info!("Reindexing workspace (force={})...", force);
 
-                if force {
-                    // Force: clear graph and hash cache for full rebuild
-                    {
-                        let mut graph = self.backend.graph.write().await;
-                        *graph = codegraph::CodeGraph::in_memory()
-                            .map_err(|e| format!("Failed to create new graph: {}", e))?;
-                    }
-                    self.backend.index_state.lock().await.clear();
-                }
-                // else: incremental — index_file skips unchanged files via hash cache
+                let (total, parsed, node_count_after) = self.do_reindex_workspace(force).await?;
+                let mut degraded = total > 0 && node_count_after == 0;
 
-                // Reindex the workspace
-                let (total, parsed) = self.backend.index_workspace().await;
-                tracing::info!(
-                    "Reindexed: {} total, {} parsed, {} skipped",
-                    total,
-                    parsed,
-                    total - parsed
-                );
+                // A soft (force=false) reindex that left the graph empty is almost
+                // always stale hash-cache/state, not a real parsing failure — the
+                // same situation `force=true` exists to fix. Auto-retry once so
+                // callers don't have to learn "degraded means call me again with
+                // force=true" the hard way.
+                let (total, parsed, node_count_after, auto_retried) = if degraded && !force {
+                    tracing::warn!(
+                        "Soft reindex left the graph empty ({} files processed, 0 nodes) — \
+                         auto-retrying with force=true",
+                        total
+                    );
+                    let (total2, parsed2, node_count_after2) =
+                        self.do_reindex_workspace(true).await?;
+                    degraded = total2 > 0 && node_count_after2 == 0;
+                    (total2, parsed2, node_count_after2, true)
+                } else {
+                    (total, parsed, node_count_after, false)
+                };
 
-                // Embed any new/changed symbols so semantic search reflects the reindex.
-                if !self.backend.graph_only {
-                    self.backend.query_engine.embed_missing_symbols().await;
-                    self.backend.query_engine.prune_orphan_vectors().await;
-                    if let Err(e) = self
-                        .backend
-                        .query_engine
-                        .save_symbol_vectors(&self.backend.project_slug)
-                        .await
-                    {
-                        tracing::warn!("Failed to persist vectors after reindex: {}", e);
-                    }
-                }
+                let status = if degraded { "degraded" } else { "success" };
+                let message = if degraded && auto_retried {
+                    format!(
+                        "Reindex reported {} files processed, but the graph has 0 nodes afterwards \
+                         even after an automatic force=true retry. The workspace root, \
+                         .codegraphignore, or --max-files may be excluding everything.",
+                        total
+                    )
+                } else if degraded {
+                    format!(
+                        "Reindex reported {} files processed, but the graph has 0 nodes afterwards \
+                         even with force=true. The workspace root, .codegraphignore, or \
+                         --max-files may be excluding everything.",
+                        total
+                    )
+                } else if auto_retried {
+                    format!(
+                        "Soft reindex found a stale/empty graph; auto-retried with force=true. \
+                         Reindexed {} files ({} changed, {} skipped)",
+                        total,
+                        parsed,
+                        total - parsed
+                    )
+                } else {
+                    format!(
+                        "Reindexed {} files ({} changed, {} skipped)",
+                        total,
+                        parsed,
+                        total - parsed
+                    )
+                };
 
                 Ok(serde_json::json!({
-                    "status": "success",
-                    "message": format!("Reindexed {} files ({} changed, {} skipped)", total, parsed, total - parsed),
+                    "status": status,
+                    "message": message,
                     "files_indexed": total,
                     "files_parsed": parsed,
-                    "files_skipped": total - parsed
+                    "files_skipped": total - parsed,
+                    "node_count_after": node_count_after,
+                    "auto_retried_with_force": auto_retried
                 }))
             }
 
@@ -4615,9 +4650,7 @@ impl McpServer {
                 let file_path: Option<String> = args
                     .get("uri")
                     .and_then(|v| v.as_str())
-                    .and_then(|uri| tower_lsp::lsp_types::Url::parse(uri).ok())
-                    .and_then(|url| url.to_file_path().ok())
-                    .map(|p| p.to_string_lossy().to_string());
+                    .and_then(crate::domain::node_resolution::resolve_uri_to_path);
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
 
                 let typed_result = {
@@ -4724,6 +4757,49 @@ impl McpServer {
     }
 
     /// Find a node at location with broader fallback, returning whether fallback was used.
+    /// Reindex the workspace, optionally clearing the graph/hash-cache first.
+    ///
+    /// Returns `(files_indexed, files_parsed, node_count_after)`.
+    async fn do_reindex_workspace(&self, force: bool) -> Result<(usize, usize, usize), String> {
+        tracing::info!("Reindexing workspace (force={})...", force);
+
+        if force {
+            // Force: clear graph and hash cache for full rebuild
+            {
+                let mut graph = self.backend.graph.write().await;
+                *graph = codegraph::CodeGraph::in_memory()
+                    .map_err(|e| format!("Failed to create new graph: {}", e))?;
+            }
+            self.backend.index_state.lock().await.clear();
+        }
+        // else: incremental — index_file skips unchanged files via hash cache
+
+        let (total, parsed) = self.backend.index_workspace().await;
+        tracing::info!(
+            "Reindexed: {} total, {} parsed, {} skipped",
+            total,
+            parsed,
+            total - parsed
+        );
+
+        // Embed any new/changed symbols so semantic search reflects the reindex.
+        if !self.backend.graph_only {
+            self.backend.query_engine.embed_missing_symbols().await;
+            self.backend.query_engine.prune_orphan_vectors().await;
+            if let Err(e) = self
+                .backend
+                .query_engine
+                .save_symbol_vectors(&self.backend.project_slug)
+                .await
+            {
+                tracing::warn!("Failed to persist vectors after reindex: {}", e);
+            }
+        }
+
+        let node_count_after = self.backend.graph.read().await.node_count();
+        Ok((total, parsed, node_count_after))
+    }
+
     ///
     /// Strategy:
     /// 1. First try exact match (line within symbol's range)
@@ -4735,11 +4811,42 @@ impl McpServer {
         uri: &str,
         line: u32,
     ) -> Option<(codegraph::NodeId, bool)> {
-        let url = tower_lsp::lsp_types::Url::parse(uri).ok()?;
-        let path = url.to_file_path().ok()?;
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = crate::domain::node_resolution::resolve_uri_to_path(uri)?;
         let graph = self.backend.graph.read().await;
         crate::domain::node_resolution::find_nearest_node(&graph, &path_str, line)
+    }
+
+    /// Diagnose why a `uri`-based lookup found nothing, for use in "not found"
+    /// error responses. Returns `None` if no `uri` was given (e.g. a bad
+    /// `nodeId` alone doesn't carry enough information to diagnose).
+    async fn diagnose_not_found_reason(
+        &self,
+        uri: Option<&str>,
+    ) -> Option<crate::domain::node_resolution::SymbolNotFoundReason> {
+        let uri = uri?;
+        let graph = self.backend.graph.read().await;
+        Some(crate::domain::node_resolution::diagnose_not_found(
+            &graph, uri,
+        ))
+    }
+
+    /// Merge a diagnosed not-found reason (if any) into an error response object.
+    fn attach_not_found_reason(
+        mut value: Value,
+        reason: Option<crate::domain::node_resolution::SymbolNotFoundReason>,
+    ) -> Value {
+        if let (Some(reason), Some(obj)) = (reason, value.as_object_mut()) {
+            obj.insert("reason".to_string(), serde_json::json!(reason.code()));
+            obj.insert("hint".to_string(), serde_json::json!(reason.hint()));
+            let suggestions = reason.suggested_next_queries();
+            if !suggestions.is_empty() {
+                obj.insert(
+                    "suggested_next_queries".to_string(),
+                    serde_json::json!(suggestions),
+                );
+            }
+        }
+        value
     }
 
     /// Build a memory node from parameters
@@ -4910,10 +5017,9 @@ impl McpServer {
     }
 }
 
-/// Parse a string into a NodeId
-fn parse_node_id(s: &str) -> Option<codegraph::NodeId> {
-    // NodeId is u64 in codegraph
-    s.parse::<codegraph::NodeId>().ok()
+/// Read a nodeId argument that MCP clients may send as either a JSON string or a JSON number.
+fn arg_node_id(v: &serde_json::Value) -> Option<codegraph::NodeId> {
+    v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
 #[cfg(test)]
