@@ -2785,6 +2785,49 @@ impl McpServer {
                     .map(|v| v as usize)
                     .unwrap_or(8000);
 
+                let defaults = crate::domain::edit_context::EditContextOptions::default();
+                let bool_arg = |key: &str, snake: &str, default: bool| {
+                    args.get(key)
+                        .or_else(|| args.get(snake))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(default)
+                };
+                let options = crate::domain::edit_context::EditContextOptions {
+                    include_symbol_source: bool_arg(
+                        "includeSymbol",
+                        "include_symbol",
+                        defaults.include_symbol_source,
+                    ),
+                    include_callers: bool_arg(
+                        "includeCallers",
+                        "include_callers",
+                        defaults.include_callers,
+                    ),
+                    include_tests: bool_arg("includeTests", "include_tests", defaults.include_tests),
+                    include_memories: bool_arg(
+                        "includeMemories",
+                        "include_memories",
+                        defaults.include_memories,
+                    ),
+                    include_recent_changes: bool_arg(
+                        "includeRecentChanges",
+                        "include_recent_changes",
+                        defaults.include_recent_changes,
+                    ),
+                    max_callers: args
+                        .get("maxCallers")
+                        .or_else(|| args.get("max_callers"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize)
+                        .unwrap_or(defaults.max_callers),
+                    max_tests: args
+                        .get("maxTests")
+                        .or_else(|| args.get("max_tests"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize)
+                        .unwrap_or(defaults.max_tests),
+                };
+
                 let file_path = crate::domain::node_resolution::resolve_uri_to_path(uri)
                     .ok_or("Invalid URI")?;
                 let result = crate::domain::edit_context::get_edit_context(
@@ -2796,6 +2839,7 @@ impl McpServer {
                     uri,
                     line,
                     max_tokens,
+                    options,
                 )
                 .await;
                 Ok(match result {
