@@ -390,6 +390,13 @@ If it saves you time, consider [sponsoring on GitHub](https://github.com/sponsor
 
 ---
 
+## Authors
+
+- [Andrey Vasilevsky](https://github.com/anvanster) — creator & maintainer
+- [Aleksei Nekrasov](https://github.com/Znbiz) — contributor
+
+---
+
 ## License
 
 Apache-2.0
