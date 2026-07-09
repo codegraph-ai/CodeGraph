@@ -604,12 +604,32 @@ fn extract_calls_recursive(
     }
 }
 
-/// Extract the callee name from a call's function node
+/// Extract the callee name from a call's function node.
+///
+/// For `self.method()`/`cls.method()` — by far the most common call shape
+/// inside any method — returns the bare `method` name, not `self.method`.
+/// `self`/`cls` are Python's instance/class-reference convention, not a
+/// real qualifier; graph nodes are keyed by bare name (or `Class.method`
+/// for the *caller* side, see `parser_impl::ir_to_graph`), so a literal
+/// `"self.method"` string never matched anything and every such call was
+/// silently dropped instead of becoming a same-file Calls edge. Other
+/// `obj.method()` shapes keep the full dotted text — resolving those
+/// would need type inference this extractor doesn't do, so falling back
+/// to unresolved (as before) is still correct there.
 fn extract_callee_name(source: &[u8], node: Node) -> String {
     match node.kind() {
         "identifier" => node.utf8_text(source).unwrap_or("").to_string(),
         "attribute" => {
-            // Handle obj.method() or self.method()
+            let object_is_self_or_cls = node
+                .child_by_field_name("object")
+                .and_then(|o| o.utf8_text(source).ok())
+                .is_some_and(|t| t == "self" || t == "cls");
+            if object_is_self_or_cls {
+                if let Some(attr) = node.child_by_field_name("attribute") {
+                    return attr.utf8_text(source).unwrap_or("").to_string();
+                }
+            }
+            // Handle obj.method() — kept as the full dotted text (unresolved).
             node.utf8_text(source).unwrap_or("").to_string()
         }
         _ => String::new(),
