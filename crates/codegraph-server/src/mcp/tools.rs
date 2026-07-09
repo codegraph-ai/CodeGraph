@@ -142,10 +142,11 @@ pub fn get_all_tools() -> Vec<Tool> {
         find_dead_imports_tool(),
         // Ops Struct Tools (1)
         find_implementors_tool(),
-        // Admin Tools (3)
+        // Admin Tools (4)
         reindex_workspace_tool(),
         index_files_tool(),
         index_directory_tool(),
+        index_health_tool(),
         // PR / Change Analysis (1)
         pr_context_tool(),
         // Docs Tools (7)
@@ -1236,6 +1237,18 @@ fn reindex_workspace_tool() -> Tool {
     }
 }
 
+fn index_health_tool() -> Tool {
+    Tool {
+        name: "codegraph_index_health".to_string(),
+        description: Some("Cheap health/freshness check for the current index — no full reindex, safe to call before any risky sequence of queries. USE WHEN: you got surprisingly few/no results and want to know whether the index is stale or empty before assuming the code doesn't exist, or before a multi-step task where you want to confirm the index is trustworthy up front. Returns: namespace, workspace_root, node_count, edge_count, generation, index_generated_at (unix seconds of last persist), workspace_revision_hint (short git HEAD, if a git repo), files_tracked, files_changed_since_index (cheap re-hash of already-tracked files — does not detect brand-new/deleted files, that needs a full reindex), potentially_stale, other_namespaces (other indexed projects sharing this machine's graph database, for cross-namespace comparison), and suggested_next_queries when the index looks unhealthy. No parameters.".to_string()),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: None,
+            required: None,
+        },
+    }
+}
+
 fn index_files_tool() -> Tool {
     let mut properties = HashMap::new();
     properties.insert(
@@ -1801,14 +1814,14 @@ mod tests {
     fn test_get_all_tools_count() {
         let tools = get_all_tools();
         // Analysis: 12 (incl. probe_symbol), Search: 8, Navigation: 3, Memory: 7,
-        // Dead Imports: 1, Ops: 1, Admin: 3, Docs: 7, PR: 1 = 43 community tools
+        // Dead Imports: 1, Ops: 1, Admin: 4 (incl. index_health), Docs: 7, PR: 1 = 44 community tools
         // (12 premium tools moved to pro edition: scan_security, analyze_coupling, find_unused_code,
         //  find_duplicates, find_similar, cluster_symbols, compare_symbols, cross_project_search,
         //  mine_git_history, mine_git_history_for_file, search_git_history)
         assert_eq!(
             tools.len(),
-            43,
-            "Expected 43 community tools, got {}",
+            44,
+            "Expected 44 community tools, got {}",
             tools.len()
         );
     }

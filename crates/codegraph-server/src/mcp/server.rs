@@ -3478,7 +3478,7 @@ impl McpServer {
                     )
                 };
 
-                Ok(serde_json::json!({
+                let mut response = serde_json::json!({
                     "status": status,
                     "message": message,
                     "files_indexed": total,
@@ -3486,6 +3486,101 @@ impl McpServer {
                     "files_skipped": total - parsed,
                     "node_count_after": node_count_after,
                     "auto_retried_with_force": auto_retried
+                });
+                if degraded {
+                    if let Some(obj) = response.as_object_mut() {
+                        obj.insert(
+                            "suggested_next_queries".to_string(),
+                            serde_json::json!([
+                                "codegraph_index_health — inspect workspace_root, .codegraphignore \
+                                 exclusions, and files_changed_since_index before retrying",
+                            ]),
+                        );
+                    }
+                }
+                Ok(response)
+            }
+
+            // ==================== Index Health ====================
+            "codegraph_index_health" => {
+                let (node_count, edge_count) = {
+                    let graph = self.backend.graph.read().await;
+                    (graph.node_count(), graph.edge_count())
+                };
+
+                let workspace_root = self
+                    .backend
+                    .workspace_folders
+                    .first()
+                    .map(|p| p.display().to_string());
+
+                let workspace_revision_hint = self
+                    .backend
+                    .workspace_folders
+                    .first()
+                    .and_then(|ws| crate::git_mining::GitExecutor::new(ws).ok())
+                    .and_then(|g| g.head_commit().ok())
+                    .map(|h| h[..8.min(h.len())].to_string());
+
+                // Cheap staleness check: re-hash only files we already know
+                // about (no directory walk) and count content drift. Doesn't
+                // catch brand-new/deleted files — that needs a full walk,
+                // which is what reindex itself does; this stays cheap on
+                // purpose so it's safe to call before every risky operation.
+                let files_changed_since_index = {
+                    let state = self.backend.index_state.lock().await;
+                    state
+                        .all_hashes()
+                        .iter()
+                        .filter(|(path, &stored_hash)| {
+                            match std::fs::read(path) {
+                                Ok(content) => {
+                                    crate::indexer::Indexer::hash_content(&content) != stored_hash
+                                }
+                                Err(_) => true, // file removed/unreadable since indexing
+                            }
+                        })
+                        .count()
+                };
+                let files_tracked = self.backend.index_state.lock().await.len();
+
+                let registry = McpBackend::list_indexed_projects().unwrap_or_default();
+                let (index_generated_at, other_namespaces): (Option<u64>, Vec<serde_json::Value>) = {
+                    let mut generated_at = None;
+                    let mut others = Vec::new();
+                    for project in registry {
+                        let slug = project.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+                        if slug == self.backend.project_slug {
+                            generated_at = project.get("last_indexed").and_then(|v| v.as_u64());
+                        } else {
+                            others.push(project);
+                        }
+                    }
+                    (generated_at, others)
+                };
+
+                let potentially_stale = node_count == 0 || files_changed_since_index > 0;
+
+                let mut suggested_next_queries: Vec<&str> = Vec::new();
+                if node_count == 0 {
+                    suggested_next_queries.push("codegraph_reindex_workspace(force=true)");
+                } else if files_changed_since_index > 0 {
+                    suggested_next_queries.push("codegraph_reindex_workspace(force=false)");
+                }
+
+                Ok(serde_json::json!({
+                    "namespace": self.backend.project_slug,
+                    "workspace_root": workspace_root,
+                    "node_count": node_count,
+                    "edge_count": edge_count,
+                    "generation": crate::memory::graph_db_generation(),
+                    "index_generated_at": index_generated_at,
+                    "workspace_revision_hint": workspace_revision_hint,
+                    "files_tracked": files_tracked,
+                    "files_changed_since_index": files_changed_since_index,
+                    "potentially_stale": potentially_stale,
+                    "other_namespaces": other_namespaces,
+                    "suggested_next_queries": suggested_next_queries,
                 }))
             }
 
