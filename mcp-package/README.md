@@ -54,6 +54,11 @@ Pass flags after `--`:
 | `--graph-only` | off | Skip embeddings — graph + structural tools only. No ONNX model load, 10-50× faster indexing. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot: index, run a single tool, print result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
 
+Before loading the ONNX embedding model, the server checks available memory and runs graph-only if under ~1.5 GB.
+If embeddings are disabled even though the machine has plenty of free RAM, set `CODEGRAPH_SKIP_MEMORY_CHECK=1` (also accepts `true`/`yes`) to bypass the check.
+A reading of `0 MB available` is treated as a detection failure and the model loads anyway (common on macOS).
+Works in both MCP and one-shot `--run-tool` modes.
+
 ### Agent rules (recommended)
 
 Pre-configured rule files that teach your AI agent to use CodeGraph tools before falling back to grep / multi-file reads:
