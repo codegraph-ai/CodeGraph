@@ -100,6 +100,21 @@ with no setup. For the CLI/MCP server it needs a local model directory
 - Distill one from any sentence-transformer (Apache-2.0 Jina-Code by default) in
   ~30 s on CPU: `python scripts/distill_static_model.py`.
 
+#### `CODEGRAPH_SKIP_MEMORY_CHECK` — force the embedding model past the RAM gate
+
+Before loading the ONNX model, the server checks available memory and, if under
+~1.5 GB, skips the model to avoid an OOM-kill (running graph-only instead).
+Set `CODEGRAPH_SKIP_MEMORY_CHECK=1` (also accepts `true`/`yes`) to bypass that
+check and always load the model.
+
+Use it if embeddings are disabled even though the machine has plenty of free
+RAM.
+A reading of `0 MB available` is treated as a detection failure and the model
+loads anyway (macOS parks reclaimable memory in inactive/speculative pages that
+some memory readers do not count as free), so this override is mainly for other
+cases where the reported figure is low but wrong.
+It works in both MCP and one-shot `--run-tool` modes.
+
 #### `--profile` — narrow the MCP tool surface
 
 The full 32-tool surface is convenient but inflates the agent's prompt-context cost. A profile exposes only the slice you need (also settable via the `CODEGRAPH_TOOL_PROFILE` env var):

@@ -169,6 +169,62 @@ fn project_data_dir(workspace_path: &Path) -> Result<PathBuf, MemoryError> {
         .join(slug))
 }
 
+/// Minimum available memory to load the ONNX embedding model + runtime
+/// without risking an OOM-kill (a native crash Rust can't catch).
+pub(crate) const MODEL_MIN_FREE_BYTES: u64 = 1_500_000_000; // ~1.5 GB
+
+/// Decision of the pre-model-load RAM gate. Separated from the live sysinfo
+/// reading so the policy is unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryGate {
+    /// Enough available memory (or the check was bypassed) — load the model.
+    Load,
+    /// Genuinely constrained — skip the model and run graph-only. Carries the
+    /// detected byte count for the log/error message.
+    Skip(u64),
+    /// The available-memory reading was 0, which is a detection failure rather
+    /// than a real state: a running process always holds memory, and on macOS
+    /// reclaimable memory is parked in inactive/speculative/purgeable pages
+    /// that some `sysinfo` versions report as 0 available (issue #13). Proceed
+    /// with the load instead of hard-disabling on a number we don't trust.
+    ProceedDetectionFailed,
+}
+
+/// Decide whether to load the embedding model from the available-memory
+/// reading, the minimum threshold, and whether the user forced a bypass.
+///
+/// Pure: no I/O, no env reads — the caller supplies the inputs. This is the
+/// gate policy; keeping it separate lets tests cover the 0-MB detection-failure
+/// path that can't be reproduced by driving `sysinfo` live.
+pub(crate) fn evaluate_memory_gate(
+    available_bytes: u64,
+    min_free_bytes: u64,
+    bypass: bool,
+) -> MemoryGate {
+    if bypass {
+        return MemoryGate::Load;
+    }
+    if available_bytes == 0 {
+        return MemoryGate::ProceedDetectionFailed;
+    }
+    if available_bytes < min_free_bytes {
+        return MemoryGate::Skip(available_bytes);
+    }
+    MemoryGate::Load
+}
+
+/// Whether the user forced the RAM gate off via `CODEGRAPH_SKIP_MEMORY_CHECK`
+/// (`1`/`true`/`yes`, case-insensitive). The escape hatch works in both MCP and
+/// one-shot `--run-tool` modes since it is read at model-load time.
+pub(crate) fn memory_check_bypassed() -> bool {
+    std::env::var("CODEGRAPH_SKIP_MEMORY_CHECK")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
 /// Memory manager for the LSP server
 ///
 /// Opens the database on-demand for each operation and closes it immediately after.
@@ -192,7 +248,10 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create a new MemoryManager
     pub fn new(extension_path: Option<PathBuf>) -> Self {
-        Self::with_model(extension_path, codegraph_memory::EmbeddingBackend::default())
+        Self::with_model(
+            extension_path,
+            codegraph_memory::EmbeddingBackend::default(),
+        )
     }
 
     /// Create a new MemoryManager with a specific embedding backend
@@ -284,21 +343,30 @@ impl MemoryManager {
             let mut sys = sysinfo::System::new();
             sys.refresh_memory();
             let avail = sys.available_memory();
-            const MIN_FREE_BYTES: u64 = 1_500_000_000; // ~1.5 GB for model + ort runtime
             tracing::info!(
                 "[MemoryManager::initialize] available memory: {} MB",
                 avail / 1_000_000
             );
-            if avail < MIN_FREE_BYTES {
-                crate::crash_phase::mark("onnx_skipped_lowmem");
-                tracing::warn!(
-                    "[MemoryManager::initialize] only {} MB free — skipping embedding model to avoid OOM; semantic search disabled (graph-only)",
-                    avail / 1_000_000
-                );
-                return Err(MemoryError::Other(format!(
-                    "insufficient memory ({} MB free) to load embedding model; running graph-only",
-                    avail / 1_000_000
-                )));
+            match evaluate_memory_gate(avail, MODEL_MIN_FREE_BYTES, memory_check_bypassed()) {
+                MemoryGate::Skip(avail) => {
+                    crate::crash_phase::mark("onnx_skipped_lowmem");
+                    tracing::warn!(
+                        "[MemoryManager::initialize] only {} MB available — skipping embedding model to avoid OOM; semantic search disabled (graph-only). Set CODEGRAPH_SKIP_MEMORY_CHECK=1 to override.",
+                        avail / 1_000_000
+                    );
+                    return Err(MemoryError::Other(format!(
+                        "insufficient memory ({} MB available) to load embedding model; running graph-only (set CODEGRAPH_SKIP_MEMORY_CHECK=1 to override)",
+                        avail / 1_000_000
+                    )));
+                }
+                MemoryGate::ProceedDetectionFailed => {
+                    // 0 MB is a detection failure (see MemoryGate) — don't
+                    // disable embeddings on a Mac that actually has RAM.
+                    tracing::warn!(
+                        "[MemoryManager::initialize] available memory read as 0 MB — treating as a detection failure (common on macOS, where reclaimable memory is not counted as free) and proceeding with the embedding model load. Set CODEGRAPH_SKIP_MEMORY_CHECK=1 to always bypass this check."
+                    );
+                }
+                MemoryGate::Load => {}
             }
         }
 
@@ -611,6 +679,51 @@ pub use codegraph_memory::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MIN: u64 = MODEL_MIN_FREE_BYTES;
+
+    #[test]
+    fn gate_loads_when_ample_memory() {
+        assert_eq!(
+            evaluate_memory_gate(8_000_000_000, MIN, false),
+            MemoryGate::Load
+        );
+    }
+
+    #[test]
+    fn gate_loads_exactly_at_threshold() {
+        // `< min` is the skip condition, so exactly `min` must load.
+        assert_eq!(evaluate_memory_gate(MIN, MIN, false), MemoryGate::Load);
+    }
+
+    #[test]
+    fn gate_skips_when_genuinely_low() {
+        assert_eq!(
+            evaluate_memory_gate(500_000_000, MIN, false),
+            MemoryGate::Skip(500_000_000)
+        );
+    }
+
+    #[test]
+    fn gate_proceeds_on_zero_reading_as_detection_failure() {
+        // The issue-13 case: sysinfo reports 0 available on a healthy Mac.
+        // 0 is never a real state, so proceed rather than disable embeddings.
+        assert_eq!(
+            evaluate_memory_gate(0, MIN, false),
+            MemoryGate::ProceedDetectionFailed
+        );
+    }
+
+    #[test]
+    fn gate_bypass_forces_load_regardless_of_reading() {
+        // CODEGRAPH_SKIP_MEMORY_CHECK=1 overrides even a genuine low reading.
+        assert_eq!(evaluate_memory_gate(0, MIN, true), MemoryGate::Load);
+        assert_eq!(evaluate_memory_gate(1, MIN, true), MemoryGate::Load);
+        assert_eq!(
+            evaluate_memory_gate(500_000_000, MIN, true),
+            MemoryGate::Load
+        );
+    }
 
     #[test]
     fn generation_zero_maps_to_historical_path() {
