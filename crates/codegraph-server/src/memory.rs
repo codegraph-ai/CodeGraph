@@ -248,7 +248,10 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create a new MemoryManager
     pub fn new(extension_path: Option<PathBuf>) -> Self {
-        Self::with_model(extension_path, codegraph_memory::EmbeddingBackend::default())
+        Self::with_model(
+            extension_path,
+            codegraph_memory::EmbeddingBackend::default(),
+        )
     }
 
     /// Create a new MemoryManager with a specific embedding backend
@@ -681,7 +684,10 @@ mod tests {
 
     #[test]
     fn gate_loads_when_ample_memory() {
-        assert_eq!(evaluate_memory_gate(8_000_000_000, MIN, false), MemoryGate::Load);
+        assert_eq!(
+            evaluate_memory_gate(8_000_000_000, MIN, false),
+            MemoryGate::Load
+        );
     }
 
     #[test]
@@ -713,7 +719,10 @@ mod tests {
         // CODEGRAPH_SKIP_MEMORY_CHECK=1 overrides even a genuine low reading.
         assert_eq!(evaluate_memory_gate(0, MIN, true), MemoryGate::Load);
         assert_eq!(evaluate_memory_gate(1, MIN, true), MemoryGate::Load);
-        assert_eq!(evaluate_memory_gate(500_000_000, MIN, true), MemoryGate::Load);
+        assert_eq!(
+            evaluate_memory_gate(500_000_000, MIN, true),
+            MemoryGate::Load
+        );
     }
 
     #[test]
