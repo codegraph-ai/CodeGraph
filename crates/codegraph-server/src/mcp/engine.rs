@@ -219,10 +219,24 @@ mod imp {
         let shared_engine = {
             let mut sys = sysinfo::System::new();
             sys.refresh_memory();
-            if sys.available_memory() < 1_500_000_000 {
-                tracing::warn!("Engine: <1.5 GB free — running graph-only (no shared model)");
+            let avail = sys.available_memory();
+            let gate = crate::memory::evaluate_memory_gate(
+                avail,
+                crate::memory::MODEL_MIN_FREE_BYTES,
+                crate::memory::memory_check_bypassed(),
+            );
+            if let crate::memory::MemoryGate::Skip(avail) = gate {
+                tracing::warn!(
+                    "Engine: only {} MB available — skipping shared embedding model to avoid OOM; running graph-only. Set CODEGRAPH_SKIP_MEMORY_CHECK=1 to override.",
+                    avail / 1_000_000
+                );
                 None
             } else {
+                if gate == crate::memory::MemoryGate::ProceedDetectionFailed {
+                    tracing::warn!(
+                        "Engine: available memory read as 0 MB — treating as a detection failure (common on macOS, where reclaimable memory is not counted as free) and proceeding with the shared model load. Set CODEGRAPH_SKIP_MEMORY_CHECK=1 to always bypass this check."
+                    );
+                }
                 match VectorEngine::from_backend(model_cache_dir(), &cfg.embedding_model) {
                     Ok(e) => {
                         tracing::info!("Engine: shared embedding model loaded");

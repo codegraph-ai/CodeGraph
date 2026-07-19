@@ -76,6 +76,15 @@ fn available_memory_mb() -> u64 {
     sys.available_memory() / (1024 * 1024)
 }
 
+/// Whether an available-memory reading counts as real pressure for the embed
+/// loop. A 0 MB reading is a detection failure, not genuine pressure — some
+/// macOS `sysinfo` versions report 0 available because reclaimable memory is
+/// not counted as free (issue #13) — so it must not ratchet the batch size
+/// down or force checkpoints.
+fn embed_memory_pressured(avail_mb: u64) -> bool {
+    avail_mb > 0 && avail_mb < EMBED_LOW_MEM_MB
+}
+
 /// Split an identifier into camelCase/snake_case words (deduped, lowercased),
 /// reusing the BM25 tokenizer: `getUserById` -> "get user by id".
 fn split_identifier_words(name: &str) -> String {
@@ -398,7 +407,7 @@ impl QueryEngine {
 
             // RAM backpressure: shed batch size under memory pressure.
             let pressured = chunks_done % EMBED_MEM_CHECK_CHUNKS == 0
-                && available_memory_mb() < EMBED_LOW_MEM_MB;
+                && embed_memory_pressured(available_memory_mb());
             if pressured && chunk_size > 4 {
                 chunk_size = (chunk_size / 2).max(4);
                 tracing::warn!(
@@ -547,7 +556,7 @@ impl QueryEngine {
             chunks_done += 1;
 
             let pressured = chunks_done % EMBED_MEM_CHECK_CHUNKS == 0
-                && available_memory_mb() < EMBED_LOW_MEM_MB;
+                && embed_memory_pressured(available_memory_mb());
             if pressured && chunk_size > 4 {
                 chunk_size = (chunk_size / 2).max(4);
                 tracing::warn!(
@@ -2630,6 +2639,24 @@ mod tests {
         ));
         let engine = QueryEngine::new(Arc::clone(&graph));
         (engine, graph)
+    }
+
+    #[test]
+    fn embed_memory_pressured_low_reading_is_pressure() {
+        assert!(embed_memory_pressured(1));
+        assert!(embed_memory_pressured(EMBED_LOW_MEM_MB - 1));
+    }
+
+    #[test]
+    fn embed_memory_pressured_zero_reading_is_detection_failure_not_pressure() {
+        assert!(!embed_memory_pressured(0));
+    }
+
+    #[test]
+    fn embed_memory_pressured_at_or_above_floor_is_not_pressure() {
+        assert!(!embed_memory_pressured(EMBED_LOW_MEM_MB));
+        assert!(!embed_memory_pressured(EMBED_LOW_MEM_MB + 1));
+        assert!(!embed_memory_pressured(64 * 1024));
     }
 
     #[tokio::test]
