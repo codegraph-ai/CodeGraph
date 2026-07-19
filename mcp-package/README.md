@@ -54,10 +54,22 @@ Pass flags after `--`:
 | `--graph-only` | off | Skip embeddings — graph + structural tools only. No ONNX model load, 10-50× faster indexing. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot: index, run a single tool, print result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
 
-Before loading the ONNX embedding model, the server checks available memory and runs graph-only if under ~1.5 GB.
-If embeddings are disabled even though the machine has plenty of free RAM, set `CODEGRAPH_SKIP_MEMORY_CHECK=1` (also accepts `true`/`yes`) to bypass the check.
-A reading of `0 MB available` is treated as a detection failure and the model loads anyway (common on macOS).
-Works in both MCP and one-shot `--run-tool` modes.
+### Troubleshooting: embeddings disabled / "Memory manager not initialized"
+
+Before loading the ONNX embedding model, the server checks available memory and
+runs graph-only if under ~1.5 GB, so an OOM-kill can't take down the process.
+If that check misfires, `index_markdown`, `search_docs`, `memory_*`, and
+semantic search are unavailable while graph-only tools keep working.
+
+- A reading of `0 MB available` is treated as a detection failure and the model
+  loads anyway.
+On macOS, reclaimable memory is parked in inactive/speculative/purgeable pages
+that some memory readers don't count as free, so a healthy Mac can report 0.
+- If embeddings stay disabled even though the machine has plenty of free RAM,
+  set `CODEGRAPH_SKIP_MEMORY_CHECK=1` (also accepts `true`/`yes`) to bypass the
+  check entirely.
+
+Both apply in MCP mode and one-shot `--run-tool` mode.
 
 ### Agent rules (recommended)
 
