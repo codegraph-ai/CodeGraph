@@ -19,11 +19,10 @@ class TelemetryGateTest {
 
     private fun allows(
         hasKey: Boolean = true,
-        ideConsent: Boolean = true,
         pluginEnabled: Boolean = true,
         errorReportsOnly: Boolean = false,
         isErrorEvent: Boolean = false,
-    ) = TelemetryGate.allows(hasKey, ideConsent, pluginEnabled, errorReportsOnly, isErrorEvent)
+    ) = TelemetryGate.allows(hasKey, pluginEnabled, errorReportsOnly, isErrorEvent)
 
     @Test
     fun `sends when every gate is open`() {
@@ -36,16 +35,7 @@ class TelemetryGateTest {
         // remember a setting.
         assertFalse(allows(hasKey = false))
         assertFalse(allows(hasKey = false, isErrorEvent = true))
-        assertFalse(allows(hasKey = false, ideConsent = true, pluginEnabled = true))
-    }
-
-    @Test
-    fun `IDE-level refusal cannot be overridden by the plugin setting`() {
-        // The user already answered this question for the whole IDE. The plugin
-        // switch may narrow that answer, never widen it.
-        assertFalse(allows(ideConsent = false))
-        assertFalse(allows(ideConsent = false, pluginEnabled = true))
-        assertFalse(allows(ideConsent = false, isErrorEvent = true))
+        assertFalse(allows(hasKey = false, pluginEnabled = true))
     }
 
     @Test
@@ -64,7 +54,6 @@ class TelemetryGateTest {
     fun `error events still respect every other refusal`() {
         // An error is not a licence to ignore consent.
         assertFalse(allows(isErrorEvent = true, hasKey = false))
-        assertFalse(allows(isErrorEvent = true, ideConsent = false))
         assertFalse(allows(isErrorEvent = true, pluginEnabled = false))
     }
 

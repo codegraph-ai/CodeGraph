@@ -73,7 +73,12 @@ class CodeGraphSettings : PersistentStateComponent<CodeGraphSettings.State> {
         @JvmField var codeLensEnabled: Boolean = true
         @JvmField var hoverEnabled: Boolean = true
 
-        @JvmField var telemetryEnabled: Boolean = true
+        /**
+         * Opt-in. The IntelliJ Platform exposes no statistics-consent signal to
+         * third-party plugins, so there is nothing to honour and no basis for
+         * collecting by default.
+         */
+        @JvmField var telemetryEnabled: Boolean = false
         @JvmField var telemetryErrorReportsOnly: Boolean = false
 
         @JvmField var debug: Boolean = false

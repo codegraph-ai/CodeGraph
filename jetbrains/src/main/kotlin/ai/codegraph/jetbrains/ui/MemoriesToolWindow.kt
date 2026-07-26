@@ -9,16 +9,17 @@ import ai.codegraph.jetbrains.notify.CodeGraphNotifications
 import com.google.gson.Gson
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.ui.ColoredListCellRenderer
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.SimpleTextAttributes
-import com.intellij.ui.ToggleActionButton
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
@@ -110,9 +111,13 @@ class MemoriesPanel(private val project: Project) : JPanel(BorderLayout()), com.
             object : AnAction("Refresh", "Reload memories", AllIcons.Actions.Refresh), DumbAware {
                 override fun actionPerformed(e: AnActionEvent) = reload()
             },
-            object : ToggleActionButton("Show Invalidated", AllIcons.Actions.Show) {
-                override fun isSelected(e: AnActionEvent?) = showInvalidated
-                override fun setSelected(e: AnActionEvent?, state: Boolean) {
+            // ToggleAction, not ToggleActionButton: the latter is deprecated
+            // and scheduled for removal, and until-build here is unbounded.
+            object : ToggleAction("Show Invalidated", "Include memories that have been invalidated", AllIcons.Actions.Show),
+                DumbAware {
+                override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
+                override fun isSelected(e: AnActionEvent) = showInvalidated
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
                     showInvalidated = state
                     reload()
                 }

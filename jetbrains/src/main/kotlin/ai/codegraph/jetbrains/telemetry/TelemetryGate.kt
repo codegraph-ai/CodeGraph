@@ -19,21 +19,24 @@ object TelemetryGate {
      * @param hasKey false when no PostHog key was compiled in - the default for
      *   any build that is not an official release, so a local or forked build
      *   reports nothing at all.
-     * @param ideConsent the IDE-level "send usage statistics" consent. The
-     *   plugin's own switch can only ever narrow this, never widen it.
-     * @param pluginEnabled the plugin's `telemetry.enabled` setting.
+     * @param pluginEnabled the plugin's `telemetry.enabled` setting, which
+     *   defaults to **off**. The VS Code client can default to on because VS
+     *   Code exposes `env.isTelemetryEnabled`, a platform-level consent the
+     *   extension can honour. The IntelliJ Platform exposes no equivalent to
+     *   third-party plugins - the only way to read the IDE's statistics consent
+     *   is an `@ApiStatus.Internal` API that plugins are not meant to call - so
+     *   there is no signal here to honour, and collecting by default would mean
+     *   collecting from people who never agreed to anything.
      * @param errorReportsOnly the plugin's `telemetry.errorReportsOnly` setting.
      * @param isErrorEvent whether the event being considered reports a failure.
      */
     fun allows(
         hasKey: Boolean,
-        ideConsent: Boolean,
         pluginEnabled: Boolean,
         errorReportsOnly: Boolean,
         isErrorEvent: Boolean,
     ): Boolean = when {
         !hasKey -> false
-        !ideConsent -> false
         !pluginEnabled -> false
         errorReportsOnly && !isErrorEvent -> false
         else -> true

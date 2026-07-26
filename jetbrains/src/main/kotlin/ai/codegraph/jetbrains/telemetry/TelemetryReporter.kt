@@ -6,7 +6,6 @@ package ai.codegraph.jetbrains.telemetry
 import ai.codegraph.jetbrains.server.ServerEdition
 import ai.codegraph.jetbrains.settings.CodeGraphSettings
 import com.google.gson.Gson
-import com.intellij.internal.statistic.utils.StatisticsUploadAssistant
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
@@ -108,7 +107,6 @@ class TelemetryReporter(private val project: Project) {
 
         val allowed = TelemetryGate.allows(
             hasKey = TelemetryConfig.hasKey,
-            ideConsent = ideConsent(),
             pluginEnabled = settings.telemetryEnabled,
             errorReportsOnly = settings.telemetryErrorReportsOnly,
             isErrorEvent = isError,
@@ -120,14 +118,6 @@ class TelemetryReporter(private val project: Project) {
 
         sender.execute { post(event, payload) }
     }
-
-    /**
-     * The IDE-level statistics consent. A user who turned JetBrains' own usage
-     * reporting off has already answered this question, and the plugin has no
-     * business asking again with a different default.
-     */
-    private fun ideConsent(): Boolean =
-        runCatching { StatisticsUploadAssistant.isSendAllowed() }.getOrDefault(false)
 
     private fun pluginVersion(): String =
         runCatching {

@@ -1,7 +1,6 @@
 // Copyright 2026 Andrey Vasilevsky <anvanster@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
@@ -77,16 +76,15 @@ intellijPlatform {
 
     pluginVerification {
         ides {
-            // Only the development platform by default. `recommended()` pulls a
-            // full IDE distribution per recommended release - roughly 3 GB each
-            // - which is a surprising amount of disk to consume on someone
-            // else's machine. Widen this deliberately before a release, on a
-            // machine with room for it.
-            select {
-                types = listOf(IntelliJPlatformType.IntellijIdeaCommunity)
-                sinceBuild = providers.gradleProperty("pluginSinceBuild")
-                untilBuild = providers.gradleProperty("pluginSinceBuild")
-            }
+            // The two ends of the supported range, rather than `recommended()`
+            // - each IDE is a ~3 GB download and the middle tells us little.
+            //
+            // `current()` is what since-build promises. `latest` is what an
+            // unbounded until-build promises, and is deliberately not pinned:
+            // a pinned "newest" stops being newest without anyone noticing,
+            // which is precisely the break this is here to catch.
+            current()
+            latest {}
         }
     }
 }
@@ -96,7 +94,7 @@ intellijPlatform {
  * Absent by default, so builds from source report nothing - matching how the
  * VS Code client injects `__POSTHOG_KEY__` at bundle time.
  */
-val generateTelemetryConfig by tasks.registering {
+val generateTelemetryConfig = tasks.register("generateTelemetryConfig") {
     val output = layout.buildDirectory.file("generated/telemetry/codegraph-telemetry.properties")
     val key = providers.environmentVariable("CODEGRAPH_POSTHOG_KEY").orElse("")
     val host = providers.environmentVariable("CODEGRAPH_POSTHOG_HOST").orElse("")

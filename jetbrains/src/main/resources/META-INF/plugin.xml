@@ -28,10 +28,9 @@
         code, file names, file paths, symbol names, or search queries.
         </p>
         <p>
-        Reporting is off unless the IDE's own "Send usage statistics" consent is
-        enabled, and can be turned off independently in
-        <b>Settings | Tools | CodeGraph</b>, where you can also limit it to error
-        reports only.
+        Reporting is <b>off by default</b> and only ever happens if you turn it
+        on in <b>Settings | Tools | CodeGraph</b>, where you can also limit it to
+        error reports only.
         </p>
     ]]></description>
 
@@ -74,7 +73,7 @@
                 factoryClass="ai.codegraph.jetbrains.server.CodeGraphLanguageServerFactory">
             <description><![CDATA[
                 The CodeGraph engine (<code>codegraph-server</code>), resolved from an
-                existing install or downloaded on first use.
+                existing install on PATH or from the path set in Settings.
             ]]></description>
         </server>
 
