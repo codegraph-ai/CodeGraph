@@ -63,11 +63,21 @@ private data class WorkspaceSymbolsResponse(val symbols: List<SymbolInfo> = empt
 class SymbolsToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = SymbolsPanel(project)
-        val content = ContentFactory.getInstance().createContent(panel, "Symbols", false)
-        Disposer.register(toolWindow.disposable, panel)
-        toolWindow.contentManager.addContent(content)
-        panel.refresh()
+        val factory = ContentFactory.getInstance()
+
+        val symbols = SymbolsPanel(project)
+        Disposer.register(toolWindow.disposable, symbols)
+        toolWindow.contentManager.addContent(factory.createContent(symbols, "Symbols", false))
+
+        // Memories share the tool window rather than claiming their own slot in
+        // the sidebar: they are the same graph seen from a different angle, and
+        // two CodeGraph icons would be two things to learn.
+        val memories = MemoriesPanel(project)
+        Disposer.register(toolWindow.disposable, memories)
+        toolWindow.contentManager.addContent(factory.createContent(memories, "Memories", false))
+
+        symbols.refresh()
+        memories.reload()
     }
 }
 

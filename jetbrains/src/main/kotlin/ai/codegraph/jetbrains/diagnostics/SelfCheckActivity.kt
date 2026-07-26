@@ -68,6 +68,13 @@ class SelfCheckActivity : ProjectActivity {
             }
         }
 
+        runCheck("memoryList") {
+            client.execute(
+                CodeGraphCommand.MEMORY_LIST,
+                mapOf("currentOnly" to true, "limit" to 5),
+            ).get(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        }
+
         // JCEF availability is a property of the running JBR, not of the build,
         // so it can only be answered here.
         runCheck("graphPanel") {
