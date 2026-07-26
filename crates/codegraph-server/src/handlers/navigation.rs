@@ -613,7 +613,15 @@ mod tests {
         let path = std::path::Path::new(target_path);
         add_node_to_index(&backend, path, target_id, "do_work", "Function", 5, 10);
         // The skipped in-file test must be indexed too, to prove it's filtered.
-        add_node_to_index(&backend, path, _skipped_test, "test_does_work", "Function", 40, 45);
+        add_node_to_index(
+            &backend,
+            path,
+            _skipped_test,
+            "test_does_work",
+            "Function",
+            40,
+            45,
+        );
 
         let uri = Url::from_file_path(target_path).unwrap().to_string();
         let response = backend
