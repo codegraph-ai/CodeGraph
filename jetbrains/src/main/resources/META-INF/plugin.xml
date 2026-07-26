@@ -1,0 +1,102 @@
+<!--
+  Copyright 2026 Andrey Vasilevsky <anvanster@gmail.com>
+  SPDX-License-Identifier: Apache-2.0
+-->
+<idea-plugin>
+    <!-- id, name, version, vendor and idea-version are injected by the
+         IntelliJ Platform Gradle Plugin from build.gradle.kts. -->
+
+    <description><![CDATA[
+        Cross-language code intelligence powered by graph analysis.
+        <p>
+        CodeGraph builds a symbol- and call-level graph of your whole workspace
+        across 40+ languages, then exposes it as call graphs, dependency graphs,
+        impact analysis, related-test discovery and semantic symbol search.
+        </p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <!-- LSP4IJ carries the JSON-RPC transport and document synchronisation.
+         It is a hard dependency: the marketplace installs it alongside this
+         plugin. -->
+    <depends>com.redhat.devtools.lsp4ij</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="CodeGraph" displayType="BALLOON" bundle="messages.CodeGraphBundle"
+                           key="notification.group.codegraph"/>
+        <!-- Inert unless -Dcodegraph.selfcheck=true. -->
+        <postStartupActivity implementation="ai.codegraph.jetbrains.diagnostics.SelfCheckActivity"/>
+        <postStartupActivity implementation="ai.codegraph.jetbrains.indexing.IndexingStartupActivity"/>
+
+        <projectConfigurable
+            parentId="tools"
+            id="ai.codegraph.jetbrains.settings"
+            displayName="CodeGraph"
+            instance="ai.codegraph.jetbrains.settings.CodeGraphConfigurable"/>
+
+        <toolWindow id="CodeGraph"
+                    anchor="right"
+                    icon="AllIcons.Toolwindows.ToolWindowStructure"
+                    factoryClass="ai.codegraph.jetbrains.ui.SymbolsToolWindowFactory"/>
+
+        <codeInsight.daemonBoundCodeVisionProvider
+            implementation="ai.codegraph.jetbrains.vision.CodeGraphCodeVisionProvider"/>
+
+        <statusBarWidgetFactory
+            id="CodeGraphStatusBar"
+            implementation="ai.codegraph.jetbrains.ui.CodeGraphStatusBarWidgetFactory"
+            order="last"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
+        <server id="codegraph"
+                name="CodeGraph"
+                factoryClass="ai.codegraph.jetbrains.server.CodeGraphLanguageServerFactory">
+            <description><![CDATA[
+                The CodeGraph engine (<code>codegraph-server</code>), resolved from an
+                existing install or downloaded on first use.
+            ]]></description>
+        </server>
+
+        <!-- One mapping for every extension the engine parses, rather than one
+             element per language. The engine dispatches on file extension and
+             never reads the LSP languageId, so a single mapping is equivalent
+             and leaves exactly one list to keep in step with the parser
+             registry. That list is still hand-transcribed; generating it from
+             the engine is tracked as follow-up work. -->
+        <fileNamePatternMapping
+            serverId="codegraph"
+            languageId="codegraph"
+            patterns="*.ascx;*.aspx;*.bash;*.c;*.cbl;*.cc;*.clj;*.cljc;*.cljs;*.cob;*.cobol;*.cpp;*.cpy;*.cs;*.css;*.cxx;*.dart;*.dockerfile;*.edn;*.elm;*.erl;*.ex;*.exs;*.f;*.F;*.f03;*.f08;*.f90;*.F90;*.f95;*.for;*.ftn;*.gemspec;*.go;*.gradle;*.groovy;*.h;*.hcl;*.hh;*.hpp;*.hrl;*.hs;*.hxx;*.java;*.jl;*.js;*.jsx;*.kt;*.kts;*.lua;*.m;*.master;*.ml;*.mli;*.mm;*.php;*.pl;*.pm;*.py;*.pyw;*.r;*.R;*.rake;*.rb;*.Rmd;*.rs;*.sc;*.scala;*.sdc;*.sh;*.sol;*.sv;*.svh;*.swift;*.t;*.tcl;*.tf;*.tfvars;*.toml;*.ts;*.tsx;*.upf;*.v;*.vh;*.yaml;*.yml;*.zig;*.zsh;Dockerfile;Dockerfile.*"/>
+    </extensions>
+
+    <actions>
+        <group id="CodeGraph.MainGroup" text="CodeGraph" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+
+            <action id="CodeGraph.ShowDependencyGraph"
+                    class="ai.codegraph.jetbrains.actions.ShowDependencyGraphAction"
+                    text="Show Dependency Graph"
+                    description="Show what the current file depends on, and what depends on it."/>
+
+            <action id="CodeGraph.ShowCallGraph"
+                    class="ai.codegraph.jetbrains.actions.ShowCallGraphAction"
+                    text="Show Call Graph"
+                    description="Show the calls into and out of the current file."/>
+
+            <separator/>
+
+            <action id="CodeGraph.ReindexWorkspace"
+                    class="ai.codegraph.jetbrains.actions.ReindexWorkspaceAction"
+                    text="Reindex Workspace"
+                    description="Rebuild the CodeGraph graph for this workspace from scratch."/>
+
+            <separator/>
+
+            <action id="CodeGraph.EngineRoundTrip"
+                    class="ai.codegraph.jetbrains.actions.EngineRoundTripAction"
+                    text="Check Engine Connection"
+                    description="Start the CodeGraph engine and complete one round trip, reporting what came back."/>
+        </group>
+    </actions>
+</idea-plugin>
