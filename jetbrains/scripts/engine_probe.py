@@ -34,9 +34,10 @@ BIN, ROOT = sys.argv[1], os.path.abspath(sys.argv[2])
 # needs a reason: an unadvertised command is invisible to clients that gate on
 # ServerCapabilities, which is how LSP4IJ behaves.
 UNADVERTISED_BY_DESIGN = {
-    # Dispatched at backend.rs, absent from executeCommandProvider.commands.
-    # VS Code reaches it through the custom-request form so it never noticed.
-    "codegraph.getDocumentCodeLens": "not yet advertised; tracked as a server fix",
+    # Empty on purpose. getDocumentCodeLens used to live here - dispatched but
+    # not advertised - until the engine started advertising it. Add an entry
+    # only with a reason: an unadvertised command is invisible to clients that
+    # gate on ServerCapabilities, which is how LSP4IJ behaves.
 }
 
 failures = []

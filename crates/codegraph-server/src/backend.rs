@@ -902,59 +902,55 @@ impl LanguageServer for CodeGraphBackend {
             *self.config.write().await = config;
         }
 
-        if let Some(path) = extension_path {
-            tracing::info!(
-                "[LSP::initialize] Extension path received: {}",
-                path.display()
-            );
-            // Update memory manager with extension path by replacing it
-            // Read embedding model from init options
-            let raw_model = init_opts
-                .as_ref()
-                .and_then(|opts| opts.get("embeddingModel"));
-            tracing::info!(
-                "[LSP::initialize] embeddingModel from init options: {:?}",
-                raw_model
-            );
+        // Embedding settings are read unconditionally. They used to sit inside
+        // `if let Some(extension_path)`, which made a VS Code-specific path the
+        // gate for two unrelated settings: any client that omitted it silently
+        // lost its embedding-model choice and fell back to signature-only
+        // embeddings, degrading duplicate detection, clustering and similarity
+        // search with nothing in the logs to say why.
+        let raw_model = init_opts
+            .as_ref()
+            .and_then(|opts| opts.get("embeddingModel"));
 
-            let embedding_model = raw_model
-                .and_then(|v| v.as_str())
-                .map(|s| {
-                    tracing::info!("[LSP::initialize] Parsing embedding model string: {:?}", s);
-                    codegraph_memory::EmbeddingBackend::parse(s)
-                })
-                .unwrap_or_default();
+        let embedding_model = raw_model
+            .and_then(|v| v.as_str())
+            .map(codegraph_memory::EmbeddingBackend::parse)
+            .unwrap_or_default();
 
-            tracing::info!(
-                "[LSP::initialize] Selected embedding model: {}",
-                embedding_model.display_name()
-            );
+        tracing::info!(
+            "[LSP::initialize] Embedding model: {} (requested: {:?})",
+            embedding_model.display_name(),
+            raw_model
+        );
 
-            // Safety: We're replacing the Arc contents during initialization before any use
-            let new_manager = Arc::new(MemoryManager::with_model(
-                Some(path.clone()),
-                embedding_model,
-            ));
-            let self_mut = self as *const Self as *mut Self;
-            unsafe {
-                (*self_mut).memory_manager = new_manager;
-            }
-            tracing::info!("[LSP::initialize] MemoryManager updated with extension path and model");
-
-            // Read full-body embedding setting
-            let full_body = init_opts
-                .as_ref()
-                .and_then(|opts| opts.get("fullBodyEmbedding"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            self.query_engine.set_full_body_embedding(full_body);
-            tracing::info!("[LSP::initialize] Full-body embedding: {}", full_body);
+        // `extensionPath` is really "a directory the client owns for its
+        // resources". It is optional; without it fastembed falls back to
+        // ~/.codegraph/fastembed_cache.
+        if let Some(path) = &extension_path {
+            tracing::info!("[LSP::initialize] Client resource path: {}", path.display());
         } else {
-            tracing::error!(
-                "[LSP::initialize] CRITICAL: No extension path provided in initialization options!"
+            tracing::info!(
+                "[LSP::initialize] No client resource path given; fastembed will use ~/.codegraph/fastembed_cache/"
             );
-            tracing::warn!("[LSP::initialize] No extension path provided — fastembed will auto-download model to ~/.codegraph/fastembed_cache/");
         }
+
+        // Safety: We're replacing the Arc contents during initialization before any use
+        let new_manager = Arc::new(MemoryManager::with_model(
+            extension_path.clone(),
+            embedding_model,
+        ));
+        let self_mut = self as *const Self as *mut Self;
+        unsafe {
+            (*self_mut).memory_manager = new_manager;
+        }
+
+        let full_body = init_opts
+            .as_ref()
+            .and_then(|opts| opts.get("fullBodyEmbedding"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        self.query_engine.set_full_body_embedding(full_body);
+        tracing::info!("[LSP::initialize] Full-body embedding: {}", full_body);
 
         // Store workspace folders
         if let Some(folders) = params.workspace_folders {
@@ -1012,6 +1008,13 @@ impl LanguageServer for CodeGraphBackend {
                             format!("{p}.findRelatedTests"),
                             format!("{p}.getNodeLocation"),
                             format!("{p}.getWorkspaceSymbols"),
+                            // Backs the inline CodeLens/Code Vision surface.
+                            // VS Code reaches it through the custom-request form
+                            // so it never noticed the omission, but a client that
+                            // gates on ServerCapabilities - LSP4IJ's
+                            // `supportsCommand` does - would see the whole
+                            // surface as unsupported.
+                            format!("{p}.getDocumentCodeLens"),
                             format!("{p}.analyzeComplexity"),
                             format!("{p}.symbolSearch"),
                             format!("{p}.findByImports"),
@@ -2600,12 +2603,16 @@ impl CodeGraphBackend {
             tower_lsp::jsonrpc::Error::invalid_params(format!("Failed to build memory: {e}"))
         })?;
 
-        // Store the memory
-        let id = self
-            .memory_manager
-            .put(memory)
-            .await
-            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+        // Store the memory. Report why it failed rather than discarding the
+        // error: a bare "Internal error" with nothing logged makes every store
+        // failure unactionable from a user report, and hid a kind-specific bug
+        // here for some time.
+        let id = self.memory_manager.put(memory).await.map_err(|e| {
+            tracing::error!("[memoryStore] failed to store memory: {e}");
+            let mut err = tower_lsp::jsonrpc::Error::internal_error();
+            err.message = format!("Failed to store memory: {e}").into();
+            err
+        })?;
 
         Ok(crate::handlers::MemoryStoreResponse { id, success: true })
     }
