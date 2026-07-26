@@ -294,6 +294,10 @@ fn main() {
 async fn run() {
     install_crash_handlers();
     codegraph_server::crash_phase::mark("startup");
+    // Clean up after processes that were killed before they could clear their
+    // own marker, which is every engine a client force-kills. Runs after our
+    // own mark so this process's marker is never a candidate.
+    codegraph_server::crash_phase::sweep_orphans();
 
     let args = Args::parse();
 
