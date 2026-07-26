@@ -93,6 +93,37 @@ One caveat worth knowing when calling the engine directly:
 modules" but an **empty string** as "modules only". Sending `""` for the
 unfiltered view yields an empty tree on a perfectly healthy index.
 
+## AI tooling
+
+The VS Code client declares 28 `languageModelTools`. Those are Copilot-specific
+and have no JetBrains equivalent, and reimplementing them would mean a second
+hand-written tool list to keep in step with the engine.
+
+Instead, **Tools | CodeGraph | Register with AI Assistant** writes the engine's
+own MCP mode into `<project>/.mcp.json`, the `mcpServers` shape that Junie,
+Claude Code, Cursor and the AI Assistant MCP settings all read:
+
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "/path/to/codegraph-server",
+      "args": ["--mcp", "--workspace", "/path/to/project",
+               "--embedding-model", "bge-small", "--full-body-embedding"]
+    }
+  }
+}
+```
+
+Verified end to end: that exact command answers an MCP `initialize` and lists
+**42 tools** - more than the VS Code client declares by hand, which is the
+argument for this approach rather than a port.
+
+Registration merges rather than overwrites; a project that already points at
+other MCP servers keeps them. The config is also offered on the clipboard,
+because every AI client keeps its MCP configuration somewhere different and
+pasting is the one path that always works.
+
 ## Engine lifecycle
 
 The engine is a native process that things outside the plugin can kill:

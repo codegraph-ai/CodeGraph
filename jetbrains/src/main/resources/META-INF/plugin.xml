@@ -91,6 +91,11 @@
                     text="Reindex Workspace"
                     description="Rebuild the CodeGraph graph for this workspace from scratch."/>
 
+            <action id="CodeGraph.RegisterMcp"
+                    class="ai.codegraph.jetbrains.actions.RegisterMcpAction"
+                    text="Register with AI Assistant"
+                    description="Point the IDE's AI tooling at the CodeGraph engine over MCP."/>
+
             <separator/>
 
             <action id="CodeGraph.EngineRoundTrip"

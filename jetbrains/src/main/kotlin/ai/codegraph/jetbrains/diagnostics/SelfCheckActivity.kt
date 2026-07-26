@@ -6,6 +6,7 @@ package ai.codegraph.jetbrains.diagnostics
 import ai.codegraph.jetbrains.graph.GraphKind
 import ai.codegraph.jetbrains.graph.GraphPanel
 import ai.codegraph.jetbrains.lsp.CodeGraphClient
+import ai.codegraph.jetbrains.mcp.McpRegistration
 import ai.codegraph.jetbrains.lsp.CodeGraphCommand
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.EDT
@@ -74,6 +75,10 @@ class SelfCheckActivity : ProjectActivity {
                 mapOf("currentOnly" to true, "limit" to 5),
             ).get(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         }
+
+        // Writes into the open project, which is only acceptable because this
+        // whole activity is opt-in and runs against a sandbox project.
+        runCheck("mcpRegistration") { McpRegistration.register(project) }
 
         // JCEF availability is a property of the running JBR, not of the build,
         // so it can only be answered here.
