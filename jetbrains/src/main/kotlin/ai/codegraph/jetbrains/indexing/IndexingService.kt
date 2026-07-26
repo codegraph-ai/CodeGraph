@@ -6,6 +6,7 @@ package ai.codegraph.jetbrains.indexing
 import ai.codegraph.jetbrains.lsp.CodeGraphClient
 import ai.codegraph.jetbrains.lsp.CodeGraphCommand
 import ai.codegraph.jetbrains.notify.CodeGraphNotifications
+import ai.codegraph.jetbrains.telemetry.TelemetryReporter
 import com.google.gson.JsonElement
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -56,15 +57,28 @@ class IndexingService(private val project: Project) {
             object : Task.Backgroundable(project, "Indexing workspace with CodeGraph", true) {
                 override fun run(indicator: ProgressIndicator) {
                     indicator.isIndeterminate = true
+                    val startedAt = System.currentTimeMillis()
                     val outcome = runCatching {
                         CodeGraphClient.getInstance(project)
                             .execute(CodeGraphCommand.REINDEX_WORKSPACE, emptyMap<String, Any>())
                             .get(REINDEX_TIMEOUT_MINUTES, TimeUnit.MINUTES)
                     }
+                    val elapsed = System.currentTimeMillis() - startedAt
                     outcome.fold(
-                        onSuccess = { response -> reportSuccess(filesIndexed(response)) },
+                        onSuccess = { response ->
+                            val count = filesIndexed(response)
+                            runCatching {
+                                TelemetryReporter.getInstance(project)
+                                    .indexCompleted("ok", elapsed, count)
+                            }
+                            reportSuccess(count)
+                        },
                         onFailure = { error ->
                             LOG.warn("CodeGraph reindex failed", error)
+                            runCatching {
+                                TelemetryReporter.getInstance(project)
+                                    .indexCompleted("error", elapsed, 0)
+                            }
                             CodeGraphNotifications.error(
                                 project,
                                 "Indexing failed: ${error.message ?: error::class.java.simpleName}",

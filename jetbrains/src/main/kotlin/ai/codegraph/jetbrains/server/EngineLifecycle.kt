@@ -4,6 +4,7 @@
 package ai.codegraph.jetbrains.server
 
 import ai.codegraph.jetbrains.notify.CodeGraphNotifications
+import ai.codegraph.jetbrains.telemetry.TelemetryReporter
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
@@ -48,6 +49,7 @@ class EngineLifecycle(private val project: Project) {
 
     fun publishResolvedServer(server: ResolvedServer) {
         resolvedServer = server
+        runCatching { TelemetryReporter.getInstance(project).serverEdition = server.edition }
     }
 
     /** How many times the engine has come back up since the project opened. */
@@ -92,6 +94,15 @@ class EngineLifecycle(private val project: Project) {
 
         val diagnosis = breadcrumbs.readAndClear()
         LOG.warn("CodeGraph engine stopped after ${uptime}ms: ${diagnosis.cause} (phase=${diagnosis.phase})")
+
+        runCatching {
+            TelemetryReporter.getInstance(project).engineCrashed(
+                cause = diagnosis.cause,
+                phase = diagnosis.phase,
+                uptimeSeconds = uptime / 1000,
+                restartCount = restarts.get(),
+            )
+        }
 
         if (!breaker.recordCrash(System.currentTimeMillis())) return
 

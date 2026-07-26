@@ -13,6 +13,26 @@
         across 40+ languages, then exposes it as call graphs, dependency graphs,
         impact analysis, related-test discovery and semantic symbol search.
         </p>
+        <h3>Requirements</h3>
+        <p>
+        This plugin needs the CodeGraph engine installed separately:
+        <code>npm i -g @astudioplus/codegraph-mcp</code>. Your code is analysed
+        locally by that engine and is never uploaded.
+        </p>
+        <h3>Data collection</h3>
+        <p>
+        The plugin can report anonymous usage and error diagnostics: IDE product
+        and build, plugin version, operating system, an anonymous installation
+        id, and event outcomes such as whether the engine started, how long
+        indexing took, and how many files were indexed. It never sends source
+        code, file names, file paths, symbol names, or search queries.
+        </p>
+        <p>
+        Reporting is off unless the IDE's own "Send usage statistics" consent is
+        enabled, and can be turned off independently in
+        <b>Settings | Tools | CodeGraph</b>, where you can also limit it to error
+        reports only.
+        </p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>

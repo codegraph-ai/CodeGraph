@@ -82,18 +82,42 @@ class CodeGraphClient(private val project: Project) {
             command.id,
             if (arguments == null) emptyList() else listOf(arguments),
         )
-        return LanguageServerManager.getInstance(project)
-            .getLanguageServer(CODEGRAPH_SERVER_ID)
-            .thenCompose { server ->
-                if (server == null) {
-                    CompletableFuture.failedFuture(EngineUnavailableException(command))
-                } else {
-                    server.workspaceService.executeCommand(params)
-                }
-            }
+        return withServer(command) { server -> server.workspaceService.executeCommand(params) }
             .thenApply { raw -> raw?.let { toJson(it) } }
             .whenComplete { _, error ->
                 if (error != null) LOG.warn("CodeGraph command ${command.id} failed", error)
+            }
+    }
+
+    /**
+     * Resolve the engine and run [action] against it.
+     *
+     * `start()` is asynchronous, so a command issued straight after it can
+     * arrive before LSP4IJ has a server to hand and get back null. That is
+     * "not up yet", not "cannot run" - failing fast on it made the first
+     * command of a session fail spuriously, which is exactly the command a
+     * user is most likely to notice (the reindex they just asked for). So a
+     * null resolves once more after asking for a start.
+     */
+    private fun <T> withServer(
+        command: CodeGraphCommand,
+        action: (com.redhat.devtools.lsp4ij.LanguageServerItem) -> CompletableFuture<T>,
+    ): CompletableFuture<T> {
+        val manager = LanguageServerManager.getInstance(project)
+        return manager.getLanguageServer(CODEGRAPH_SERVER_ID)
+            .thenCompose { server ->
+                if (server != null) {
+                    action(server)
+                } else {
+                    start()
+                    manager.getLanguageServer(CODEGRAPH_SERVER_ID).thenCompose { retried ->
+                        if (retried != null) {
+                            action(retried)
+                        } else {
+                            CompletableFuture.failedFuture(EngineUnavailableException(command))
+                        }
+                    }
+                }
             }
     }
 
