@@ -64,6 +64,47 @@ impl Default for CodeGraphConfig {
 }
 
 /// CodeGraph Language Server backend.
+/// Where the client says the workspace lives.
+///
+/// `workspaceFolders` is optional in LSP - a client may send only `rootUri`, or
+/// the deprecated `rootPath`, and several do. Reading only the first left the
+/// memory subsystem uninitialised for those clients, so every memory command
+/// failed for the whole session while indexing and search kept working: a
+/// half-broken server rather than an obvious failure.
+///
+/// An empty `workspaceFolders` list is treated as absent rather than as "no
+/// workspace", so a client that sends `[]` alongside a usable `rootUri` still
+/// works.
+fn workspace_paths_from(params: &InitializeParams) -> Vec<std::path::PathBuf> {
+    let from_folders: Vec<std::path::PathBuf> = params
+        .workspace_folders
+        .iter()
+        .flatten()
+        .filter_map(|folder| folder.uri.to_file_path().ok())
+        .collect();
+    if !from_folders.is_empty() {
+        return from_folders;
+    }
+
+    #[allow(deprecated)]
+    if let Some(path) = params
+        .root_uri
+        .as_ref()
+        .and_then(|uri| uri.to_file_path().ok())
+    {
+        tracing::info!("No workspaceFolders; falling back to rootUri");
+        return vec![path];
+    }
+
+    #[allow(deprecated)]
+    if let Some(path) = params.root_path.as_ref() {
+        tracing::info!("No workspaceFolders or rootUri; falling back to rootPath");
+        return vec![std::path::PathBuf::from(path)];
+    }
+
+    Vec::new()
+}
+
 pub struct CodeGraphBackend {
     /// LSP client for sending notifications.
     pub client: Client,
@@ -865,6 +906,9 @@ impl LanguageServer for CodeGraphBackend {
         tracing::info!("Initializing CodeGraph LSP server");
 
         // Extract extension path and config from initialization options
+        // Resolve the workspace location before `params` is partially moved.
+        let folder_paths = workspace_paths_from(&params);
+
         let init_opts = params.initialization_options;
 
         let extension_path = init_opts.as_ref().and_then(|opts| {
@@ -952,14 +996,27 @@ impl LanguageServer for CodeGraphBackend {
         self.query_engine.set_full_body_embedding(full_body);
         tracing::info!("[LSP::initialize] Full-body embedding: {}", full_body);
 
-        // Store workspace folders
-        if let Some(folders) = params.workspace_folders {
+        // Store workspace folders.
+        //
+        // `workspaceFolders` is optional in LSP: a client may send only
+        // `rootUri` (or the deprecated `rootPath`), and several do. Treating it
+        // as the sole source left the whole memory subsystem uninitialised, so
+        // every memory command failed for the lifetime of the session while
+        // indexing and search worked normally - a confusing half-broken server
+        // rather than an obvious failure. Fall back through the other fields
+        // the client may have given us.
+        {
+            if folder_paths.is_empty() {
+                tracing::warn!(
+                    "[LSP::initialize] No workspace location given (workspaceFolders, rootUri and \
+                     rootPath are all absent); memory and indexing will be unavailable"
+                );
+            }
+
             let mut workspace_folders = self.workspace_folders.write().await;
-            for folder in folders {
-                if let Ok(path) = folder.uri.to_file_path() {
-                    tracing::info!("Workspace folder: {}", path.display());
-                    workspace_folders.push(path);
-                }
+            for path in folder_paths {
+                tracing::info!("Workspace folder: {}", path.display());
+                workspace_folders.push(path);
             }
 
             // Initialize index state with project slug from first workspace
@@ -4027,6 +4084,105 @@ mod tests {
     use codegraph::{NodeType, PropertyMap};
     use std::path::Path;
     use tempfile::TempDir;
+
+    mod workspace_paths {
+        use super::*;
+
+        fn params() -> InitializeParams {
+            InitializeParams::default()
+        }
+
+        fn uri(path: &str) -> Url {
+            Url::from_file_path(path).expect("test path must be absolute")
+        }
+
+        #[test]
+        fn prefers_workspace_folders() {
+            let mut p = params();
+            p.workspace_folders = Some(vec![WorkspaceFolder {
+                uri: uri("/tmp/from-folders"),
+                name: "w".into(),
+            }]);
+            #[allow(deprecated)]
+            {
+                p.root_uri = Some(uri("/tmp/from-root-uri"));
+            }
+
+            assert_eq!(
+                workspace_paths_from(&p),
+                vec![std::path::PathBuf::from("/tmp/from-folders")]
+            );
+        }
+
+        #[test]
+        fn falls_back_to_root_uri() {
+            // The case that was broken: a client sending only rootUri got a
+            // server whose memory subsystem never initialised.
+            let mut p = params();
+            #[allow(deprecated)]
+            {
+                p.root_uri = Some(uri("/tmp/from-root-uri"));
+            }
+
+            assert_eq!(
+                workspace_paths_from(&p),
+                vec![std::path::PathBuf::from("/tmp/from-root-uri")]
+            );
+        }
+
+        #[test]
+        fn falls_back_to_root_path_when_that_is_all_there_is() {
+            let mut p = params();
+            #[allow(deprecated)]
+            {
+                p.root_path = Some("/tmp/from-root-path".into());
+            }
+
+            assert_eq!(
+                workspace_paths_from(&p),
+                vec![std::path::PathBuf::from("/tmp/from-root-path")]
+            );
+        }
+
+        #[test]
+        fn empty_folder_list_is_treated_as_absent() {
+            // Some clients send [] together with a usable rootUri; taking the
+            // empty list at face value would strand them.
+            let mut p = params();
+            p.workspace_folders = Some(vec![]);
+            #[allow(deprecated)]
+            {
+                p.root_uri = Some(uri("/tmp/from-root-uri"));
+            }
+
+            assert_eq!(
+                workspace_paths_from(&p),
+                vec![std::path::PathBuf::from("/tmp/from-root-uri")]
+            );
+        }
+
+        #[test]
+        fn keeps_every_workspace_folder() {
+            let mut p = params();
+            p.workspace_folders = Some(vec![
+                WorkspaceFolder {
+                    uri: uri("/tmp/one"),
+                    name: "one".into(),
+                },
+                WorkspaceFolder {
+                    uri: uri("/tmp/two"),
+                    name: "two".into(),
+                },
+            ]);
+
+            assert_eq!(workspace_paths_from(&p).len(), 2);
+        }
+
+        #[test]
+        fn nothing_at_all_yields_no_paths() {
+            assert!(workspace_paths_from(&params()).is_empty());
+        }
+    }
 
     /// Helper to create a test backend with an empty graph
     fn create_test_backend() -> CodeGraphBackend {
