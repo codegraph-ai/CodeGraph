@@ -1377,6 +1377,10 @@ impl LanguageServer for CodeGraphBackend {
 
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("Shutting down CodeGraph LSP server");
+        // tower-lsp handles the `exit` notification that follows without waking
+        // its read loop, so the process would otherwise keep running until
+        // stdin closed. See `crate::lsp_exit`.
+        crate::lsp_exit::request_shutdown();
         Ok(())
     }
 

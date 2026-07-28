@@ -61,7 +61,13 @@ _next_id = [0]
 
 
 def send(method, params, notify=False):
-    msg = {"jsonrpc": "2.0", "method": method, "params": params}
+    msg = {"jsonrpc": "2.0", "method": method}
+    # `shutdown` and `exit` take no params, and tower-lsp rejects an empty
+    # object with -32602 "Unexpected params" - which looks like a successful
+    # response to anything that only checks for a reply, and silently skips the
+    # server's shutdown handler entirely. Pass None to omit the field.
+    if params is not None:
+        msg["params"] = params
     if not notify:
         _next_id[0] += 1
         msg["id"] = _next_id[0]
@@ -227,20 +233,21 @@ if os.path.exists(vscode_package):
 else:
     print("SKIP settings-defaults parity (vscode/package.json not found)")
 
-rid = send("shutdown", {})
-await_response(rid, timeout=30)
-send("exit", {}, notify=True)
+rid = send("shutdown", None)
+shutdown_response = await_response(rid, timeout=30)
+check("error" not in shutdown_response, f"shutdown -> {str(shutdown_response.get('error') or 'ok')[:120]}")
+send("exit", None, notify=True)
 
-# The engine currently ignores `exit` and terminates only when stdin closes.
-# Both real clients force-kill the process, so this costs correctness rather
-# than leaked processes - but the probe must not hang on it, and should say so
-# out loud if it ever starts behaving.
-EXIT_GRACE_SECONDS = 5
+# The engine must terminate on `exit` rather than waiting for stdin to close.
+# It used to do the latter, which left it running under any client that keeps
+# the pipe open. The clients mask it by force-killing, so this is asserted here
+# rather than left to be noticed in the field.
+EXIT_GRACE_SECONDS = 10
 try:
     proc.wait(timeout=EXIT_GRACE_SECONDS)
-    print(f"NOTE engine honoured `exit` within {EXIT_GRACE_SECONDS}s")
+    check(True, f"engine honoured `exit` within {EXIT_GRACE_SECONDS}s")
 except subprocess.TimeoutExpired:
-    print(f"NOTE engine ignored `exit` (known deviation); closing stdin instead")
+    check(False, f"engine ignored `exit`; still running after {EXIT_GRACE_SECONDS}s")
     proc.stdin.close()
     try:
         proc.wait(timeout=30)
