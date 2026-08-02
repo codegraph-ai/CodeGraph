@@ -92,13 +92,44 @@ fi
 echo
 
 # ---------------------------------------------------------------- verify
+#
+# Presence is not enough. vscode/bin/ is a build staging directory that is not
+# cleaned between releases, so a binary from a previous version sits there
+# looking exactly as valid as a fresh one - and publishing a stale engine under
+# a new tag is worse than publishing nothing, because the checksums are
+# perfectly correct for the wrong build.
+#
+# Provenance is recorded where it is knowable rather than guessed here: each
+# binary is stamped into MANIFEST by the build that produced it, on the host
+# that could actually run `--version`. Scraping version strings out of a
+# cross-platform image was tried and is not reliable - the engine does not
+# store its version as a standalone string on every target, so good binaries
+# were reported as stale.
+MANIFEST="$VSCODE_BIN/BUILD-MANIFEST"
+
 missing=0
+stale=0
 for bin in "${BINARIES[@]}" "$WINDOWS_SIDECAR"; do
-  if [ -f "$VSCODE_BIN/$bin" ]; then
-    printf '  ✓ %-36s %s\n' "$bin" "$(du -h "$VSCODE_BIN/$bin" | cut -f1)"
-  else
+  if [ ! -f "$VSCODE_BIN/$bin" ]; then
     printf '  ✗ %-36s MISSING\n' "$bin"
     missing=1
+    continue
+  fi
+
+  size="$(du -h "$VSCODE_BIN/$bin" | cut -f1)"
+
+  # The sidecar is a third-party library with no CodeGraph version of its own.
+  if [ "$bin" = "$WINDOWS_SIDECAR" ]; then
+    printf '  ✓ %-36s %s\n' "$bin" "$size"
+    continue
+  fi
+
+  if [ -f "$MANIFEST" ] && grep -qxF "$VERSION  $bin" "$MANIFEST"; then
+    printf '  ✓ %-36s %s  (%s)\n' "$bin" "$size" "$VERSION"
+  else
+    recorded="$(grep -F "  $bin" "$MANIFEST" 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+    printf '  ✗ %-36s %s  NOT STAMPED %s\n' "$bin" "$size" "${recorded:+(manifest says: $recorded)}"
+    stale=1
   fi
 done
 
@@ -111,6 +142,23 @@ A partial release is worse than none: a client that resolves its own platform
 and finds nothing has no way to tell "not built yet" from "never supported".
 Build the missing platforms first - see cross-platform-builds.md for the
 per-platform hosts - then re-run.
+EOF
+  exit 1
+fi
+
+if [ "$stale" -ne 0 ]; then
+  cat >&2 <<EOF
+
+ERROR: at least one binary is not stamped as $VERSION in
+$VSCODE_BIN/BUILD-MANIFEST.
+
+vscode/bin/ is not cleaned between releases, so an unstamped binary is assumed
+to be left over from an earlier one. Rebuild it and record it with:
+
+  ./scripts/stamp-binary.sh <name> <version>
+
+Publishing an unverified binary would produce a release whose checksums are
+perfectly valid for the wrong build - the hardest kind of mistake to notice.
 EOF
   exit 1
 fi
