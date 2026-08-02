@@ -241,22 +241,19 @@ impl CodeGraphBackend {
 
             let mut caller_count = 0u32;
             let mut test_count = 0u32;
-            if let Ok(neighbors) = graph.get_neighbors(node_id, codegraph::Direction::Incoming) {
-                for caller_id in neighbors {
-                    // Only genuine call edges count - a raw incoming-neighbor
-                    // scan also returns the containing file/class `Contains`
-                    // edge, which would inflate every function by one. Mirror
-                    // the canonical `helpers::get_callers` Calls-edge filter.
-                    let calls = graph
-                        .get_edges_between(caller_id, node_id)
-                        .ok()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|eid| graph.get_edge(eid).ok())
-                        .any(|edge| edge.edge_type == codegraph::EdgeType::Calls);
-                    if !calls {
-                        continue;
-                    }
+            // Only genuine call edges count - a raw incoming-neighbor scan also
+            // returns the containing file/class `Contains` edge, which would
+            // inflate every function by one. Mirror the canonical
+            // `helpers::get_callers` Calls-edge filter, resolved during the
+            // adjacency walk so a hub function costs one pass over its own
+            // incoming edges rather than a pass over every caller's outgoing
+            // edges - this runs on every document edit.
+            if let Ok(callers) = graph.get_neighbors_by_edge_type(
+                node_id,
+                codegraph::Direction::Incoming,
+                codegraph::EdgeType::Calls,
+            ) {
+                for caller_id in callers {
                     if let Ok(caller) = graph.get_node(caller_id) {
                         if node_props::is_test_like(caller) {
                             test_count += 1;

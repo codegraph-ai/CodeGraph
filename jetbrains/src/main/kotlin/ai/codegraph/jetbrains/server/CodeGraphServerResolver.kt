@@ -285,6 +285,24 @@ object CodeGraphServerResolver {
     /** File name shared with the JavaScript installer, so all channels agree. */
     const val VERSION_MARKER = ".engine-version"
 
+    /**
+     * The engine release this plugin fetches, and the version a managed install
+     * is expected to be.
+     *
+     * Deliberately not the plugin's own version. Release assets are tagged with
+     * the *engine's* version (`scripts/publish-release-assets.sh` reads
+     * Cargo.toml), so a plugin-only patch would ask for `v<plugin version>/…`
+     * and get a 404 - and the plugin no longer bundles an engine to fall back
+     * on. It is also what makes the shared `~/.codegraph/bin` marker meaningful:
+     * all three clients compare it against the same number rather than against
+     * three separately drifting client versions.
+     *
+     * Mirrors `ENGINE_VERSION` in `mcp-package/bin/fetch-engine.js`; both are
+     * held equal to Cargo.toml by `scripts/publish-release-assets.sh`, which
+     * refuses to publish while they disagree.
+     */
+    const val ENGINE_VERSION = "0.20.0"
+
     private val ARM64_ARCHES = setOf("aarch64", "arm64")
     private val X64_ARCHES = setOf("x86_64", "amd64", "x64")
 }

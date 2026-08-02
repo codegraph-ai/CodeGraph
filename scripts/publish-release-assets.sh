@@ -4,12 +4,12 @@
 #
 # Publish the per-platform engine binaries as GitHub release assets.
 #
-# The VSIX and the npm package both bundle all four platform binaries, because
-# both ecosystems allow it. The JetBrains Marketplace does not: it serves one
-# artifact to every platform, so a bundled plugin would be a ~120 MB download
-# for every user to obtain the ~30 MB they can actually run. Publishing the
-# binaries individually lets that client - and anyone scripting an install -
-# fetch only what they need.
+# No channel bundles engines any more. Shipping all four platform binaries meant
+# a 118 MB VSIX and a 498 MB npm package for the ~30 MB a given user can
+# actually run, and the JetBrains Marketplace cannot ship per-platform artifacts
+# at all. The binaries are published here once, and each client fetches only
+# what it needs - which makes this release the single source of engines, so a
+# missing or mistagged one leaves every channel with no engine at all.
 #
 # This does not build anything. It uploads what ./scripts/package-*.sh already
 # expect to find in vscode/bin/, so it slots in after the existing
@@ -29,7 +29,7 @@ STAGE_DIR="$REPO_ROOT/target/release-assets"
 REPO="codegraph-ai/CodeGraph"
 
 # The engine's own version is the one that matters here - these are engine
-# binaries, and the JetBrains client asks for them by engine version.
+# binaries, and every client asks for them by the engine version it pins.
 VERSION="$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 TAG="v${VERSION}"
 
@@ -49,6 +49,46 @@ echo "CodeGraph release assets"
 echo "  version: $VERSION"
 echo "  tag:     $TAG"
 echo "  repo:    $REPO"
+echo
+
+# ---------------------------------------------------------------- pins
+# Each client hard-codes the engine release it fetches, so that a client-only
+# patch release does not start asking for a tag that was never published. That
+# only works while the pins agree with the engine being published here: a pin
+# ahead of this tag 404s on every fresh install, and one behind it silently
+# installs the previous engine. Checked before anything is uploaded, because
+# after the fact the only symptom is "CodeGraph has no engine".
+PIN_SOURCES=(
+  "mcp-package/bin/fetch-engine.js|npm + VS Code"
+  "jetbrains/src/main/kotlin/ai/codegraph/jetbrains/server/CodeGraphServerResolver.kt|JetBrains"
+)
+
+pin_mismatch=0
+for entry in "${PIN_SOURCES[@]}"; do
+  file="${entry%%|*}"
+  label="${entry##*|}"
+  pin="$(grep -m1 'ENGINE_VERSION = "' "$REPO_ROOT/$file" | sed 's/.*"\(.*\)".*/\1/')"
+  if [ "$pin" = "$VERSION" ]; then
+    printf '  ✓ %-14s pins engine %s\n' "$label" "$pin"
+  else
+    printf '  ✗ %-14s pins engine %s, not %s (%s)\n' \
+      "$label" "${pin:-<not found>}" "$VERSION" "$file"
+    pin_mismatch=1
+  fi
+done
+
+if [ "$pin_mismatch" -ne 0 ]; then
+  cat >&2 <<EOF
+
+ERROR: a client pins an engine version other than $VERSION.
+
+Clients fetch the engine by the version they pin, and no channel bundles one any
+more, so a pin naming an unpublished tag means no engine at all on that channel.
+Set the ENGINE_VERSION constants to $VERSION, or publish the version they
+already name, then re-run.
+EOF
+  exit 1
+fi
 echo
 
 # ---------------------------------------------------------------- verify

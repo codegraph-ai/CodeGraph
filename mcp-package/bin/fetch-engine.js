@@ -38,6 +38,45 @@ function transportFor(url) {
 
 const RELEASE_BASE = "https://github.com/codegraph-ai/CodeGraph/releases/download";
 
+/**
+ * The engine release every client fetches, and the version a managed install is
+ * expected to be.
+ *
+ * Deliberately not the client's own package version. Release assets are tagged
+ * with the *engine's* version (scripts/publish-release-assets.sh reads
+ * Cargo.toml), so a client-only patch - a VSIX with a UI fix, an npm release
+ * with a doc change - would ask for `v<client version>/…` and get a 404 on every
+ * fresh install, i.e. no engine at all now that nothing bundles one. Pinning it
+ * here lets the clients version independently, and lets all three compare the
+ * shared `~/.codegraph/bin` marker against the same number instead of against
+ * three separately drifting ones.
+ *
+ * Kept equal to the engine version by `scripts/publish-release-assets.sh`, which
+ * refuses to publish while any channel's pin disagrees with Cargo.toml.
+ */
+const ENGINE_VERSION = "0.20.0";
+
+/** Codes Windows and POSIX use for "something else has this file open". */
+const IN_USE_ERROR_CODES = new Set(["EPERM", "EACCES", "EBUSY", "ETXTBSY"]);
+
+/**
+ * Raised when a verified download cannot be moved into place because the engine
+ * on disk is still running - on Windows a process holds its own executable
+ * open. Distinguished from an ordinary I/O failure because the remedy is
+ * different: stop the engine, then try again.
+ */
+class EngineInUseError extends Error {
+  constructor(asset, cause) {
+    super(
+      `${asset} could not be replaced because it is in use. ` +
+        `Stop the CodeGraph engine and try again.`
+    );
+    this.name = "EngineInUseError";
+    this.asset = asset;
+    this.cause = cause;
+  }
+}
+
 /** Windows loads this next to the executable; without it the engine cannot start. */
 const WINDOWS_SIDECAR = "onnxruntime.dll";
 
@@ -182,11 +221,10 @@ function sha256(file) {
 }
 
 /**
- * Fetch one asset into targetDir, verified.
+ * Download one asset into targetDir and verify it, returning the staged file.
  *
- * Staged first and moved into place only once the checksum matches, so an
- * interrupted or corrupted download can never leave behind something that
- * later looks like a valid install.
+ * Nothing is moved into place here, so an interrupted or corrupted download can
+ * never leave behind something that later looks like a valid install.
  *
  * The staged name is unique per call. This directory is shared, and the
  * download is no longer one deliberate click: several VS Code windows can
@@ -194,7 +232,7 @@ function sha256(file) {
  * `.partial` file, producing a spurious checksum failure or - worse - promoting
  * a half-written engine into place.
  */
-async function fetchVerified(asset, version, targetDir, { baseUrl = RELEASE_BASE } = {}) {
+async function stageVerified(asset, version, targetDir, { baseUrl = RELEASE_BASE } = {}) {
   const assetUrl = `${baseUrl}/v${version}/${asset}`;
   const expected = (await readText(`${assetUrl}.sha256`)).trim().split(/\s+/)[0].toLowerCase();
 
@@ -208,7 +246,33 @@ async function fetchVerified(asset, version, targetDir, { baseUrl = RELEASE_BASE
         `${asset} failed checksum verification (expected ${expected}, got ${actual})`
       );
     }
-    fs.renameSync(staged, path.join(targetDir, asset));
+  } catch (error) {
+    // A file the caller was never handed back is this function's to clean up.
+    if (fs.existsSync(staged)) fs.unlinkSync(staged);
+    throw error;
+  }
+  return staged;
+}
+
+/**
+ * Move a verified download into place, naming the one failure with a different
+ * remedy: a running engine holds its own binary open, and reporting that as a
+ * failed download sends the user to debug a network they have no problem with.
+ */
+function installStaged(staged, destination, asset) {
+  try {
+    fs.renameSync(staged, destination);
+  } catch (error) {
+    if (IN_USE_ERROR_CODES.has(error.code)) throw new EngineInUseError(asset, error);
+    throw error;
+  }
+}
+
+/** Fetch one asset into targetDir, verified, and install it. */
+async function fetchVerified(asset, version, targetDir, options = {}) {
+  const staged = await stageVerified(asset, version, targetDir, options);
+  try {
+    installStaged(staged, path.join(targetDir, asset), asset);
   } finally {
     if (fs.existsSync(staged)) fs.unlinkSync(staged);
   }
@@ -250,6 +314,16 @@ function isStale(targetDir, version) {
  * in lockstep with the engine they were built against, so "a file with the
  * right name exists" is not the same question as "the right engine is here".
  *
+ * Every asset is staged and verified before any of them is moved into place.
+ * Installing as each download completes is how a Windows install ends up with a
+ * new engine beside the old `onnxruntime.dll` when the second transfer fails -
+ * a combination that installs cleanly and then fails at startup.
+ *
+ * `options.beforeInstall` runs after the last download is verified and before
+ * the first file is moved, so a caller can stop the running engine at the last
+ * possible moment: stopping it for the length of a transfer that may fail costs
+ * the user a working engine for nothing.
+ *
  * @returns {Promise<{binary: string, fetched: string[]}>} path to the engine
  *   and which assets were downloaded (empty when everything was already there).
  */
@@ -262,13 +336,26 @@ async function ensureEngine(version, targetDir, options = {}) {
   fs.mkdirSync(targetDir, { recursive: true });
 
   const stale = isStale(targetDir, version);
-  const fetched = [];
-  for (const asset of assets) {
-    const destination = path.join(targetDir, asset);
-    if (fs.existsSync(destination) && !options.force && !stale) continue;
-    if (options.onProgress) options.onProgress(asset);
-    await fetchVerified(asset, version, targetDir, options);
-    fetched.push(asset);
+  const fetched = assets.filter(
+    (asset) => options.force || stale || !fs.existsSync(path.join(targetDir, asset))
+  );
+
+  const staged = new Map();
+  try {
+    for (const asset of fetched) {
+      if (options.onProgress) options.onProgress(asset);
+      staged.set(asset, await stageVerified(asset, version, targetDir, options));
+    }
+    if (staged.size > 0 && options.beforeInstall) await options.beforeInstall();
+    for (const [asset, file] of staged) {
+      installStaged(file, path.join(targetDir, asset), asset);
+    }
+  } finally {
+    // A successful move leaves nothing to remove; anything still here belongs
+    // to a download that failed or to an install that stopped part-way.
+    for (const file of staged.values()) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
   }
   // Written last, and only when this call put the engine there: a marker
   // recorded before the assets are verified would claim an install that a later
@@ -292,8 +379,10 @@ async function ensureEngine(version, targetDir, options = {}) {
 
 module.exports = {
   RELEASE_BASE,
+  ENGINE_VERSION,
   WINDOWS_SIDECAR,
   VERSION_MARKER,
+  EngineInUseError,
   platformBinaryName,
   requiredAssets,
   installedVersion,

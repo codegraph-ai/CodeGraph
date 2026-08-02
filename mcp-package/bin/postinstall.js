@@ -6,7 +6,7 @@ const os = require("os");
 const fs = require("fs");
 const { execFileSync } = require("child_process");
 
-const { ensureEngine, platformBinaryName } = require("./fetch-engine");
+const { ensureEngine, platformBinaryName, ENGINE_VERSION } = require("./fetch-engine");
 
 const platform = os.platform();
 const arch = os.arch();
@@ -22,7 +22,10 @@ if (!binaryName) {
 }
 
 const binaryPath = path.join(__dirname, binaryName);
-const version = require("../package.json").version;
+// The engine release, not this package's version. Release assets are tagged
+// with the engine's version, so asking for this package's would 404 on any
+// npm-only patch release - and leave the install with no engine at all.
+const version = ENGINE_VERSION;
 
 // The engine is fetched rather than bundled. Shipping all four platform
 // binaries made this package 88 MB compressed and 498 MB unpacked so that every

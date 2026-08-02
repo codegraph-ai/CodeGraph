@@ -126,10 +126,68 @@ pub(crate) fn is_test_like(node: &Node) -> bool {
     if is_test(node) {
         return true;
     }
-    let name = name(node).to_lowercase();
-    if name.starts_with("test_") || name.contains("_test") {
+    if is_test_name(name(node)) {
         return true;
     }
-    let path = node.properties.get_string("path").unwrap_or("");
-    path.contains("/tests/") || path.contains("/test_")
+    is_test_path(node.properties.get_string("path").unwrap_or(""))
+}
+
+/// Name heuristic for test functions: `test_foo` or `foo_test`. Anchored to the
+/// ends of the name because a substring match would also claim `run_tests`,
+/// `setup_test_env` and other harness helpers, which are production code that
+/// happens to drive tests - and dropping those from the lens is a silent loss.
+fn is_test_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.starts_with("test_") || name.ends_with("_test")
+}
+
+/// Path heuristic for test files: a `tests` directory component or a
+/// `test_`-prefixed file name. Separators are normalised first because node
+/// paths are stored with the indexing host's native separator, so a Windows
+/// `tests\foo.rs` would otherwise never match.
+fn is_test_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    path.starts_with("tests/")
+        || path.starts_with("test_")
+        || path.contains("/tests/")
+        || path.contains("/test_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_test_name, is_test_path};
+
+    #[test]
+    fn test_name_matches_at_word_boundaries() {
+        assert!(is_test_name("test_parses_empty_input"));
+        assert!(is_test_name("lower_bound_test"));
+        assert!(is_test_name("TEST_Uppercase"));
+    }
+
+    #[test]
+    fn test_name_rejects_harness_helpers() {
+        assert!(!is_test_name("run_tests"));
+        assert!(!is_test_name("setup_test_env"));
+        assert!(!is_test_name("latest_snapshot"));
+    }
+
+    #[test]
+    fn test_path_matches_windows_separators() {
+        assert!(is_test_path(r"C:\repo\tests\navigation.rs"));
+        assert!(is_test_path(r"C:\repo\src\test_helpers.rs"));
+        assert!(is_test_path(r"tests\navigation.rs"));
+    }
+
+    #[test]
+    fn test_path_matches_unix_separators() {
+        assert!(is_test_path("/repo/tests/navigation.rs"));
+        assert!(is_test_path("/repo/src/test_helpers.rs"));
+        assert!(is_test_path("tests/navigation.rs"));
+    }
+
+    #[test]
+    fn test_path_rejects_production_paths() {
+        assert!(!is_test_path("/repo/src/latest/mod.rs"));
+        assert!(!is_test_path(r"C:\repo\src\contest.rs"));
+    }
 }

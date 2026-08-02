@@ -376,6 +376,53 @@ impl CodeGraph {
         Ok(neighbors.into_iter().collect())
     }
 
+    /// Get neighbors reachable by edges of a single type.
+    ///
+    /// Equivalent to filtering [`get_neighbors`](Self::get_neighbors) by edge
+    /// type, but resolves the type during the adjacency walk. Callers that need
+    /// only one relation (e.g. incoming `Calls`) should use this rather than
+    /// pairing `get_neighbors` with a `get_edges_between` lookup per neighbor,
+    /// which costs an extra pass over each neighbor's full outgoing adjacency.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if node not found.
+    pub fn get_neighbors_by_edge_type(
+        &self,
+        node_id: NodeId,
+        direction: Direction,
+        edge_type: EdgeType,
+    ) -> Result<Vec<NodeId>> {
+        self.get_node(node_id)?;
+
+        let mut neighbors = HashSet::new();
+
+        let mut collect = |edges: Option<&HashSet<EdgeId>>, incoming: bool| {
+            for edge_id in edges.into_iter().flatten() {
+                if let Ok(edge) = self.get_edge(*edge_id) {
+                    if edge.edge_type == edge_type {
+                        neighbors.insert(if incoming {
+                            edge.source_id
+                        } else {
+                            edge.target_id
+                        });
+                    }
+                }
+            }
+        };
+
+        match direction {
+            Direction::Outgoing => collect(self.adjacency_out.get(&node_id), false),
+            Direction::Incoming => collect(self.adjacency_in.get(&node_id), true),
+            Direction::Both => {
+                collect(self.adjacency_out.get(&node_id), false);
+                collect(self.adjacency_in.get(&node_id), true);
+            }
+        }
+
+        Ok(neighbors.into_iter().collect())
+    }
+
     /// Get all edges between two nodes.
     ///
     /// Returns all edges from source to target.

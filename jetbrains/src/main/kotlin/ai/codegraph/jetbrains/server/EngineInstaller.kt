@@ -5,9 +5,7 @@ package ai.codegraph.jetbrains.server
 
 import ai.codegraph.jetbrains.lsp.CodeGraphClient
 import ai.codegraph.jetbrains.notify.CodeGraphNotifications
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.diagnostic.logger
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
@@ -17,14 +15,7 @@ import com.intellij.openapi.project.Project
 object EngineInstaller {
 
     fun downloadInBackground(project: Project) {
-        val version = pluginVersion()
-        if (version == null) {
-            CodeGraphNotifications.error(
-                project,
-                "The CodeGraph plugin descriptor is unavailable, so there is no version to download.",
-            )
-            return
-        }
+        val version = CodeGraphServerResolver.ENGINE_VERSION
         ProgressManager.getInstance().run(
             object : Task.Backgroundable(project, "Downloading the CodeGraph engine", true) {
                 override fun run(indicator: ProgressIndicator) {
@@ -96,17 +87,5 @@ object EngineInstaller {
         CodeGraphNotifications.error(project, message)
     }
 
-    /**
-     * The plugin ships in lockstep with the engine it was built against, so the
-     * plugin's own version names the release to fetch - and the version a
-     * managed install is expected to be.
-     *
-     * Null outside a real IDE (tests, headless tooling), where there is no
-     * plugin descriptor to read.
-     */
-    fun pluginVersion(): String? =
-        runCatching { PluginManagerCore.getPlugin(PluginId.getId(PLUGIN_ID))?.version }.getOrNull()
-
     private val LOG = logger<EngineInstaller>()
-    private const val PLUGIN_ID = "ai.codegraph.jetbrains"
 }

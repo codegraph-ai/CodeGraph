@@ -29,6 +29,8 @@ const {
   platformBinaryName,
   installedVersion,
   compareVersions,
+  ENGINE_VERSION,
+  EngineInUseError,
   WINDOWS_SIDECAR,
   VERSION_MARKER,
 } = require("../bin/fetch-engine");
@@ -240,6 +242,105 @@ async function run() {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }
+
+  // --- nothing is installed until everything is verified ----------------
+  // Installing each asset as its download finishes is how a Windows install
+  // ends up with a new engine beside the old onnxruntime.dll: that combination
+  // downloads cleanly and then fails at startup.
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    const assets = { [name]: { content: "engine" } };
+    // Serve the engine but not the sidecar, so the second fetch 404s. On
+    // platforms with no sidecar, corrupt the engine instead.
+    const sidecars = requiredAssets().slice(1);
+    if (sidecars.length === 0) assets[name].checksum = "0".repeat(64);
+
+    const { server, baseUrl } = await startRelease(assets);
+    try {
+      let threw = null;
+      await ensureEngine(VERSION, dir, { baseUrl }).catch((e) => (threw = e));
+      check(threw !== null, "a partial release fails rather than half-installing");
+      check(!fs.existsSync(path.join(dir, name)), "the verified engine is not installed alone");
+      check(fs.readdirSync(dir).length === 0, "and nothing is staged behind");
+    } finally {
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // --- the engine is stopped before it is replaced ----------------------
+  // A running engine holds its own binary open; on Windows the move fails
+  // outright, and elsewhere the old process keeps serving while the version
+  // marker records a build nobody runs. The hook fires once every asset is
+  // verified, and only when there is something to install.
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    for (const asset of requiredAssets()) fs.writeFileSync(path.join(dir, asset), "stale");
+    fs.writeFileSync(path.join(dir, VERSION_MARKER), "0.19.1\n");
+
+    const assets = { [name]: { content: "engine" } };
+    for (const asset of requiredAssets().slice(1)) assets[asset] = { content: "sidecar" };
+    const { server, baseUrl } = await startRelease(assets);
+    try {
+      const seen = [];
+      await ensureEngine(VERSION, dir, {
+        baseUrl,
+        beforeInstall: async () => seen.push(fs.readFileSync(path.join(dir, name), "utf8")),
+      });
+      check(seen.length === 1, "the install hook runs exactly once");
+      check(seen[0] === "stale", "it runs before the old engine is replaced");
+      check(
+        fs.readFileSync(path.join(dir, name), "utf8") === "engine",
+        "and the new engine is in place afterwards"
+      );
+
+      const skipped = [];
+      await ensureEngine(VERSION, dir, { baseUrl, beforeInstall: async () => skipped.push(1) });
+      check(skipped.length === 0, "an up-to-date install does not stop the engine for nothing");
+    } finally {
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // --- a locked binary is reported as such ------------------------------
+  // Reporting "in use" as a download failure sends the user to debug a network
+  // they have no problem with, and the update they cannot complete is then
+  // re-offered on every activation.
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    const assets = { [name]: { content: "engine" } };
+    for (const asset of requiredAssets().slice(1)) assets[asset] = { content: "sidecar" };
+    const { server, baseUrl } = await startRelease(assets);
+    const realRename = fs.renameSync;
+    try {
+      fs.renameSync = (from, to) => {
+        if (path.basename(to) === name) {
+          const error = new Error("EBUSY: resource busy or locked");
+          error.code = "EBUSY";
+          throw error;
+        }
+        return realRename(from, to);
+      };
+      let threw = null;
+      await ensureEngine(VERSION, dir, { baseUrl }).catch((e) => (threw = e));
+      check(threw instanceof EngineInUseError, "a locked binary is reported as in use");
+      check(/in use/i.test(threw.message), "and says so in the message");
+    } finally {
+      fs.renameSync = realRename;
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // --- the pinned engine release ---------------------------------------
+  // The clients fetch this version, not their own package version: release
+  // assets are tagged with the engine's version, so a client-only patch would
+  // otherwise ask for a tag that was never published and get no engine at all.
+  check(/^\d+\.\d+\.\d+/.test(ENGINE_VERSION), `a concrete engine version is pinned (${ENGINE_VERSION})`);
 
   // --- the windows sidecar rule ----------------------------------------
   check(

@@ -17,7 +17,7 @@ import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath } from './server';
-import { managedEnginePath, offerEngineDownload, offerEngineUpdateIfStale } from './engineDownload';
+import { engineVersion, managedEnginePath, offerEngineDownload, offerEngineUpdateIfStale } from './engineDownload';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
 import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from './funnel';
@@ -280,7 +280,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     try {
         serverInfo = getServerPath(context);
     } catch {
-        const downloaded = await offerEngineDownload(context.extension.packageJSON.version);
+        const downloaded = await offerEngineDownload(engineVersion());
         if (!downloaded) {
             reporter.activationServerStartResult({
                 outcome: 'spawn_fail',
@@ -295,16 +295,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // The managed engine is found by filename alone, so one installed by an
     // earlier release would otherwise be reused forever. The extension and the
-    // engine ship in lockstep, so offer to bring it up to this version - only
-    // when it is the binary we actually resolved, since a pro, bundled or
-    // locally built engine is the user's to manage.
+    // engine ship in lockstep, so offer to bring it up to the engine release
+    // this build expects - only when it is the binary we actually resolved,
+    // since a pro, bundled or locally built engine is the user's to manage.
     //
     // Not awaited: the engine on disk still runs, and holding activation - and
     // with it the language client, the tree views and the lenses - behind a
     // 30 MB transfer on a slow network is a far worse trade than one release of
-    // drift.
+    // drift. The lifecycle callbacks read `client` lazily for the same reason:
+    // by the time the user answers the prompt it has been created and started.
     if (serverInfo.path === managedEnginePath()) {
-        void offerEngineUpdateIfStale(context.extension.packageJSON.version);
+        void offerEngineUpdateIfStale(engineVersion(), context.globalState, {
+            isRunning: () => client?.isRunning() ?? false,
+            stop: () => client.stop(),
+            start: () => client.start(),
+        });
     }
 
     setServerEdition(serverInfo.edition === 'pro' ? 'pro' : 'community');

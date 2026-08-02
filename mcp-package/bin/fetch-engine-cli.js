@@ -14,10 +14,12 @@
  */
 
 const path = require("path");
-const { ensureEngine, platformBinaryName } = require("./fetch-engine");
+const { ensureEngine, platformBinaryName, ENGINE_VERSION } = require("./fetch-engine");
 
 const force = process.argv.includes("--force");
-const version = require("../package.json").version;
+// The engine release this package ships against, not the package's own version:
+// the release assets are tagged with the engine's version.
+const version = ENGINE_VERSION;
 const targetDir = __dirname;
 
 const binaryName = platformBinaryName();

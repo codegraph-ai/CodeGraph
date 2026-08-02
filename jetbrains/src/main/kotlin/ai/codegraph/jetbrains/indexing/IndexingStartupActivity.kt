@@ -108,15 +108,16 @@ class IndexingStartupActivity : ProjectActivity {
      */
     private fun offerEngineUpdateIfStale(project: Project, resolved: ResolvedServer) {
         if (resolved.origin != ResolvedServer.Origin.MANAGED_INSTALL) return
-        val expected = EngineInstaller.pluginVersion() ?: return
+        val expected = CodeGraphServerResolver.ENGINE_VERSION
         val installed = CodeGraphServerResolver.managedEngineVersion()
         if (!CodeGraphServerResolver.isManagedEngineStale(installed, expected)) return
 
-        LOG.info("Managed CodeGraph engine reports version ${installed ?: "unknown"}, plugin is $expected")
+        LOG.info("Managed CodeGraph engine reports version ${installed ?: "unknown"}, expected $expected")
         CodeGraphNotifications.infoWithActions(
             project,
-            "The installed CodeGraph engine (${installed ?: "unknown version"}) predates this " +
-                "plugin ($expected). They ship together, so features this build expects may be missing.",
+            "The installed CodeGraph engine (${installed ?: "unknown version"}) predates the one " +
+                "this plugin ships against ($expected). They ship together, so features this " +
+                "build expects may be missing.",
             "Update Engine" to { notification ->
                 notification.expire()
                 EngineInstaller.downloadInBackground(project)
