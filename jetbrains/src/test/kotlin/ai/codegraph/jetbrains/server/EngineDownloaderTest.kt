@@ -152,19 +152,34 @@ class EngineDownloaderTest : BasePlatformTestCase() {
     }
 
     fun `test windows failing on the sidecar does not leave a half install`() {
-        // Engine publishes fine, sidecar is corrupt: the install must not be
-        // reported as usable.
+        // Engine publishes fine, sidecar is corrupt: nothing may be installed.
+        // A new engine beside the previous sidecar is exactly the combination
+        // that downloads cleanly and then fails at startup.
         publish("0.19.1", "codegraph-server-win32-x64.exe", "engine".toByteArray())
         publish("0.19.1", EngineDownloader.WINDOWS_SIDECAR, "onnx".toByteArray(), checksum = "0".repeat(64))
 
         val failure = runCatching { downloader("Windows 11", "amd64").download("0.19.1") }.exceptionOrNull()
+        val dir = CodeGraphServerResolver.managedInstallDir(env("Windows 11"))
 
         assertTrue(failure is EngineDownloader.ChecksumMismatchException)
-        assertFalse(
-            Files.exists(
-                CodeGraphServerResolver.managedInstallDir(env("Windows 11"))
-                    .resolve(EngineDownloader.WINDOWS_SIDECAR),
-            ),
-        )
+        assertFalse(Files.exists(dir.resolve(EngineDownloader.WINDOWS_SIDECAR)))
+        assertFalse(Files.exists(dir.resolve("codegraph-server-win32-x64.exe")))
+    }
+
+    fun `test nothing is installed until the caller has had a chance to stop the engine`() {
+        // The engine holds its own binary open while it runs, so the installer
+        // stops it in this hook. That is only safe if nothing has been moved
+        // into place yet - otherwise a stop that fails leaves a half-updated
+        // install with a live process on the old binary.
+        publish("0.19.1", "codegraph-server-darwin-arm64", "engine".toByteArray())
+        val engine = CodeGraphServerResolver.managedInstallDir(env("Mac OS X"))
+            .resolve("codegraph-server-darwin-arm64")
+        // Starts true so a hook that never runs at all fails this test too.
+        var installedWhenCalled = true
+
+        downloader("Mac OS X").download("0.19.1") { installedWhenCalled = Files.exists(engine) }
+
+        assertFalse("nothing may be in place when the hook runs", installedWhenCalled)
+        assertTrue("the install still completes after the hook", Files.exists(engine))
     }
 }

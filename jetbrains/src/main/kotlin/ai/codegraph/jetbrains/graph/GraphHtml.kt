@@ -41,10 +41,45 @@ object GraphHtml {
 
     private const val DEFAULT_COLOR = "#888888"
 
+    /**
+     * The layout is an all-pairs repulsion loop run to convergence before the
+     * first paint, so its cost is quadratic in the node count. A hub file in a
+     * large repository can return hundreds of nodes at depth 2, and the panel
+     * then sits frozen on the render thread with nothing to show and no way to
+     * cancel. Two hundred nodes is already past what anyone can read; beyond it
+     * the graph is a hairball whether it renders or not.
+     */
+    private const val MAX_RENDERED_NODES = 200
+
+    /**
+     * Keep the most connected nodes and the edges between them.
+     *
+     * Degree rather than arrival order: the highly connected nodes are what the
+     * graph is about, and dropping them in favour of whichever leaves happened
+     * to come back first would leave a picture that says nothing.
+     */
+    private fun capNodes(graph: GraphData): GraphData {
+        if (graph.nodes.size <= MAX_RENDERED_NODES) return graph
+
+        val degree = graph.nodes.associate { it.id to 0 }.toMutableMap()
+        graph.edges.forEach { edge ->
+            degree.computeIfPresent(edge.from) { _, count -> count + 1 }
+            degree.computeIfPresent(edge.to) { _, count -> count + 1 }
+        }
+        val kept = graph.nodes
+            .sortedByDescending { degree[it.id] ?: 0 }
+            .take(MAX_RENDERED_NODES)
+        val keptIds = kept.mapTo(HashSet()) { it.id }
+        return GraphData(kept, graph.edges.filter { it.from in keptIds && it.to in keptIds })
+    }
+
     fun render(graph: GraphData, title: String): String {
+        val drawn = capNodes(graph)
+        val omitted = graph.nodes.size - drawn.nodes.size
+
         val payload = gson.toJson(
             mapOf(
-                "nodes" to graph.nodes.map { node ->
+                "nodes" to drawn.nodes.map { node ->
                     mapOf(
                         "id" to node.id,
                         "label" to node.label,
@@ -52,9 +87,14 @@ object GraphHtml {
                         "title" to "${node.label}\n${node.type}${if (node.language.isNotBlank()) " · ${node.language}" else ""}",
                     )
                 },
-                "edges" to graph.edges.map { mapOf("from" to it.from, "to" to it.to) },
+                "edges" to drawn.edges.map { mapOf("from" to it.from, "to" to it.to) },
             ),
         )
+        val truncationNote = if (omitted > 0) {
+            "Showing the ${drawn.nodes.size} most connected of ${graph.nodes.size} nodes."
+        } else {
+            ""
+        }
 
         // The page inherits the IDE's theme rather than picking its own, so a
         // graph opened in a dark IDE is not a white rectangle.
@@ -71,6 +111,8 @@ object GraphHtml {
                 html, body { margin: 0; height: 100%; background: $background; color: $foreground;
                              font-family: -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
                 #empty { padding: 24px; font-size: 13px; opacity: 0.7; }
+                #truncated { position: absolute; top: 0; left: 0; right: 0; padding: 6px 10px;
+                             font-size: 11px; opacity: 0.7; pointer-events: none; }
                 svg { width: 100%; height: 100%; display: block; cursor: grab; }
                 line { stroke: $foreground; stroke-opacity: 0.25; }
                 circle { stroke: $background; stroke-width: 1.5px; cursor: pointer; }
@@ -79,6 +121,7 @@ object GraphHtml {
             </head>
             <body>
               <div id="empty" hidden>No relationships to draw.</div>
+              <div id="truncated">$truncationNote</div>
               <svg id="canvas"></svg>
               <script>
                 const data = $payload;

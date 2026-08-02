@@ -83,10 +83,14 @@ object CodeGraphServerResolver {
     /**
      * Binary name for this platform, or null when no engine is published for it.
      *
-     * Only macOS is built for both architectures. Falling back to the x64 asset
-     * on an arm64 Linux or Windows machine installs ~30 MB that cannot execute,
-     * which surfaces as an exec-format error at first use instead of as the
-     * unsupported platform it is.
+     * Only macOS is built for both architectures. Windows on ARM runs the x64
+     * build under the OS's own emulation layer, so it is served the x64 asset;
+     * Linux has no such layer, and falling back to x64 there installs ~30 MB
+     * that cannot execute, which surfaces as an exec-format error at first use
+     * instead of as the unsupported platform it is.
+     *
+     * Mirrors `platformBinaryName()` in `mcp-package/bin/fetch-engine.js`, which
+     * is the same rule for the JavaScript channels.
      */
     fun platformBinaryNameOrNull(env: ResolverEnvironment = ResolverEnvironment.fromSystem()): String? {
         val os = env.osName.lowercase()
@@ -99,9 +103,8 @@ object CodeGraphServerResolver {
                 isX64 -> "codegraph-server-darwin-x64"
                 else -> null
             }
-            !isX64 -> null
-            os.contains("win") -> "codegraph-server-win32-x64.exe"
-            os.contains("linux") -> "codegraph-server-linux-x64"
+            os.contains("win") -> if (isX64 || isArm64) "codegraph-server-win32-x64.exe" else null
+            os.contains("linux") -> if (isX64) "codegraph-server-linux-x64" else null
             else -> null
         }
     }
@@ -133,6 +136,46 @@ object CodeGraphServerResolver {
         runCatching { Files.readString(managedInstallDir(env).resolve(VERSION_MARKER)).trim() }
             .getOrNull()
             ?.takeIf { it.isNotEmpty() }
+
+    /**
+     * True when the managed engine predates [expected] and is worth replacing.
+     * An unmarked or unreadable version counts as stale: it predates the
+     * marker, so which build it is cannot be established.
+     *
+     * Deliberately not `installed != expected`. The managed directory is shared
+     * with the VS Code extension and the CLI, which ship through their own
+     * channels on their own schedules, so finding a *newer* engine there is
+     * normal. Treating that as a mismatch has each client reinstall its own
+     * version over the other's on every launch, with a notification each time
+     * and no way for the user to end it.
+     */
+    fun isManagedEngineStale(installed: String?, expected: String): Boolean {
+        val order = compareVersions(installed ?: return true, expected) ?: return true
+        return order < 0
+    }
+
+    /**
+     * Release order of two versions, or null when either is not a plain numeric
+     * version - a caller cannot tell older from newer then, and guessing is
+     * what produces the loop [isManagedEngineStale] exists to avoid.
+     */
+    fun compareVersions(a: String, b: String): Int? {
+        val left = versionParts(a) ?: return null
+        val right = versionParts(b) ?: return null
+        for (i in 0 until maxOf(left.size, right.size)) {
+            val difference = (left.getOrNull(i) ?: 0).compareTo(right.getOrNull(i) ?: 0)
+            if (difference != 0) return difference
+        }
+        return 0
+    }
+
+    /** Numeric release components, ignoring any prerelease suffix. */
+    private fun versionParts(version: String): List<Int>? =
+        version.trim()
+            .substringBefore('-')
+            .takeIf { it.isNotEmpty() }
+            ?.split('.')
+            ?.map { it.toIntOrNull() ?: return null }
 
     /**
      * Resolve the engine, or return null when nothing is installed yet. A null

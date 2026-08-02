@@ -64,11 +64,42 @@ function platformBinaryName(platform = os.platform(), arch = os.arch()) {
   if (!p || !a) return null;
   // macOS is the only platform published for both architectures.
   if (p === "darwin") return `codegraph-server-darwin-${a}`;
-  // Only x64 is published for Windows and Linux today. Handing the x64 build to
-  // an arm64 machine installs ~30 MB that cannot execute at all, which surfaces
-  // as an exec-format error at first use rather than as an unsupported platform.
-  if (a !== "x64") return null;
-  return p === "win32" ? "codegraph-server-win32-x64.exe" : "codegraph-server-linux-x64";
+  // Windows on ARM runs x64 executables under the OS's own emulation layer, so
+  // the x64 asset is the correct answer there and refusing it would leave those
+  // users with no engine at all.
+  if (p === "win32") return "codegraph-server-win32-x64.exe";
+  // Linux has no such layer. Handing the x64 build to an arm64 machine installs
+  // ~30 MB that cannot execute, which surfaces as an exec-format error at first
+  // use rather than as the unsupported platform it is.
+  return a === "x64" ? "codegraph-server-linux-x64" : null;
+}
+
+/** Numeric release components, or null when [version] is not one. */
+function versionParts(version) {
+  const core = String(version || "").trim().split("-")[0];
+  if (!core) return null;
+  const parts = core.split(".").map((part) => Number.parseInt(part, 10));
+  return parts.every((part) => Number.isInteger(part)) ? parts : null;
+}
+
+/**
+ * Release order of two versions: -1, 0 or 1, and null when either side is not a
+ * plain numeric version.
+ *
+ * Callers need "older" rather than "different". `~/.codegraph/bin` is shared by
+ * the CLI, the VS Code extension and the JetBrains plugin, which ship on
+ * independent schedules; treating any difference as staleness makes each client
+ * reinstall its own engine over the other's on every launch, forever.
+ */
+function compareVersions(a, b) {
+  const left = versionParts(a);
+  const right = versionParts(b);
+  if (!left || !right) return null;
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const difference = (left[i] || 0) - (right[i] || 0);
+    if (difference !== 0) return difference < 0 ? -1 : 1;
+  }
+  return 0;
 }
 
 /** Everything this platform needs on disk, in the order it should be fetched. */
@@ -156,12 +187,19 @@ function sha256(file) {
  * Staged first and moved into place only once the checksum matches, so an
  * interrupted or corrupted download can never leave behind something that
  * later looks like a valid install.
+ *
+ * The staged name is unique per call. This directory is shared, and the
+ * download is no longer one deliberate click: several VS Code windows can
+ * activate at once and each would otherwise truncate, hash and unlink the same
+ * `.partial` file, producing a spurious checksum failure or - worse - promoting
+ * a half-written engine into place.
  */
 async function fetchVerified(asset, version, targetDir, { baseUrl = RELEASE_BASE } = {}) {
   const assetUrl = `${baseUrl}/v${version}/${asset}`;
   const expected = (await readText(`${assetUrl}.sha256`)).trim().split(/\s+/)[0].toLowerCase();
 
-  const staged = path.join(targetDir, `.${asset}.partial`);
+  const stamp = `${process.pid}.${crypto.randomBytes(6).toString("hex")}`;
+  const staged = path.join(targetDir, `.${asset}.${stamp}.partial`);
   try {
     await download(assetUrl, staged);
     const actual = await sha256(staged);
@@ -189,6 +227,23 @@ function installedVersion(targetDir) {
 }
 
 /**
+ * True when the engine installed in targetDir predates [version] and should be
+ * replaced. An unmarked install counts as stale: it predates the marker, so
+ * which build it is cannot be established.
+ *
+ * A *newer* engine is left alone. All three clients share this directory and
+ * ship independently, so one of them finding a newer engine is normal, and
+ * replacing it with its own older one only starts a downgrade war the other
+ * client undoes on its next launch.
+ */
+function isStale(targetDir, version) {
+  const installed = installedVersion(targetDir);
+  if (installed === null) return true;
+  const order = compareVersions(installed, version);
+  return order === null ? true : order < 0;
+}
+
+/**
  * Ensure the engine for this platform is present in targetDir, at [version].
  *
  * A binary left by an older client is replaced rather than reused: clients ship
@@ -206,7 +261,7 @@ async function ensureEngine(version, targetDir, options = {}) {
 
   fs.mkdirSync(targetDir, { recursive: true });
 
-  const stale = installedVersion(targetDir) !== version;
+  const stale = isStale(targetDir, version);
   const fetched = [];
   for (const asset of assets) {
     const destination = path.join(targetDir, asset);
@@ -215,9 +270,13 @@ async function ensureEngine(version, targetDir, options = {}) {
     await fetchVerified(asset, version, targetDir, options);
     fetched.push(asset);
   }
-  // Written last: a marker recorded before the assets are verified would claim
-  // an install that a later failure never completed.
-  fs.writeFileSync(path.join(targetDir, VERSION_MARKER), `${version}\n`);
+  // Written last, and only when this call put the engine there: a marker
+  // recorded before the assets are verified would claim an install that a later
+  // failure never completed, and one recorded over an untouched newer install
+  // would mislabel someone else's engine as ours.
+  if (fetched.length > 0 || installedVersion(targetDir) === null) {
+    fs.writeFileSync(path.join(targetDir, VERSION_MARKER), `${version}\n`);
+  }
 
   const binary = path.join(targetDir, assets[0]);
   if (os.platform() !== "win32") {
@@ -238,6 +297,8 @@ module.exports = {
   platformBinaryName,
   requiredAssets,
   installedVersion,
+  compareVersions,
+  isStale,
   ensureEngine,
   fetchVerified,
   sha256,

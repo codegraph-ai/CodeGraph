@@ -38,17 +38,37 @@ sealed class ShowGraphAction(private val kind: GraphKind) : AnAction() {
         CodeGraphClient.getInstance(project).start()
 
         val toolWindow = ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID) ?: return
-        val panel = GraphPanel(project, kind)
+        val contentManager = toolWindow.contentManager
         val label = "${kind.title}: ${file.name}"
 
+        // This is reachable from a lens above every declaration, not just from
+        // the Tools menu, so adding a tab per invocation means a handful of
+        // clicks in one file leaves a row of identical tabs, each holding its
+        // own JCEF browser. The same graph of the same file is one tab.
+        //
+        // Matched on the file's URL rather than the tab label, which is only
+        // the file name: two `index.ts` in different directories are different
+        // graphs and must not quietly replace one another.
+        val existing = contentManager.contents.firstOrNull { content ->
+            val panel = content.component as? GraphPanel
+            panel != null && panel.kind == kind && panel.fileUri == file.url
+        }
+        if (existing != null) {
+            contentManager.setSelectedContent(existing)
+            toolWindow.show()
+            (existing.component as GraphPanel).load(file.url)
+            return
+        }
+
+        val panel = GraphPanel(project, kind)
         val content = ContentFactory.getInstance().createContent(panel, label, true).apply {
             isCloseable = true
             setDisposer(panel)
         }
         Disposer.register(toolWindow.disposable, panel)
 
-        toolWindow.contentManager.addContent(content)
-        toolWindow.contentManager.setSelectedContent(content)
+        contentManager.addContent(content)
+        contentManager.setSelectedContent(content)
         toolWindow.show()
 
         panel.load(file.url)

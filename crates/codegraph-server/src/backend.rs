@@ -128,7 +128,12 @@ pub struct CodeGraphBackend {
     pub query_engine: Arc<QueryEngine>,
 
     /// Memory manager for persistent AI context.
-    pub memory_manager: Arc<MemoryManager>,
+    ///
+    /// Behind a lock because `initialize` replaces it: the embedding model and
+    /// the client's resource directory are only known once the client has sent
+    /// them, and both are baked in when the manager is constructed. Read it
+    /// through [`CodeGraphBackend::memory_manager`].
+    memory_manager: std::sync::RwLock<Arc<MemoryManager>>,
 
     /// Workspace folders
     pub workspace_folders: Arc<RwLock<Vec<std::path::PathBuf>>>,
@@ -183,7 +188,7 @@ impl CodeGraphBackend {
             file_cache: Arc::new(DashMap::new()),
             query_cache: Arc::new(QueryCache::new(1000)),
             symbol_index: Arc::new(SymbolIndex::new()),
-            memory_manager: Arc::new(MemoryManager::new(None)),
+            memory_manager: std::sync::RwLock::new(Arc::new(MemoryManager::new(None))),
             workspace_folders: Arc::new(RwLock::new(Vec::new())),
             file_watcher: Arc::new(Mutex::new(None)),
             branch_watcher: Arc::new(Mutex::new(None)),
@@ -236,7 +241,7 @@ impl CodeGraphBackend {
             file_cache: Arc::new(DashMap::new()),
             query_cache: Arc::new(QueryCache::new(1000)),
             symbol_index: Arc::new(SymbolIndex::new()),
-            memory_manager: Arc::new(MemoryManager::new(None)),
+            memory_manager: std::sync::RwLock::new(Arc::new(MemoryManager::new(None))),
             workspace_folders: Arc::new(RwLock::new(Vec::new())),
             file_watcher: Arc::new(Mutex::new(None)),
             branch_watcher: Arc::new(Mutex::new(None)),
@@ -249,6 +254,23 @@ impl CodeGraphBackend {
         }
     }
 
+    /// The memory manager currently in use.
+    ///
+    /// Hands back a clone of the `Arc` rather than a guard, so no caller can
+    /// hold the lock across an `.await`. A poisoned lock still yields the
+    /// manager: the value is only ever replaced wholesale, so a panic elsewhere
+    /// cannot have left it half-written, and refusing to serve memory commands
+    /// for the rest of the session would be the larger failure.
+    #[must_use]
+    pub fn memory_manager(&self) -> Arc<MemoryManager> {
+        Arc::clone(
+            &self
+                .memory_manager
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
     /// Start the file watcher for the given workspace folders.
     pub async fn start_file_watcher(&self, folders: &[PathBuf]) {
         // Create the file watcher
@@ -256,7 +278,7 @@ impl CodeGraphBackend {
             Arc::clone(&self.graph),
             Arc::clone(&self.parsers),
             self.client.clone(),
-            Arc::clone(&self.memory_manager),
+            self.memory_manager(),
             Arc::clone(&self.symbol_index),
             Arc::clone(&self.query_engine),
             self.embed_queue.clone(),
@@ -324,7 +346,7 @@ impl CodeGraphBackend {
             Arc::clone(&self.query_engine),
             Arc::clone(&self.query_cache),
             self.client.clone(),
-            Arc::clone(&self.memory_manager),
+            self.memory_manager(),
             workspace_root.to_path_buf(),
         ) {
             Ok(watcher) => {
@@ -373,7 +395,7 @@ impl CodeGraphBackend {
         if !node_id_strings.is_empty() {
             let reason = format!("Code changed: {}", path_str);
             if let Err(e) = self
-                .memory_manager
+                .memory_manager()
                 .invalidate_for_code_nodes(&node_id_strings, &reason)
                 .await
             {
@@ -978,15 +1000,16 @@ impl LanguageServer for CodeGraphBackend {
             );
         }
 
-        // Safety: We're replacing the Arc contents during initialization before any use
-        let new_manager = Arc::new(MemoryManager::with_model(
-            extension_path.clone(),
-            embedding_model,
-        ));
-        let self_mut = self as *const Self as *mut Self;
-        unsafe {
-            (*self_mut).memory_manager = new_manager;
-        }
+        // Swapped rather than mutated in place. This used to cast `&self` to
+        // `&mut Self`, which is undefined behaviour however carefully the
+        // timing is argued - and the timing argument no longer held once this
+        // stopped being gated on the client sending `extensionPath`.
+        *self
+            .memory_manager
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(
+            MemoryManager::with_model(extension_path.clone(), embedding_model),
+        );
 
         let full_body = init_opts
             .as_ref()
@@ -1298,7 +1321,7 @@ impl LanguageServer for CodeGraphBackend {
                 )
                 .await;
 
-            match self.memory_manager.initialize(first_folder).await {
+            match self.memory_manager().initialize(first_folder).await {
                 Ok(_) => {
                     tracing::info!("Memory store initialization succeeded");
                     self.client
@@ -1306,7 +1329,7 @@ impl LanguageServer for CodeGraphBackend {
                         .await;
 
                     // Share vector engine with query engine for semantic symbol search
-                    if let Some(engine) = self.memory_manager.get_vector_engine().await {
+                    if let Some(engine) = self.memory_manager().get_vector_engine().await {
                         self.query_engine.set_vector_engine(engine).await;
 
                         let slug = crate::memory::project_slug(first_folder);
@@ -2495,7 +2518,7 @@ impl LanguageServer for CodeGraphBackend {
                 let ctx = crate::lsp_pro_hooks::ProCommandContext {
                     graph: Arc::clone(&self.graph),
                     query_engine: Arc::clone(&self.query_engine),
-                    memory_manager: Arc::clone(&self.memory_manager),
+                    memory_manager: self.memory_manager(),
                     workspace_folders: self.workspace_folders.read().await.clone(),
                 };
                 if let Some(future) = self.pro_commands.handle_command(other, args, ctx) {
@@ -2668,7 +2691,7 @@ impl CodeGraphBackend {
         // error: a bare "Internal error" with nothing logged makes every store
         // failure unactionable from a user report, and hid a kind-specific bug
         // here for some time.
-        let id = self.memory_manager.put(memory).await.map_err(|e| {
+        let id = self.memory_manager().put(memory).await.map_err(|e| {
             tracing::error!("[memoryStore] failed to store memory: {e}");
             let mut err = tower_lsp::jsonrpc::Error::internal_error();
             err.message = format!("Failed to store memory: {e}").into();
@@ -2715,7 +2738,7 @@ impl CodeGraphBackend {
 
         // Perform search
         let results = self
-            .memory_manager
+            .memory_manager()
             .search(&params.query, &config, &params.code_context)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2759,7 +2782,7 @@ impl CodeGraphBackend {
         params: crate::handlers::MemoryGetParams,
     ) -> Result<Option<crate::handlers::MemoryGetResponse>> {
         let memory = self
-            .memory_manager
+            .memory_manager()
             .get(&params.id)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2870,7 +2893,7 @@ impl CodeGraphBackend {
         &self,
         params: crate::handlers::MemoryInvalidateParams,
     ) -> Result<crate::handlers::MemoryInvalidateResponse> {
-        self.memory_manager
+        self.memory_manager()
             .invalidate(&params.id, "Invalidated via LSP command")
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2885,7 +2908,7 @@ impl CodeGraphBackend {
     ) -> Result<crate::handlers::MemoryListResponse> {
         // Get all current memories
         let all_memories = self
-            .memory_manager
+            .memory_manager()
             .get_all_current()
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2972,7 +2995,7 @@ impl CodeGraphBackend {
 
         // Get existing memory
         let existing = self
-            .memory_manager
+            .memory_manager()
             .get(&params.id)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -3026,14 +3049,14 @@ impl CodeGraphBackend {
 
         // Store updated memory
         let id = self
-            .memory_manager
+            .memory_manager()
             .put(memory)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
 
         // Get the updated memory for response
         let updated = self
-            .memory_manager
+            .memory_manager()
             .get(&id)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -3214,7 +3237,7 @@ impl CodeGraphBackend {
             .unwrap_or_default();
 
         let results = self
-            .memory_manager
+            .memory_manager()
             .search(&query, &config, &code_context)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -3256,7 +3279,7 @@ impl CodeGraphBackend {
     /// Get memory store statistics.
     pub async fn handle_memory_stats(&self) -> Result<serde_json::Value> {
         let stats = self
-            .memory_manager
+            .memory_manager()
             .stats()
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -3346,7 +3369,7 @@ impl CodeGraphBackend {
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_request())?;
 
         let mut result = miner
-            .mine_repository(&self.memory_manager, &self.graph, &config)
+            .mine_repository(&self.memory_manager(), &self.graph, &config)
             .await
             .map_err(|e| {
                 tracing::error!("Git mining failed: {}", e);
@@ -3383,7 +3406,7 @@ impl CodeGraphBackend {
                             .ok();
 
                         if let Some(m) = memory {
-                            if let Ok(id) = self.memory_manager.put(m).await {
+                            if let Ok(id) = self.memory_manager().put(m).await {
                                 result.memory_ids.push(id);
                                 hotspots_created += 1;
                             }
@@ -3435,7 +3458,7 @@ impl CodeGraphBackend {
                             .ok();
 
                         if let Some(m) = memory {
-                            if let Ok(id) = self.memory_manager.put(m).await {
+                            if let Ok(id) = self.memory_manager().put(m).await {
                                 result.memory_ids.push(id);
                                 couplings_created += 1;
                             }
@@ -3503,7 +3526,7 @@ impl CodeGraphBackend {
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_request())?;
 
         let result = miner
-            .mine_file(&file_path, &self.memory_manager, &self.graph, &config)
+            .mine_file(&file_path, &self.memory_manager(), &self.graph, &config)
             .await
             .map_err(|e| {
                 tracing::error!("Git mining for file failed: {}", e);
@@ -3667,7 +3690,7 @@ impl CodeGraphBackend {
                 current_only: true,
                 ..Default::default()
             };
-            match self.memory_manager.search(&path_str, &config, &[]).await {
+            match self.memory_manager().search(&path_str, &config, &[]).await {
                 Ok(results) => {
                     let memory_budget = max_tokens * 15 / 100;
                     let mut mem_tokens = 0usize;
@@ -3903,7 +3926,7 @@ impl CodeGraphBackend {
                 current_only: true,
                 ..Default::default()
             };
-            if let Ok(results) = self.memory_manager.search(file, &config, &[]).await {
+            if let Ok(results) = self.memory_manager().search(file, &config, &[]).await {
                 for r in &results {
                     if mem_tokens >= memory_budget {
                         break;
@@ -3970,7 +3993,7 @@ impl CodeGraphBackend {
             current_only: false,
             ..Default::default()
         };
-        if let Ok(mem_results) = self.memory_manager.search(query, &config, &[]).await {
+        if let Ok(mem_results) = self.memory_manager().search(query, &config, &[]).await {
             for r in &mem_results {
                 if let crate::memory::MemorySource::GitHistory { ref commit_hash } = r.memory.source
                 {

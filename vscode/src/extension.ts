@@ -17,7 +17,7 @@ import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath } from './server';
-import { managedEnginePath, offerEngineDownload, upgradeManagedEngine } from './engineDownload';
+import { managedEnginePath, offerEngineDownload, offerEngineUpdateIfStale } from './engineDownload';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
 import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from './funnel';
@@ -295,11 +295,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // The managed engine is found by filename alone, so one installed by an
     // earlier release would otherwise be reused forever. The extension and the
-    // engine ship in lockstep, so bring it up to this version before starting
-    // it - only when it is the binary we actually resolved, since a pro,
-    // bundled or locally built engine is the user's to manage.
+    // engine ship in lockstep, so offer to bring it up to this version - only
+    // when it is the binary we actually resolved, since a pro, bundled or
+    // locally built engine is the user's to manage.
+    //
+    // Not awaited: the engine on disk still runs, and holding activation - and
+    // with it the language client, the tree views and the lenses - behind a
+    // 30 MB transfer on a slow network is a far worse trade than one release of
+    // drift.
     if (serverInfo.path === managedEnginePath()) {
-        await upgradeManagedEngine(context.extension.packageJSON.version);
+        void offerEngineUpdateIfStale(context.extension.packageJSON.version);
     }
 
     setServerEdition(serverInfo.edition === 'pro' ? 'pro' : 'community');

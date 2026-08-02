@@ -102,18 +102,20 @@ class IndexingStartupActivity : ProjectActivity {
      * Offered rather than forced: the engine on disk still runs, and an update
      * that cannot reach the release must not cost the user a working install.
      * Only managed installs are ours to replace - a Pro, PATH or locally built
-     * engine is the user's to manage.
+     * engine is the user's to manage - and only ones that are actually older,
+     * since the VS Code extension installs into the same directory and may
+     * legitimately be ahead of this plugin.
      */
     private fun offerEngineUpdateIfStale(project: Project, resolved: ResolvedServer) {
         if (resolved.origin != ResolvedServer.Origin.MANAGED_INSTALL) return
         val expected = EngineInstaller.pluginVersion() ?: return
         val installed = CodeGraphServerResolver.managedEngineVersion()
-        if (installed == expected) return
+        if (!CodeGraphServerResolver.isManagedEngineStale(installed, expected)) return
 
         LOG.info("Managed CodeGraph engine reports version ${installed ?: "unknown"}, plugin is $expected")
         CodeGraphNotifications.infoWithActions(
             project,
-            "The installed CodeGraph engine (${installed ?: "unknown version"}) does not match this " +
+            "The installed CodeGraph engine (${installed ?: "unknown version"}) predates this " +
                 "plugin ($expected). They ship together, so features this build expects may be missing.",
             "Update Engine" to { notification ->
                 notification.expire()

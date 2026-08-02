@@ -160,19 +160,37 @@ class CodeGraphServerResolverTest : BasePlatformTestCase() {
         }
     }
 
-    fun `test arm64 linux and windows have no published engine`() {
-        // Only macOS is built for both architectures. Handing the x64 asset to
-        // an arm64 machine installs something that cannot execute, which shows
-        // up as an exec-format error rather than as the missing build it is.
+    fun `test arm64 linux has no published engine but arm64 windows emulates x64`() {
+        // Handing the x64 asset to an arm64 Linux machine installs something
+        // that cannot execute, which shows up as an exec-format error rather
+        // than as the missing build it is. Windows on ARM is the exception: it
+        // runs x64 binaries under the OS's own emulation, so refusing there
+        // would leave those users with no engine for no reason.
         fun nameFor(os: String, arch: String) = CodeGraphServerResolver.platformBinaryNameOrNull(
             ResolverEnvironment(fakeHome, emptyList(), os, arch),
         )
 
         assertNull(nameFor("Linux", "aarch64"))
-        assertNull(nameFor("Windows 11", "aarch64"))
         assertNull(nameFor("Linux", "arm64"))
+        assertEquals("codegraph-server-win32-x64.exe", nameFor("Windows 11", "aarch64"))
+        assertEquals("codegraph-server-win32-x64.exe", nameFor("Windows 11", "arm64"))
         assertEquals("codegraph-server-linux-x64", nameFor("Linux", "x86_64"))
         assertEquals("codegraph-server-darwin-arm64", nameFor("Mac OS X", "aarch64"))
+    }
+
+    fun `test only an older managed engine counts as stale`() {
+        // The managed directory is shared with the VS Code extension, which
+        // ships on its own schedule. Treating "different" as "stale" makes the
+        // two clients reinstall over each other on every launch.
+        assertTrue(CodeGraphServerResolver.isManagedEngineStale("0.19.1", "0.20.0"))
+        assertFalse(CodeGraphServerResolver.isManagedEngineStale("0.20.0", "0.20.0"))
+        assertFalse(CodeGraphServerResolver.isManagedEngineStale("0.21.0", "0.20.0"))
+        assertFalse(CodeGraphServerResolver.isManagedEngineStale("0.20", "0.20.0"))
+
+        // Nothing to compare against is the one case worth replacing: an
+        // unmarked install predates the marker, so its build is unknown.
+        assertTrue(CodeGraphServerResolver.isManagedEngineStale(null, "0.20.0"))
+        assertTrue(CodeGraphServerResolver.isManagedEngineStale("nightly", "0.20.0"))
     }
 
     fun `test resolution on an unpublished platform reports nothing rather than throwing`() {

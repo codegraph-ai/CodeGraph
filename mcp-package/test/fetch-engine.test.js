@@ -28,6 +28,7 @@ const {
   requiredAssets,
   platformBinaryName,
   installedVersion,
+  compareVersions,
   WINDOWS_SIDECAR,
   VERSION_MARKER,
 } = require("../bin/fetch-engine");
@@ -154,12 +155,43 @@ async function run() {
     }
   }
 
+  // --- an engine from a newer client is left alone ---------------------
+  // This directory is shared by the CLI, the VS Code extension and the
+  // JetBrains plugin, which ship independently. Replacing a newer engine with
+  // this client's older one is a downgrade the other client undoes on its next
+  // launch, and the two then take turns forever.
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    for (const asset of requiredAssets()) fs.writeFileSync(path.join(dir, asset), "newer");
+    fs.writeFileSync(path.join(dir, VERSION_MARKER), "0.21.0\n");
+    // Serve nothing: any fetch attempt would 404 and fail the call.
+    const { server, baseUrl } = await startRelease({});
+    try {
+      const { fetched } = await ensureEngine(VERSION, dir, { baseUrl });
+      check(fetched.length === 0, "a newer install is not downgraded");
+      check(fs.readFileSync(path.join(dir, name), "utf8") === "newer", "its engine is untouched");
+      check(installedVersion(dir) === "0.21.0", "and its version marker is left as it was");
+    } finally {
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   // --- an unmarked install is treated as unknown, not as current -------
   {
     const dir = scratch();
     for (const asset of requiredAssets()) fs.writeFileSync(path.join(dir, asset), "unmarked");
     check(installedVersion(dir) === null, "an install with no marker reports no version");
   }
+
+  // --- release ordering -------------------------------------------------
+  check(compareVersions("0.19.1", "0.20.0") === -1, "0.19.1 precedes 0.20.0");
+  check(compareVersions("0.21.0", "0.20.0") === 1, "0.21.0 follows 0.20.0");
+  check(compareVersions("0.20.0", "0.20.0") === 0, "a version equals itself");
+  check(compareVersions("0.20", "0.20.0") === 0, "missing components read as zero");
+  check(compareVersions("0.20.0-beta.1", "0.20.0") === 0, "a prerelease compares by its core");
+  check(compareVersions("nightly", "0.20.0") === null, "an unparseable version has no order");
 
   // --- a missing release fails loudly ----------------------------------
   {
@@ -220,10 +252,18 @@ async function run() {
   );
 
   // --- only published platform/arch pairs resolve to an asset ----------
-  // An x64 asset handed to an arm64 machine downloads and chmods cleanly and
-  // then fails to exec, which is far harder to read than "not published".
+  // An x64 asset handed to an arm64 Linux machine downloads and chmods cleanly
+  // and then fails to exec, which is far harder to read than "not published".
+  // Windows on ARM is the exception: it emulates x64, so the x64 build runs.
   check(platformBinaryName("linux", "arm64") === null, "linux-arm64 has no published engine");
-  check(platformBinaryName("win32", "arm64") === null, "win32-arm64 has no published engine");
+  check(
+    platformBinaryName("win32", "arm64") === "codegraph-server-win32-x64.exe",
+    "win32-arm64 uses the x64 engine, which Windows emulates"
+  );
+  check(
+    requiredAssets("win32", "arm64").includes(WINDOWS_SIDECAR),
+    "and still needs the runtime library beside it"
+  );
   check(
     platformBinaryName("darwin", "arm64") === "codegraph-server-darwin-arm64",
     "darwin-arm64 does"

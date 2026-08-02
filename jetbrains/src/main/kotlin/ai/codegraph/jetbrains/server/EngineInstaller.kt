@@ -12,7 +12,6 @@ import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
-import com.redhat.devtools.lsp4ij.ServerStatus
 
 /** Runs the engine download behind a progress bar and reports the outcome. */
 object EngineInstaller {
@@ -30,25 +29,37 @@ object EngineInstaller {
             object : Task.Backgroundable(project, "Downloading the CodeGraph engine", true) {
                 override fun run(indicator: ProgressIndicator) {
                     val client = CodeGraphClient.getInstance(project)
-                    runCatching { EngineDownloader().download(version, indicator) }.fold(
+                    // The engine holds its own binary open, so an update issued
+                    // while it runs cannot replace it - on Windows the move
+                    // fails outright, and everywhere else the old process keeps
+                    // going and the version marker records an engine nobody is
+                    // running. It is stopped once the download is verified, and
+                    // started again whichever way the install ends, so a failed
+                    // update never leaves the user without an engine.
+                    var stopped = false
+                    runCatching {
+                        EngineDownloader().download(version, indicator) {
+                            if (client.isRunning()) {
+                                indicator.text = "Stopping the CodeGraph engine to replace it"
+                                stopped = true
+                                if (!client.stopAndAwait()) {
+                                    LOG.warn("CodeGraph engine did not stop before the update; replacing anyway")
+                                }
+                            }
+                        }
+                    }.fold(
                         onSuccess = { path ->
                             LOG.info("CodeGraph engine installed at $path")
-                            // Replacing the binary under a live process does not
-                            // change the process. Saying so beats implying the
-                            // new engine is already in use.
-                            val running = client.status() in RUNNING_STATUSES
                             CodeGraphNotifications.info(
                                 project,
-                                if (running) {
-                                    "CodeGraph engine $version installed. It takes effect the next " +
-                                        "time the engine starts."
-                                } else {
-                                    "CodeGraph engine $version installed. Starting it now."
-                                },
+                                "CodeGraph engine $version installed. Starting it now.",
                             )
-                            if (!running) client.start()
+                            client.start()
                         },
-                        onFailure = { error -> report(project, version, error) },
+                        onFailure = { error ->
+                            report(project, version, error)
+                            if (stopped) client.start()
+                        },
                     )
                 }
             },
@@ -66,6 +77,10 @@ object EngineInstaller {
             error is EngineDownloader.ChecksumMismatchException ->
                 "The downloaded engine did not match its published checksum and was discarded. " +
                     "This can mean a corrupted transfer or an untrusted proxy; nothing was installed."
+
+            error is EngineDownloader.EngineInUseException ->
+                "The CodeGraph engine could not be replaced because it is still running. " +
+                    "Close other projects using it, or restart the IDE, and try the update again."
 
             error is CodeGraphServerResolver.UnsupportedPlatformException ->
                 "CodeGraph does not publish an engine for this platform. " +
@@ -91,8 +106,6 @@ object EngineInstaller {
      */
     fun pluginVersion(): String? =
         runCatching { PluginManagerCore.getPlugin(PluginId.getId(PLUGIN_ID))?.version }.getOrNull()
-
-    private val RUNNING_STATUSES = setOf(ServerStatus.started, ServerStatus.starting)
 
     private val LOG = logger<EngineInstaller>()
     private const val PLUGIN_ID = "ai.codegraph.jetbrains"

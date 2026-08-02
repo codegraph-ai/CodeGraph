@@ -56,6 +56,40 @@ class CodeGraphClient(private val project: Project) {
         LanguageServerManager.getInstance(project).start(CODEGRAPH_SERVER_ID)
     }
 
+    /** True while the engine is up, or on its way up. */
+    fun isRunning(): Boolean = status() in RUNNING_STATUSES
+
+    /**
+     * Stop the engine and wait until its process is gone, up to [timeoutMillis].
+     * Returns whether it went away in time.
+     *
+     * Replacing the engine binary needs the process gone first: on Windows a
+     * running `.exe` cannot be overwritten at all, and on every platform a
+     * binary swapped under a live process is simply not the engine that is
+     * running. Stopping is asynchronous, and `stopping` is not `stopped`, so
+     * asking is not enough - the caller has to know when it finished.
+     *
+     * Blocks, so callers must be on a background thread. [start] afterwards
+     * brings the engine back: LSP4IJ's default stop disables the server and its
+     * default start re-enables it.
+     */
+    fun stopAndAwait(timeoutMillis: Long = STOP_TIMEOUT_MILLIS): Boolean {
+        LanguageServerManager.getInstance(project).stop(CODEGRAPH_SERVER_ID)
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        while (!isStopped() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(STOP_POLL_MILLIS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return isStopped()
+            }
+        }
+        return isStopped()
+    }
+
+    /** True once the engine process is definitely gone, rather than on its way out. */
+    private fun isStopped(): Boolean = status() in STOPPED_STATUSES
+
     /**
      * A future that completes once the engine has finished `initialize`.
      *
@@ -138,6 +172,15 @@ class CodeGraphClient(private val project: Project) {
 
     companion object {
         private val LOG = logger<CodeGraphClient>()
+
+        private val RUNNING_STATUSES = setOf(ServerStatus.started, ServerStatus.starting)
+
+        /** `stopping` is deliberately absent: the process is not gone yet. */
+        private val STOPPED_STATUSES = setOf(ServerStatus.none, ServerStatus.stopped)
+
+        /** Long enough for an orderly shutdown, short enough not to look hung. */
+        private const val STOP_TIMEOUT_MILLIS = 10_000L
+        private const val STOP_POLL_MILLIS = 100L
 
         fun getInstance(project: Project): CodeGraphClient = project.service()
     }

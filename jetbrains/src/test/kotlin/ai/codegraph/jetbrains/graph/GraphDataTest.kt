@@ -100,6 +100,21 @@ class GraphDataTest {
     }
 
     @Test
+    fun `a large graph is capped, keeping the most connected nodes`() {
+        // The layout is an all-pairs loop run to convergence before the first
+        // paint, so an uncapped hub file leaves the panel frozen with nothing
+        // on screen and no way to cancel.
+        val nodes = (1..500).map { GraphNode("n$it", "sym$it", "Function", "python", "") }
+        val edges = (2..500).map { GraphEdge("n1", "n$it", "calls") }
+
+        val html = GraphHtml.render(GraphData(nodes, edges), "Call Graph")
+
+        assertEquals(200, Regex("\"id\":\"n\\d+\"").findAll(html).count())
+        assertTrue("the most connected node must survive the cap", html.contains("\"sym1\""))
+        assertTrue("a silently trimmed graph reads as a complete one", html.contains("of 500 nodes"))
+    }
+
+    @Test
     fun `the text fallback lists nodes and resolves edge endpoints to labels`() {
         val graph = GraphData(
             nodes = listOf(

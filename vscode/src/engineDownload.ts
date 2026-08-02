@@ -66,30 +66,55 @@ export async function downloadEngine(version: string): Promise<string> {
 }
 
 /**
- * Bring a managed engine installed by an earlier extension version up to
- * [version].
+ * Offer to replace a managed engine that predates this extension release.
  *
  * The managed engine is resolved by filename, so without this an engine left
  * behind by a previous release is found and reused indefinitely and a client
  * built against a newer engine keeps talking to the old one.
  *
- * A failed update is not fatal: the engine already on disk still runs, and
- * refusing to start over one version of drift is worse than the drift.
+ * Offered rather than done, for the same reason `downloadEngine` is: this is
+ * ~30 MB of native binary that will run with the user's permissions. It is also
+ * deliberately not awaited by the caller - the engine on disk still works, so
+ * blocking activation behind a transfer would cost every surface the extension
+ * provides for an update that is not urgent.
+ *
+ * Only an *older* engine counts. `~/.codegraph/bin` is shared with the CLI and
+ * the JetBrains plugin, which ship on their own schedules; treating a newer
+ * engine as a mismatch would have the two clients reinstall over each other on
+ * every launch.
  */
-export async function upgradeManagedEngine(version: string): Promise<void> {
+export async function offerEngineUpdateIfStale(version: string): Promise<void> {
     const engine = managedEnginePath();
     if (!engine || !fs.existsSync(engine)) {
         return;
     }
-    if (fetchEngine.installedVersion(managedInstallDir()) === version) {
+    if (!fetchEngine.isStale(managedInstallDir(), version)) {
+        return;
+    }
+
+    const installed = fetchEngine.installedVersion(managedInstallDir()) ?? 'an unknown version';
+    const choice = await vscode.window.showInformationMessage(
+        `The installed CodeGraph engine (${installed}) predates this extension (${version}). ` +
+        'They ship together, so features this build expects may be missing.',
+        'Update',
+        'Not Now',
+    );
+    if (choice !== 'Update') {
         return;
     }
 
     try {
         await downloadEngine(version);
+        vscode.window.showInformationMessage(
+            `CodeGraph engine ${version} installed. It takes effect the next time the engine starts.`,
+        );
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.warn(`[CodeGraph] Could not update the managed engine to ${version}: ${message}`);
+        // Not fatal: the engine already on disk still runs, and losing a working
+        // install over one version of drift is worse than the drift.
+        vscode.window.showWarningMessage(
+            `Could not update the CodeGraph engine to ${version}: ${message}`,
+        );
     }
 }
 

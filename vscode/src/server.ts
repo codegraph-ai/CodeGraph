@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { execSync } from 'child_process';
+import { managedEnginePath, platformBinaryName } from './engineDownload';
 
 export interface ServerInfo {
     path: string;
@@ -67,36 +68,27 @@ function findProBinary(): string | null {
 
 function findCommunityBinary(context: vscode.ExtensionContext): string {
     const platform = os.platform();
-    const arch = os.arch();
 
-    let binaryName: string;
-    switch (platform) {
-        case 'linux':
-            binaryName = 'codegraph-server-linux-x64';
-            break;
-        case 'darwin':
-            binaryName = arch === 'arm64'
-                ? 'codegraph-server-darwin-arm64'
-                : 'codegraph-server-darwin-x64';
-            break;
-        case 'win32':
-            binaryName = 'codegraph-server-win32-x64.exe';
-            break;
-        default:
-            throw new Error(`Unsupported platform: ${platform}`);
-    }
+    // One place decides which platform gets which asset - engineDownload.ts,
+    // which re-exports the rule the npm postinstall and this client share. A
+    // second copy here is how a platform ends up resolving a name nothing ever
+    // downloads, and it would silently defeat the update path, which compares a
+    // resolved path against `managedEnginePath()`.
+    const binaryName = platformBinaryName();
 
     // Packaged binary — only present in a VSIX built with binaries bundled.
     // The published VSIX no longer carries one; see engineDownload.ts.
-    const packagedPath = context.asAbsolutePath(path.join('bin', binaryName));
-    if (fs.existsSync(packagedPath)) {
+    const packagedPath = binaryName
+        ? context.asAbsolutePath(path.join('bin', binaryName))
+        : null;
+    if (packagedPath && fs.existsSync(packagedPath)) {
         return packagedPath;
     }
 
     // Engine downloaded on demand, shared with the CLI and the JetBrains
     // plugin so a user who installed via any channel is found by all of them.
-    const managedPath = path.join(os.homedir(), '.codegraph', 'bin', binaryName);
-    if (fs.existsSync(managedPath)) {
+    const managedPath = managedEnginePath();
+    if (managedPath && fs.existsSync(managedPath)) {
         return managedPath;
     }
 
@@ -134,8 +126,15 @@ function findCommunityBinary(context: vscode.ExtensionContext): string {
         }
     }
 
+    // A platform with no published engine reaches here too, once the cargo
+    // paths have been tried: a contributor on such a machine builds their own,
+    // and saying "not found" while pointing at the build command serves both
+    // cases better than refusing outright.
     throw new Error(
-        `CodeGraph server binary not found. Expected at: ${packagedPath}\n` +
-        `For development, build with: cargo build --release -p codegraph-server`
+        binaryName
+            ? `CodeGraph server binary not found. Expected at: ${packagedPath}\n` +
+              `For development, build with: cargo build --release -p codegraph-server`
+            : `CodeGraph does not publish an engine for ${platform}-${os.arch()}.\n` +
+              `Build one with: cargo build --release -p codegraph-server`
     );
 }

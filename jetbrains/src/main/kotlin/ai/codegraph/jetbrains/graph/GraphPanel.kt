@@ -36,9 +36,13 @@ enum class GraphKind(val command: CodeGraphCommand, val title: String) {
  * it - so an unavailable browser degrades to a readable text listing rather than
  * an empty panel or a crash.
  */
-class GraphPanel(private val project: Project, private val kind: GraphKind) :
+class GraphPanel(private val project: Project, val kind: GraphKind) :
     JPanel(BorderLayout()),
     Disposable {
+
+    /** The file this panel is showing, so a second request for it reuses the tab. */
+    var fileUri: String? = null
+        private set
 
     private val gson = Gson()
     private val browser: JBCefBrowser? = if (JBCefApp.isSupported()) JBCefBrowser() else null
@@ -61,6 +65,7 @@ class GraphPanel(private val project: Project, private val kind: GraphKind) :
 
     /** Load the graph for [fileUri]. */
     fun load(fileUri: String, depth: Int = DEFAULT_DEPTH) {
+        this.fileUri = fileUri
         setStatus("Loading ${kind.title.lowercase()}...")
         CodeGraphClient.getInstance(project)
             .execute(kind.command, mapOf("uri" to fileUri, "depth" to depth))
