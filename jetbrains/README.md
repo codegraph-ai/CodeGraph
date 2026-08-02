@@ -54,21 +54,26 @@ Resolution order, implemented in
 
 ### Installing the engine
 
-Until per-platform binaries are published as release assets, there is no
-one-click install.
-The engine ships bundled inside the npm package and the VSIX, so users install
-it with:
+When no engine is found, the plugin offers to download the one built for this
+platform from the GitHub release matching its own version, verifying it against
+the published `.sha256` before installing it into `~/.codegraph/bin`.
+It is offered rather than done automatically: this is a native binary that will
+run with the user's permissions, and starting that unasked on project open is
+not the plugin's decision to make.
+
+On Windows the download also fetches `onnxruntime.dll`, which the engine loads
+at runtime - fetching only the executable produces an install that succeeds and
+then fails at startup.
+
+Users who prefer to manage it themselves can install the engine separately,
+which step 3 then finds:
 
 ```sh
 npm i -g @astudioplus/codegraph-mcp
 ```
 
-That puts `codegraph-server` where step 3 finds it.
-A checksum-verifying downloader for step 4 was written and then removed: the
-release assets it would fetch do not exist yet, and shipping code that cannot
-run is worse than not shipping it.
-Publishing those assets is tracked separately; the `MANAGED_INSTALL` slot in the
-resolver is reserved for it.
+The release assets come from `scripts/publish-release-assets.sh` in the repo
+root, run after the per-platform binaries are built.
 
 ## Surfaces
 

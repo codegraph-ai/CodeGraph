@@ -6,6 +6,7 @@ package ai.codegraph.jetbrains.indexing
 import ai.codegraph.jetbrains.lsp.CodeGraphClient
 import ai.codegraph.jetbrains.notify.CodeGraphNotifications
 import ai.codegraph.jetbrains.server.CodeGraphServerResolver
+import ai.codegraph.jetbrains.server.EngineInstaller
 import ai.codegraph.jetbrains.settings.CodeGraphSettings
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.logger
@@ -35,15 +36,19 @@ class IndexingStartupActivity : ProjectActivity {
         if (!settings.enabled) return
 
         if (CodeGraphServerResolver.resolve(project.basePath, settings.serverPath) == null) {
-            // No one-click install yet: the engine is only distributed bundled
-            // inside the npm package and the VSIX, and the JetBrains
-            // Marketplace ships a single artifact for every platform so the
-            // plugin cannot carry a ~120 MB binary set of its own.
-            CodeGraphNotifications.warn(
+            // Offered rather than done automatically: this is a ~30 MB download
+            // of a native binary that will run with the user's permissions, and
+            // starting that unasked on project open is not a decision the
+            // plugin should make for them.
+            CodeGraphNotifications.infoWithActions(
                 project,
-                "The CodeGraph engine is not installed. Install it with " +
-                    "<code>npm i -g @astudioplus/codegraph-mcp</code>, then reopen this project, " +
-                    "or point CodeGraph at an existing engine in Settings | Tools | CodeGraph.",
+                "The CodeGraph engine is not installed, so there is no graph to answer questions from. " +
+                    "It can be downloaded for this platform, or installed separately with " +
+                    "<code>npm i -g @astudioplus/codegraph-mcp</code>.",
+                "Download Engine" to { notification ->
+                    notification.expire()
+                    EngineInstaller.downloadInBackground(project)
+                },
             )
             return
         }
