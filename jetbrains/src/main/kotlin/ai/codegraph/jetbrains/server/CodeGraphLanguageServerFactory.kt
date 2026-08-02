@@ -3,9 +3,13 @@
 
 package ai.codegraph.jetbrains.server
 
+import ai.codegraph.jetbrains.settings.CodeGraphSettings
 import com.intellij.openapi.project.Project
+import com.intellij.psi.PsiFile
 import com.redhat.devtools.lsp4ij.LanguageServerFactory
 import com.redhat.devtools.lsp4ij.client.LanguageClientImpl
+import com.redhat.devtools.lsp4ij.client.features.LSPClientFeatures
+import com.redhat.devtools.lsp4ij.client.features.LSPHoverFeature
 import com.redhat.devtools.lsp4ij.server.StreamConnectionProvider
 
 /** Server id shared by `plugin.xml` and every call site that talks to the engine. */
@@ -19,6 +23,20 @@ class CodeGraphLanguageServerFactory : LanguageServerFactory {
 
     override fun createLanguageClient(project: Project): LanguageClientImpl =
         CodeGraphLanguageClient(project)
+
+    /**
+     * The engine advertises `hoverProvider`, so LSP4IJ shows graph information
+     * on hover by default. Binding that to the setting is what makes the
+     * "Show graph information on hover" checkbox mean anything - without it the
+     * hover is on regardless of what the user chose.
+     */
+    override fun createClientFeatures(): LSPClientFeatures =
+        LSPClientFeatures().setHoverFeature(CodeGraphHoverFeature())
+}
+
+private class CodeGraphHoverFeature : LSPHoverFeature() {
+    override fun isEnabled(file: PsiFile): Boolean =
+        CodeGraphSettings.getInstance(file.project).state.hoverEnabled && super.isEnabled(file)
 }
 
 /**

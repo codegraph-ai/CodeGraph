@@ -41,10 +41,15 @@ class RegisterMcpAction : AnAction() {
             is McpRegistration.Result.Written -> {
                 LocalFileSystem.getInstance().refreshAndFindFileByNioFile(result.path)
                 val note = if (result.merged) " alongside the servers already configured there" else ""
+                // Silently replacing a config we could not parse would lose
+                // whatever else was in it, so say what happened to it.
+                val rescued = result.backup?.let {
+                    " The previous file could not be parsed and was kept as <code>${it.fileName}</code>."
+                }.orEmpty()
                 CodeGraphNotifications.infoWithActions(
                     project,
                     "CodeGraph is registered as an MCP server in <code>${result.path.fileName}</code>$note. " +
-                        "Restart your AI client to pick it up.",
+                        "Restart your AI client to pick it up.$rescued",
                     "Copy Config" to { notification ->
                         notification.expire()
                         copyConfig(e)

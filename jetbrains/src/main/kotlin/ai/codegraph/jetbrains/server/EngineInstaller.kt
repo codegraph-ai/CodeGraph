@@ -12,23 +12,41 @@ import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
+import com.redhat.devtools.lsp4ij.ServerStatus
 
 /** Runs the engine download behind a progress bar and reports the outcome. */
 object EngineInstaller {
 
     fun downloadInBackground(project: Project) {
+        val version = pluginVersion()
+        if (version == null) {
+            CodeGraphNotifications.error(
+                project,
+                "The CodeGraph plugin descriptor is unavailable, so there is no version to download.",
+            )
+            return
+        }
         ProgressManager.getInstance().run(
             object : Task.Backgroundable(project, "Downloading the CodeGraph engine", true) {
                 override fun run(indicator: ProgressIndicator) {
-                    val version = engineVersion()
+                    val client = CodeGraphClient.getInstance(project)
                     runCatching { EngineDownloader().download(version, indicator) }.fold(
                         onSuccess = { path ->
                             LOG.info("CodeGraph engine installed at $path")
+                            // Replacing the binary under a live process does not
+                            // change the process. Saying so beats implying the
+                            // new engine is already in use.
+                            val running = client.status() in RUNNING_STATUSES
                             CodeGraphNotifications.info(
                                 project,
-                                "CodeGraph engine $version installed. Starting it now.",
+                                if (running) {
+                                    "CodeGraph engine $version installed. It takes effect the next " +
+                                        "time the engine starts."
+                                } else {
+                                    "CodeGraph engine $version installed. Starting it now."
+                                },
                             )
-                            CodeGraphClient.getInstance(project).start()
+                            if (!running) client.start()
                         },
                         onFailure = { error -> report(project, version, error) },
                     )
@@ -65,11 +83,16 @@ object EngineInstaller {
 
     /**
      * The plugin ships in lockstep with the engine it was built against, so the
-     * plugin's own version names the release to fetch.
+     * plugin's own version names the release to fetch - and the version a
+     * managed install is expected to be.
+     *
+     * Null outside a real IDE (tests, headless tooling), where there is no
+     * plugin descriptor to read.
      */
-    private fun engineVersion(): String =
-        PluginManagerCore.getPlugin(PluginId.getId(PLUGIN_ID))?.version
-            ?: error("CodeGraph plugin descriptor is unavailable")
+    fun pluginVersion(): String? =
+        runCatching { PluginManagerCore.getPlugin(PluginId.getId(PLUGIN_ID))?.version }.getOrNull()
+
+    private val RUNNING_STATUSES = setOf(ServerStatus.started, ServerStatus.starting)
 
     private val LOG = logger<EngineInstaller>()
     private const val PLUGIN_ID = "ai.codegraph.jetbrains"

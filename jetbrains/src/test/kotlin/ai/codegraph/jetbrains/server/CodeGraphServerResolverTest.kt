@@ -160,6 +160,40 @@ class CodeGraphServerResolverTest : BasePlatformTestCase() {
         }
     }
 
+    fun `test arm64 linux and windows have no published engine`() {
+        // Only macOS is built for both architectures. Handing the x64 asset to
+        // an arm64 machine installs something that cannot execute, which shows
+        // up as an exec-format error rather than as the missing build it is.
+        fun nameFor(os: String, arch: String) = CodeGraphServerResolver.platformBinaryNameOrNull(
+            ResolverEnvironment(fakeHome, emptyList(), os, arch),
+        )
+
+        assertNull(nameFor("Linux", "aarch64"))
+        assertNull(nameFor("Windows 11", "aarch64"))
+        assertNull(nameFor("Linux", "arm64"))
+        assertEquals("codegraph-server-linux-x64", nameFor("Linux", "x86_64"))
+        assertEquals("codegraph-server-darwin-arm64", nameFor("Mac OS X", "aarch64"))
+    }
+
+    fun `test resolution on an unpublished platform reports nothing rather than throwing`() {
+        // A null resolve sends the caller to the "offer a download" path; an
+        // exception here would escape project startup instead.
+        val armLinux = ResolverEnvironment(fakeHome, emptyList(), "Linux", "aarch64")
+
+        assertNull(CodeGraphServerResolver.resolve(projectRoot(), null, armLinux))
+        assertFalse(CodeGraphServerResolver.hasManagedInstall(armLinux))
+    }
+
+    fun `test the managed install records which release it came from`() {
+        assertNull("no marker means no known version", CodeGraphServerResolver.managedEngineVersion(env()))
+
+        val marker = fakeHome.resolve(".codegraph/bin/${CodeGraphServerResolver.VERSION_MARKER}")
+        Files.createDirectories(marker.parent)
+        Files.writeString(marker, "0.20.0\n")
+
+        assertEquals("0.20.0", CodeGraphServerResolver.managedEngineVersion(env()))
+    }
+
     private fun assertThrows(expected: Class<out Throwable>, block: () -> Unit) {
         try {
             block()

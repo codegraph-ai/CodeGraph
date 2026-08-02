@@ -63,7 +63,13 @@ class EngineDownloaderTest : BasePlatformTestCase() {
     private fun env(os: String, arch: String = "aarch64") =
         ResolverEnvironment(homeDir = home, pathEntries = emptyList(), osName = os, osArch = arch)
 
-    private fun downloader(os: String) = EngineDownloader(env(os), baseUrl())
+    /**
+     * Windows and Linux are published for x64 only, so an arm64 environment
+     * there is an unsupported platform rather than a machine that downloads the
+     * x64 build.
+     */
+    private fun downloader(os: String, arch: String = "aarch64") =
+        EngineDownloader(env(os, arch), baseUrl())
 
     fun `test downloads and installs the engine for this platform`() {
         val content = "engine".toByteArray()
@@ -79,12 +85,38 @@ class EngineDownloaderTest : BasePlatformTestCase() {
         publish("0.19.1", "codegraph-server-win32-x64.exe", "engine".toByteArray())
         publish("0.19.1", EngineDownloader.WINDOWS_SIDECAR, "onnx".toByteArray())
 
-        val path = downloader("Windows 11").download("0.19.1")
+        val path = downloader("Windows 11", "amd64").download("0.19.1")
 
         assertTrue(Files.exists(path))
         assertTrue(
             "without the sidecar the engine downloads fine and then fails to start",
             Files.exists(path.parent.resolve(EngineDownloader.WINDOWS_SIDECAR)),
+        )
+    }
+
+    fun `test the installed release is recorded next to the engine`() {
+        // Resolution finds the engine by file name, which says nothing about
+        // which build it is. Without this marker an engine installed by an
+        // older plugin is reused for good.
+        publish("0.19.1", "codegraph-server-darwin-arm64", "engine".toByteArray())
+
+        val path = downloader("Mac OS X").download("0.19.1")
+
+        assertEquals(
+            "0.19.1",
+            Files.readString(path.parent.resolve(CodeGraphServerResolver.VERSION_MARKER)).trim(),
+        )
+        assertEquals("0.19.1", CodeGraphServerResolver.managedEngineVersion(env("Mac OS X")))
+    }
+
+    fun `test a failed download records no version`() {
+        publish("0.19.1", "codegraph-server-darwin-arm64", "engine".toByteArray(), checksum = "0".repeat(64))
+
+        runCatching { downloader("Mac OS X").download("0.19.1") }
+
+        assertNull(
+            "a marker written before the assets verify would claim an install that never happened",
+            CodeGraphServerResolver.managedEngineVersion(env("Mac OS X")),
         )
     }
 
@@ -125,7 +157,7 @@ class EngineDownloaderTest : BasePlatformTestCase() {
         publish("0.19.1", "codegraph-server-win32-x64.exe", "engine".toByteArray())
         publish("0.19.1", EngineDownloader.WINDOWS_SIDECAR, "onnx".toByteArray(), checksum = "0".repeat(64))
 
-        val failure = runCatching { downloader("Windows 11").download("0.19.1") }.exceptionOrNull()
+        val failure = runCatching { downloader("Windows 11", "amd64").download("0.19.1") }.exceptionOrNull()
 
         assertTrue(failure is EngineDownloader.ChecksumMismatchException)
         assertFalse(

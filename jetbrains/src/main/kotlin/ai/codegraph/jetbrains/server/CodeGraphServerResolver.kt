@@ -80,22 +80,35 @@ object CodeGraphServerResolver {
     class UnsupportedPlatformException(os: String, arch: String) :
         RuntimeException("CodeGraph does not ship an engine for $os/$arch")
 
-    /** Binary name for this platform, matching the names published in releases. */
-    fun platformBinaryName(env: ResolverEnvironment = ResolverEnvironment.fromSystem()): String {
+    /**
+     * Binary name for this platform, or null when no engine is published for it.
+     *
+     * Only macOS is built for both architectures. Falling back to the x64 asset
+     * on an arm64 Linux or Windows machine installs ~30 MB that cannot execute,
+     * which surfaces as an exec-format error at first use instead of as the
+     * unsupported platform it is.
+     */
+    fun platformBinaryNameOrNull(env: ResolverEnvironment = ResolverEnvironment.fromSystem()): String? {
         val os = env.osName.lowercase()
         val arch = env.osArch.lowercase()
+        val isArm64 = arch in ARM64_ARCHES
+        val isX64 = arch in X64_ARCHES
         return when {
+            os.contains("mac") || os.contains("darwin") -> when {
+                isArm64 -> "codegraph-server-darwin-arm64"
+                isX64 -> "codegraph-server-darwin-x64"
+                else -> null
+            }
+            !isX64 -> null
             os.contains("win") -> "codegraph-server-win32-x64.exe"
-            os.contains("mac") || os.contains("darwin") ->
-                if (arch == "aarch64" || arch == "arm64") {
-                    "codegraph-server-darwin-arm64"
-                } else {
-                    "codegraph-server-darwin-x64"
-                }
             os.contains("linux") -> "codegraph-server-linux-x64"
-            else -> throw UnsupportedPlatformException(env.osName, env.osArch)
+            else -> null
         }
     }
+
+    /** Binary name for this platform, for callers that treat "no build" as an error. */
+    fun platformBinaryName(env: ResolverEnvironment = ResolverEnvironment.fromSystem()): String =
+        platformBinaryNameOrNull(env) ?: throw UnsupportedPlatformException(env.osName, env.osArch)
 
     /** Where downloaded engines live. Shared with the CLI so installs are reused. */
     fun managedInstallDir(env: ResolverEnvironment = ResolverEnvironment.fromSystem()): Path =
@@ -103,7 +116,23 @@ object CodeGraphServerResolver {
 
     /** True when a managed install already exists, used to skip the download prompt. */
     fun hasManagedInstall(env: ResolverEnvironment = ResolverEnvironment.fromSystem()): Boolean =
-        Files.isRegularFile(managedInstallDir(env).resolve(platformBinaryName(env)))
+        platformBinaryNameOrNull(env)
+            ?.let { Files.isRegularFile(managedInstallDir(env).resolve(it)) }
+            ?: false
+
+    /**
+     * Which release the managed install came from, or null when unknown.
+     *
+     * The engine is resolved by filename, which says nothing about which build
+     * it is. Without this marker an engine installed by an older plugin is
+     * indistinguishable from the one this plugin was built against, and gets
+     * reused for good. Written by [EngineDownloader] and by the shared
+     * JavaScript installer, which use the same file name.
+     */
+    fun managedEngineVersion(env: ResolverEnvironment = ResolverEnvironment.fromSystem()): String? =
+        runCatching { Files.readString(managedInstallDir(env).resolve(VERSION_MARKER)).trim() }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
 
     /**
      * Resolve the engine, or return null when nothing is installed yet. A null
@@ -135,8 +164,9 @@ object CodeGraphServerResolver {
             return ResolvedServer(it, ServerEdition.COMMUNITY, ResolvedServer.Origin.SYSTEM_PATH)
         }
 
-        managedInstallDir(env).resolve(platformBinaryName(env))
-            .takeIf { it.isExecutableFile(env) }
+        platformBinaryNameOrNull(env)
+            ?.let { managedInstallDir(env).resolve(it) }
+            ?.takeIf { it.isExecutableFile(env) }
             ?.let { return ResolvedServer(it, ServerEdition.COMMUNITY, ResolvedServer.Origin.MANAGED_INSTALL) }
 
         findCargoBuild(projectBasePath, env)?.let {
@@ -208,4 +238,10 @@ object CodeGraphServerResolver {
         } catch (_: SecurityException) {
             false
         }
+
+    /** File name shared with the JavaScript installer, so all channels agree. */
+    const val VERSION_MARKER = ".engine-version"
+
+    private val ARM64_ARCHES = setOf("aarch64", "arm64")
+    private val X64_ARCHES = setOf("x86_64", "amd64", "x64")
 }

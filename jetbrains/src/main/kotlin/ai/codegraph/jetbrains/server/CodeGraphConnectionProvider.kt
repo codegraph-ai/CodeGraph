@@ -32,7 +32,7 @@ class CodeGraphConnectionProvider(private val project: Project) : OSProcessStrea
         val settings = CodeGraphSettings.getInstance(project).state
         val server = CodeGraphServerResolver.resolve(project.basePath, settings.serverPath)
             ?: throw CannotStartProcessException(
-                "CodeGraph engine not found. Install it with `npm i -g @codegraph-ai/codegraph`, " +
+                "CodeGraph engine not found. Install it with `npm i -g @astudioplus/codegraph-mcp`, " +
                     "or set the engine path in Settings | Tools | CodeGraph.",
             )
         resolved = server

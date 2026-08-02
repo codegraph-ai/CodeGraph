@@ -45,6 +45,15 @@ const PLATFORM_MAP = { darwin: "darwin", linux: "linux", win32: "win32" };
 const ARCH_MAP = { arm64: "arm64", x64: "x64", x86_64: "x64" };
 
 /**
+ * Records which release the engines in a directory came from.
+ *
+ * Without it a managed install is identified by filename alone, so an engine
+ * left behind by an older client is indistinguishable from the one this client
+ * was built against and gets reused forever.
+ */
+const VERSION_MARKER = ".engine-version";
+
+/**
  * Asset name for the running platform, matching the names
  * publish-release-assets.sh uploads. Returns null when unsupported, so callers
  * can degrade instead of throwing during an install.
@@ -53,10 +62,13 @@ function platformBinaryName(platform = os.platform(), arch = os.arch()) {
   const p = PLATFORM_MAP[platform];
   const a = ARCH_MAP[arch];
   if (!p || !a) return null;
-  // Only x64 is published for Windows and Linux today.
-  if (p === "win32") return "codegraph-server-win32-x64.exe";
-  if (p === "linux") return "codegraph-server-linux-x64";
-  return `codegraph-server-darwin-${a}`;
+  // macOS is the only platform published for both architectures.
+  if (p === "darwin") return `codegraph-server-darwin-${a}`;
+  // Only x64 is published for Windows and Linux today. Handing the x64 build to
+  // an arm64 machine installs ~30 MB that cannot execute at all, which surfaces
+  // as an exec-format error at first use rather than as an unsupported platform.
+  if (a !== "x64") return null;
+  return p === "win32" ? "codegraph-server-win32-x64.exe" : "codegraph-server-linux-x64";
 }
 
 /** Everything this platform needs on disk, in the order it should be fetched. */
@@ -71,6 +83,19 @@ function requiredAssets(platform = os.platform(), arch = os.arch()) {
 function download(url, destination, { redirects = 5 } = {}) {
   return new Promise((resolve, reject) => {
     if (redirects < 0) return reject(new Error(`too many redirects for ${url}`));
+    let file = null;
+    /**
+     * A transfer can die on the request (a socket reset), on the response (a
+     * message destroyed after the headers), or on the write stream (a full
+     * disk). All three must reject rather than throw uncaught - inside an npm
+     * postinstall that is the difference between a warning and a failed
+     * install - and all three must close the write stream, because a staged
+     * file with a live handle on it cannot be unlinked on Windows.
+     */
+    const fail = (error) => {
+      if (file) file.destroy();
+      reject(error);
+    };
     transportFor(url)
       .get(url, { headers: { "User-Agent": "codegraph-installer" } }, (res) => {
         // GitHub release assets always redirect to object storage.
@@ -82,12 +107,13 @@ function download(url, destination, { redirects = 5 } = {}) {
           res.resume();
           return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
         }
-        const file = fs.createWriteStream(destination);
-        res.pipe(file);
+        file = fs.createWriteStream(destination);
+        res.on("error", fail);
+        file.on("error", fail);
         file.on("finish", () => file.close(resolve));
-        file.on("error", reject);
+        res.pipe(file);
       })
-      .on("error", reject);
+      .on("error", fail);
   });
 }
 
@@ -151,7 +177,23 @@ async function fetchVerified(asset, version, targetDir, { baseUrl = RELEASE_BASE
 }
 
 /**
- * Ensure the engine for this platform is present in targetDir.
+ * Which release the engines in targetDir came from, or null when unknown -
+ * either nothing is installed, or it predates the marker.
+ */
+function installedVersion(targetDir) {
+  try {
+    return fs.readFileSync(path.join(targetDir, VERSION_MARKER), "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ensure the engine for this platform is present in targetDir, at [version].
+ *
+ * A binary left by an older client is replaced rather than reused: clients ship
+ * in lockstep with the engine they were built against, so "a file with the
+ * right name exists" is not the same question as "the right engine is here".
  *
  * @returns {Promise<{binary: string, fetched: string[]}>} path to the engine
  *   and which assets were downloaded (empty when everything was already there).
@@ -164,14 +206,18 @@ async function ensureEngine(version, targetDir, options = {}) {
 
   fs.mkdirSync(targetDir, { recursive: true });
 
+  const stale = installedVersion(targetDir) !== version;
   const fetched = [];
   for (const asset of assets) {
     const destination = path.join(targetDir, asset);
-    if (fs.existsSync(destination) && !options.force) continue;
+    if (fs.existsSync(destination) && !options.force && !stale) continue;
     if (options.onProgress) options.onProgress(asset);
     await fetchVerified(asset, version, targetDir, options);
     fetched.push(asset);
   }
+  // Written last: a marker recorded before the assets are verified would claim
+  // an install that a later failure never completed.
+  fs.writeFileSync(path.join(targetDir, VERSION_MARKER), `${version}\n`);
 
   const binary = path.join(targetDir, assets[0]);
   if (os.platform() !== "win32") {
@@ -188,8 +234,10 @@ async function ensureEngine(version, targetDir, options = {}) {
 module.exports = {
   RELEASE_BASE,
   WINDOWS_SIDECAR,
+  VERSION_MARKER,
   platformBinaryName,
   requiredAssets,
+  installedVersion,
   ensureEngine,
   fetchVerified,
   sha256,

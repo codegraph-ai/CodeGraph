@@ -23,6 +23,13 @@ class CrashBreadcrumbsTest {
     private lateinit var dir: Path
     private var now: Long = 1_000_000L
 
+    /**
+     * Which pids the reader should see as still running. Stubbed rather than
+     * asked of the OS: real low pids (1 is init on every platform these tests
+     * run on) would make the outcome depend on the machine.
+     */
+    private val livePids = mutableSetOf<Long>()
+
     @Before
     fun setUp() {
         dir = Files.createTempDirectory("codegraph-breadcrumbs-test")
@@ -33,7 +40,8 @@ class CrashBreadcrumbsTest {
         dir.toFile().deleteRecursively()
     }
 
-    private fun breadcrumbs() = CrashBreadcrumbs(directory = dir, clock = { now })
+    private fun breadcrumbs() =
+        CrashBreadcrumbs(directory = dir, clock = { now }, isProcessAlive = { it in livePids })
 
     private fun write(name: String, json: String, ageMillis: Long = 0) {
         val file = dir.resolve(name)
@@ -121,5 +129,48 @@ class CrashBreadcrumbsTest {
         val diagnosis = CrashBreadcrumbs(directory = missing, clock = { now }).readAndClear()
 
         assertEquals(CrashDiagnosis.HARD_CRASH, diagnosis.cause)
+    }
+
+    @Test
+    fun `a running engine's breadcrumbs are neither read nor deleted`() {
+        // `~/.codegraph` is shared with every other engine on the machine. Its
+        // phase marker is live state, not a post-mortem, and deleting it throws
+        // away the attribution for a crash that has not happened yet.
+        livePids += 77L
+        write("last-crash.77.json", """{"kind":"panic","class":"oom"}""")
+        write("last-phase.77.json", """{"phase":"indexing"}""")
+
+        val diagnosis = breadcrumbs().readAndClear()
+
+        assertEquals(CrashDiagnosis.HARD_CRASH, diagnosis.cause)
+        assertNull(diagnosis.phase)
+        assertTrue(Files.exists(dir.resolve("last-crash.77.json")))
+        assertTrue(Files.exists(dir.resolve("last-phase.77.json")))
+    }
+
+    @Test
+    fun `the dead engine is diagnosed even when a newer marker belongs to a live one`() {
+        livePids += 9L
+        write("last-crash.2.json", """{"kind":"panic","class":"oom"}""", ageMillis = 200)
+        write("last-phase.2.json", """{"phase":"onnx_load"}""", ageMillis = 200)
+        write("last-phase.9.json", """{"phase":"indexing"}""", ageMillis = 0)
+
+        val diagnosis = breadcrumbs().readAndClear()
+
+        assertEquals("oom", diagnosis.cause)
+        assertEquals("onnx_load", diagnosis.phase)
+        assertTrue(Files.notExists(dir.resolve("last-crash.2.json")))
+        assertTrue(Files.exists(dir.resolve("last-phase.9.json")))
+    }
+
+    @Test
+    fun `a breadcrumb with no readable pid is still cleaned up`() {
+        write("last-crash.abc.json", """{"kind":"signal"}""")
+        write("last-phase.abc.json", """{"phase":"startup"}""")
+
+        breadcrumbs().readAndClear()
+
+        assertTrue(Files.notExists(dir.resolve("last-crash.abc.json")))
+        assertTrue(Files.notExists(dir.resolve("last-phase.abc.json")))
     }
 }

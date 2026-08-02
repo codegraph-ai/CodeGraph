@@ -64,6 +64,11 @@ class EngineDownloader(
 
         val engine = targetDir.resolve(binaryName)
         engine.toFile().setExecutable(true, /* ownerOnly = */ true)
+        // Written only once every asset has been verified and moved into place:
+        // a marker recorded earlier would claim an install a later failure
+        // never completed. Without it the engine is identified by filename
+        // alone, and one left by an older plugin is reused for good.
+        Files.writeString(targetDir.resolve(CodeGraphServerResolver.VERSION_MARKER), "$version\n")
         LOG.info("Installed CodeGraph engine $version at $engine")
         return engine
     }

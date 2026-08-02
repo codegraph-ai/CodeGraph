@@ -2,26 +2,19 @@
 # Copyright 2025-2026 Andrey Vasilevsky <anvanster@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 #
-# Package VS Code extension with platform-specific binaries.
-# Run from the repo root after all platform binaries are built.
+# Package the VS Code extension.
+#
+# One VSIX serves every platform: the engine is fetched for the machine the
+# extension lands on rather than bundled, so there is nothing platform-specific
+# to package and no per-platform argument to pass.
 #
 # Usage:
-#   ./scripts/package-vsix.sh                    # all platforms (universal)
-#   ./scripts/package-vsix.sh darwin-arm64       # single platform
+#   ./scripts/package-vsix.sh
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VSCODE_DIR="$REPO_ROOT/vscode"
-BIN_DIR="$VSCODE_DIR/bin"
-TARGET="${1:-all}"
-
-PLATFORMS=(
-  "darwin-arm64:codegraph-server-darwin-arm64"
-  "darwin-x64:codegraph-server-darwin-x64"
-  "linux-x64:codegraph-server-linux-x64"
-  "win32-x64:codegraph-server-win32-x64.exe"
-)
 
 echo "=== CodeGraph VSIX builder ==="
 echo ""

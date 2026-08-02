@@ -28,6 +28,11 @@ class McpRegistrationTest : BasePlatformTestCase() {
         // The test fixture's basePath is a temp path that is never materialised,
         // so create it before anything tries to write a file there.
         Files.createDirectories(Path.of(project.basePath!!))
+        // The light fixture reuses that directory across tests, so a config
+        // written by one test is still there for the next. Whether that matters
+        // depends on the order the methods happen to run in, which is exactly
+        // the kind of failure that shows up once and then hides.
+        clearConfig()
         engine = projectDir.resolve("target/release/codegraph-server")
         Files.createDirectories(engine.parent)
         Files.createFile(engine)
@@ -41,6 +46,7 @@ class McpRegistrationTest : BasePlatformTestCase() {
     override fun tearDown() {
         try {
             CodeGraphSettings.getInstance(project).state.serverPath = ""
+            clearConfig()
             projectDir.toFile().deleteRecursively()
         } finally {
             super.tearDown()
@@ -48,6 +54,14 @@ class McpRegistrationTest : BasePlatformTestCase() {
     }
 
     private fun configFile(): Path = Path.of(project.basePath!!, McpRegistration.CONFIG_FILE)
+
+    private fun backupFile(): Path =
+        Path.of(project.basePath!!, McpRegistration.CONFIG_FILE + McpRegistration.BACKUP_SUFFIX)
+
+    private fun clearConfig() {
+        Files.deleteIfExists(configFile())
+        Files.deleteIfExists(backupFile())
+    }
 
     private fun writeConfig(json: String) {
         Files.writeString(configFile(), json)
@@ -111,6 +125,31 @@ class McpRegistrationTest : BasePlatformTestCase() {
 
         assertTrue(result is McpRegistration.Result.Written)
         assertTrue(readServers().has(McpRegistration.SERVER_NAME))
+    }
+
+    fun `test a config we cannot parse is kept before it is replaced`() {
+        // A trailing comma is enough for the strict parser to reject a file,
+        // and everything else in it is servers the plugin did not create.
+        // Overwriting them with no copy and no warning is unrecoverable.
+        val original = """{"mcpServers":{"stellarion":{"command":"/usr/local/bin/stellarion-server"},}}"""
+        writeConfig(original)
+
+        val result = McpRegistration.register(project)
+
+        assertTrue("expected a written result, got $result", result is McpRegistration.Result.Written)
+        val backup = (result as McpRegistration.Result.Written).backup
+        assertNotNull("the unreadable config must be kept", backup)
+        assertEquals(original, Files.readString(backup!!))
+        assertTrue(readServers().has(McpRegistration.SERVER_NAME))
+    }
+
+    fun `test a config we could parse is not backed up`() {
+        writeConfig("""{"mcpServers":{}}""")
+
+        val result = McpRegistration.register(project)
+
+        assertNull((result as McpRegistration.Result.Written).backup)
+        assertFalse("nothing was lost, so nothing needs rescuing", Files.exists(backupFile()))
     }
 
     fun `test isRegistered is false before registering`() {

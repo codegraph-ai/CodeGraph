@@ -14,6 +14,7 @@
 //! module re-exports rather than reimplements, so the three clients cannot
 //! disagree about where the engine lives or how it is verified.
 
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -62,6 +63,34 @@ export async function downloadEngine(version: string): Promise<string> {
             return binary as string;
         },
     );
+}
+
+/**
+ * Bring a managed engine installed by an earlier extension version up to
+ * [version].
+ *
+ * The managed engine is resolved by filename, so without this an engine left
+ * behind by a previous release is found and reused indefinitely and a client
+ * built against a newer engine keeps talking to the old one.
+ *
+ * A failed update is not fatal: the engine already on disk still runs, and
+ * refusing to start over one version of drift is worse than the drift.
+ */
+export async function upgradeManagedEngine(version: string): Promise<void> {
+    const engine = managedEnginePath();
+    if (!engine || !fs.existsSync(engine)) {
+        return;
+    }
+    if (fetchEngine.installedVersion(managedInstallDir()) === version) {
+        return;
+    }
+
+    try {
+        await downloadEngine(version);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[CodeGraph] Could not update the managed engine to ${version}: ${message}`);
+    }
 }
 
 /**

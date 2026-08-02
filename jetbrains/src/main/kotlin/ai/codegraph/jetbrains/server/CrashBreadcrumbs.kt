@@ -52,15 +52,25 @@ data class CrashDiagnosis(
 class CrashBreadcrumbs(
     private val directory: Path = Paths.get(System.getProperty("user.home").orEmpty(), ".codegraph"),
     private val clock: () -> Long = System::currentTimeMillis,
+    private val isProcessAlive: (Long) -> Boolean = { pid -> ProcessHandle.of(pid).isPresent },
 ) {
 
     /**
-     * Classify the most recent crash and delete every breadcrumb, so a stale
-     * file can never be read as a diagnosis of some later crash.
+     * Classify the most recent crash and delete the breadcrumbs it left, so a
+     * stale file can never be read as a diagnosis of some later crash.
+     *
+     * `~/.codegraph` is shared by every engine on the machine - a second IDE
+     * project, an open VS Code window - and only the ones whose process is gone
+     * describe a crash. Reading a live engine's marker would attribute its
+     * phase to a death that never happened, and deleting it would destroy the
+     * only evidence available if it later dies hard, which is the attribution
+     * the engine's own sweeper takes care to preserve.
      */
     fun readAndClear(): CrashDiagnosis {
-        val files = runCatching { Files.list(directory).use { it.toList() } }.getOrNull()
+        val all = runCatching { Files.list(directory).use { it.toList() } }.getOrNull()
             ?: return CrashDiagnosis(CrashDiagnosis.HARD_CRASH)
+
+        val files = all.filter { isBreadcrumb(it) && !belongsToLiveProcess(it) }
 
         val cause = pickFresh(files, CRASH_PATTERN)?.let { crumb ->
             when {
@@ -72,10 +82,24 @@ class CrashBreadcrumbs(
 
         val phase = pickFresh(files, PHASE_PATTERN)?.get("phase")
 
-        files.filter { CRASH_PATTERN.matches(it.fileName.toString()) || PHASE_PATTERN.matches(it.fileName.toString()) }
-            .forEach { runCatching { Files.deleteIfExists(it) } }
+        files.forEach { runCatching { Files.deleteIfExists(it) } }
 
         return CrashDiagnosis(cause, phase)
+    }
+
+    private fun isBreadcrumb(path: Path): Boolean {
+        val name = path.fileName.toString()
+        return CRASH_PATTERN.matches(name) || PHASE_PATTERN.matches(name)
+    }
+
+    /**
+     * A breadcrumb is named `last-<kind>.<pid>.json`. An unparseable pid is
+     * treated as dead: it cannot belong to a process we could be harming, and
+     * leaving it forever would let it outlive every crash it might describe.
+     */
+    private fun belongsToLiveProcess(path: Path): Boolean {
+        val pid = path.fileName.toString().split('.').getOrNull(1)?.toLongOrNull() ?: return false
+        return runCatching { isProcessAlive(pid) }.getOrDefault(false)
     }
 
     /**

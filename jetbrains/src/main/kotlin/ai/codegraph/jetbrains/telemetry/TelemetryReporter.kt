@@ -10,6 +10,7 @@ import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.application.PermanentInstallationID
@@ -32,7 +33,7 @@ import java.util.concurrent.TimeUnit
  * without a compiled-in key can send at all.
  */
 @Service(Service.Level.PROJECT)
-class TelemetryReporter(private val project: Project) {
+class TelemetryReporter(private val project: Project) : Disposable {
 
     private val gson = Gson()
     private val sessionId = UUID.randomUUID().toString()
@@ -153,7 +154,12 @@ class TelemetryReporter(private val project: Project) {
         }
     }
 
-    fun shutdown() {
+    /**
+     * Closed with the project. The thread is a daemon, so a leaked executor
+     * never keeps the IDE alive - but this is a project service, and one idle
+     * thread per project opened in a session is still one too many.
+     */
+    override fun dispose() {
         sender.shutdown()
         runCatching { sender.awaitTermination(SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS) }
     }

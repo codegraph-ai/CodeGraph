@@ -6,31 +6,21 @@ const os = require("os");
 const fs = require("fs");
 const { execFileSync } = require("child_process");
 
-const PLATFORM_MAP = {
-  darwin: "darwin",
-  linux: "linux",
-  win32: "win32",
-};
+const { ensureEngine, platformBinaryName } = require("./fetch-engine");
 
-const ARCH_MAP = {
-  arm64: "arm64",
-  x64: "x64",
-  x86_64: "x64",
-};
+const platform = os.platform();
+const arch = os.arch();
 
-const platform = PLATFORM_MAP[os.platform()];
-const arch = ARCH_MAP[os.arch()];
+// One place decides which platforms have a published engine: fetch-engine.js,
+// which also names the asset. A second copy of that rule here is how a platform
+// with no build ends up downloading someone else's binary.
+const binaryName = platformBinaryName();
 
-if (!platform || !arch) {
-  console.warn(
-    `⚠ codegraph-mcp: unsupported platform ${os.platform()}-${os.arch()}`
-  );
+if (!binaryName) {
+  console.warn(`⚠ codegraph-mcp: unsupported platform ${platform}-${arch}`);
   process.exit(0);
 }
 
-const { ensureEngine, platformBinaryName } = require("./fetch-engine");
-
-const binaryName = platformBinaryName();
 const binaryPath = path.join(__dirname, binaryName);
 const version = require("../package.json").version;
 

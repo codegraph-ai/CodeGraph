@@ -9,9 +9,12 @@ import com.intellij.codeInsight.codeVision.CodeVisionEntry
 import com.intellij.codeInsight.codeVision.CodeVisionRelativeOrdering
 import com.intellij.codeInsight.codeVision.ui.model.ClickableTextCodeVisionEntry
 import com.intellij.codeInsight.hints.codeVision.DaemonBoundCodeVisionProvider
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiFile
+import java.awt.event.MouseEvent
 
 /**
  * Inline graph facts above declarations: how many callers a function has, how
@@ -54,6 +57,10 @@ class CodeGraphCodeVisionProvider : DaemonBoundCodeVisionProvider {
     /**
      * One entry per declaration rather than one per statistic: three separate
      * lenses above every function is visual noise in a dense file.
+     *
+     * Clicking opens the call graph for the file, which is what the counts are
+     * a summary of - the VS Code CodeLens does the same. A lens that renders as
+     * clickable and does nothing is worse than a plain one.
      */
     private fun entryFor(symbol: CodeLensSymbol): CodeVisionEntry? {
         val parts = buildList {
@@ -66,12 +73,25 @@ class CodeGraphCodeVisionProvider : DaemonBoundCodeVisionProvider {
         return ClickableTextCodeVisionEntry(
             parts.joinToString(" · "),
             ID,
-            { _, _ -> },
+            { event, clickedIn -> showCallGraph(event, clickedIn) },
             null,
             parts.joinToString(", "),
             tooltipFor(symbol),
             emptyList(),
         )
+    }
+
+    /**
+     * Runs the same action as Tools | CodeGraph | Show Call Graph, rather than
+     * duplicating its tool-window plumbing here.
+     */
+    private fun showCallGraph(event: MouseEvent?, clickedIn: Editor) {
+        val manager = ActionManager.getInstance()
+        val action = manager.getAction(SHOW_CALL_GRAPH_ACTION_ID) ?: return
+        // The editor component, not the focus owner: the action reads the
+        // current file out of the data context, and an inlay click does not
+        // necessarily leave focus where that would resolve.
+        manager.tryToExecute(action, event, clickedIn.contentComponent, ActionPlaces.EDITOR_INLAY, true)
     }
 
     private fun tooltipFor(symbol: CodeLensSymbol): String = buildString {
@@ -95,6 +115,9 @@ class CodeGraphCodeVisionProvider : DaemonBoundCodeVisionProvider {
 
     private companion object {
         const val ID = "CodeGraph"
+
+        /** Declared in `plugin.xml`; the lens runs the action rather than copying it. */
+        const val SHOW_CALL_GRAPH_ACTION_ID = "CodeGraph.ShowCallGraph"
 
         /**
          * Complexity is only worth screen space once it is high enough to be a

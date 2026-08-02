@@ -7,6 +7,7 @@ import ai.codegraph.jetbrains.lsp.CodeGraphClient
 import ai.codegraph.jetbrains.lsp.CodeGraphCommand
 import ai.codegraph.jetbrains.notify.CodeGraphNotifications
 import ai.codegraph.jetbrains.telemetry.TelemetryReporter
+import ai.codegraph.jetbrains.vision.DocumentStatsCache
 import com.google.gson.JsonElement
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -15,6 +16,7 @@ import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
+import kotlinx.coroutines.future.await
 import java.util.concurrent.TimeUnit
 
 /**
@@ -37,11 +39,17 @@ class IndexingService(private val project: Project) {
      * report an empty index while tens of thousands of nodes are still loading,
      * and the user gets told to index a workspace that is already indexed.
      */
-    fun isIndexed(timeoutSeconds: Long = QUERY_TIMEOUT_SECONDS): Boolean =
+    suspend fun isIndexed(timeoutSeconds: Long = QUERY_TIMEOUT_SECONDS): Boolean =
         runCatching {
+            // Suspends rather than blocking: on a cold first index this waits
+            // the full timeout, and blocking here parks a dispatcher thread for
+            // the whole of it. The timeout stays on the future rather than
+            // becoming coroutine cancellation, so it arrives as an ordinary
+            // failure this `runCatching` can report.
             val response = CodeGraphClient.getInstance(project)
                 .execute(CodeGraphCommand.SYMBOL_SEARCH, mapOf("query" to "*", "limit" to 1))
-                .get(timeoutSeconds, TimeUnit.SECONDS)
+                .orTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .await()
             resultCount(response) > 0
         }.getOrElse { error ->
             LOG.info("Could not determine CodeGraph index state: ${error.message}")
@@ -96,6 +104,14 @@ class IndexingService(private val project: Project) {
      * that matches everything. Saying so beats reporting "Indexed 0 files".
      */
     private fun reportSuccess(fileCount: Int) {
+        // Code Vision entries are keyed by document modification stamp, so a
+        // reindex alone never expires them: every already-open file would keep
+        // showing its pre-index caller, test and complexity counts until the
+        // user typed in it. This is the JetBrains half of what
+        // `refreshCodeLenses` does for the VS Code client.
+        runCatching { DocumentStatsCache.getInstance(project).invalidateAll() }
+            .onFailure { LOG.warn("Could not refresh CodeGraph code vision after indexing", it) }
+
         if (fileCount > 0) {
             CodeGraphNotifications.info(project, "Indexed $fileCount ${"file".pluralize(fileCount)}")
         } else {

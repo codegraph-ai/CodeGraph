@@ -7,6 +7,7 @@ import ai.codegraph.jetbrains.lsp.CodeGraphClient
 import ai.codegraph.jetbrains.notify.CodeGraphNotifications
 import ai.codegraph.jetbrains.server.CodeGraphServerResolver
 import ai.codegraph.jetbrains.server.EngineInstaller
+import ai.codegraph.jetbrains.server.ResolvedServer
 import ai.codegraph.jetbrains.settings.CodeGraphSettings
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.logger
@@ -35,7 +36,8 @@ class IndexingStartupActivity : ProjectActivity {
         val settings = CodeGraphSettings.getInstance(project).state
         if (!settings.enabled) return
 
-        if (CodeGraphServerResolver.resolve(project.basePath, settings.serverPath) == null) {
+        val resolved = CodeGraphServerResolver.resolve(project.basePath, settings.serverPath)
+        if (resolved == null) {
             // Offered rather than done automatically: this is a ~30 MB download
             // of a native binary that will run with the user's permissions, and
             // starting that unasked on project open is not a decision the
@@ -52,6 +54,8 @@ class IndexingStartupActivity : ProjectActivity {
             )
             return
         }
+
+        offerEngineUpdateIfStale(project, resolved)
 
         val client = CodeGraphClient.getInstance(project)
         client.start()
@@ -85,6 +89,35 @@ class IndexingStartupActivity : ProjectActivity {
             "Index Now" to { notification ->
                 notification.expire()
                 indexing.reindexInBackground()
+            },
+        )
+    }
+
+    /**
+     * A managed engine is found by file name, which says nothing about which
+     * build it is. The plugin ships in lockstep with the engine it was built
+     * against, so one installed by an earlier plugin would otherwise be reused
+     * for good, and this build would keep talking to it.
+     *
+     * Offered rather than forced: the engine on disk still runs, and an update
+     * that cannot reach the release must not cost the user a working install.
+     * Only managed installs are ours to replace - a Pro, PATH or locally built
+     * engine is the user's to manage.
+     */
+    private fun offerEngineUpdateIfStale(project: Project, resolved: ResolvedServer) {
+        if (resolved.origin != ResolvedServer.Origin.MANAGED_INSTALL) return
+        val expected = EngineInstaller.pluginVersion() ?: return
+        val installed = CodeGraphServerResolver.managedEngineVersion()
+        if (installed == expected) return
+
+        LOG.info("Managed CodeGraph engine reports version ${installed ?: "unknown"}, plugin is $expected")
+        CodeGraphNotifications.infoWithActions(
+            project,
+            "The installed CodeGraph engine (${installed ?: "unknown version"}) does not match this " +
+                "plugin ($expected). They ship together, so features this build expects may be missing.",
+            "Update Engine" to { notification ->
+                notification.expire()
+                EngineInstaller.downloadInBackground(project)
             },
         )
     }

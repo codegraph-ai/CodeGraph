@@ -17,7 +17,7 @@ import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath } from './server';
-import { offerEngineDownload } from './engineDownload';
+import { managedEnginePath, offerEngineDownload, upgradeManagedEngine } from './engineDownload';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
 import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from './funnel';
@@ -292,6 +292,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         serverInfo = getServerPath(context);
     }
+
+    // The managed engine is found by filename alone, so one installed by an
+    // earlier release would otherwise be reused forever. The extension and the
+    // engine ship in lockstep, so bring it up to this version before starting
+    // it - only when it is the binary we actually resolved, since a pro,
+    // bundled or locally built engine is the user's to manage.
+    if (serverInfo.path === managedEnginePath()) {
+        await upgradeManagedEngine(context.extension.packageJSON.version);
+    }
+
     setServerEdition(serverInfo.edition === 'pro' ? 'pro' : 'community');
 
     // Log server path for debugging

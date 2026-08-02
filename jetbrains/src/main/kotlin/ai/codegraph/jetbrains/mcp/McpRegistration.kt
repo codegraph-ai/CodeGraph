@@ -12,6 +12,7 @@ import com.intellij.openapi.project.Project
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 
 /**
  * Registers the CodeGraph engine as an MCP server for the IDE's AI tooling.
@@ -32,8 +33,11 @@ object McpRegistration {
 
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
+    /** Suffix for the copy taken before a file we could not parse is replaced. */
+    const val BACKUP_SUFFIX = ".codegraph-backup"
+
     sealed interface Result {
-        data class Written(val path: Path, val merged: Boolean) : Result
+        data class Written(val path: Path, val merged: Boolean, val backup: Path? = null) : Result
         data class NoEngine(val reason: String) : Result
         data class Failed(val reason: String) : Result
     }
@@ -61,14 +65,20 @@ object McpRegistration {
 
         val configPath = Paths.get(basePath, CONFIG_FILE)
         return try {
-            val existing = readConfig(configPath)
+            val parsed = readConfig(configPath)
+            // A file we could not parse still holds the user's other MCP
+            // servers. Writing over it loses every one of them, so the
+            // unreadable original is kept before it is replaced.
+            val backup = if (parsed == null) backUp(configPath) else null
+            val existing = parsed ?: JsonObject()
+
             val servers = existing.getAsJsonObject("mcpServers")
                 ?: JsonObject().also { existing.add("mcpServers", it) }
             val merged = existing.has("mcpServers") && servers.size() > 0 && !servers.has(SERVER_NAME)
 
             servers.add(SERVER_NAME, entry)
             Files.writeString(configPath, gson.toJson(existing) + "\n")
-            Result.Written(configPath, merged)
+            Result.Written(configPath, merged, backup)
         } catch (error: Exception) {
             // The message alone is often just the path, which reads as though
             // nothing went wrong; the exception type carries the actual reason.
@@ -81,22 +91,40 @@ object McpRegistration {
         val basePath = project.basePath ?: return false
         return runCatching {
             readConfig(Paths.get(basePath, CONFIG_FILE))
-                .getAsJsonObject("mcpServers")
+                ?.getAsJsonObject("mcpServers")
                 ?.has(SERVER_NAME) == true
         }.getOrDefault(false)
     }
 
     /**
-     * A malformed or absent file both yield an empty object: refusing to write
-     * because the existing JSON is broken would leave the user stuck with no way
-     * forward from inside the IDE.
+     * The existing config, an empty object when there is no file yet, or null
+     * when there is a file we cannot parse.
+     *
+     * The three are deliberately distinct. Refusing to write because the
+     * existing JSON is broken would leave the user stuck with no way forward
+     * from inside the IDE, but treating "broken" as "absent" silently discards
+     * every other MCP server they had configured - a trailing comma is enough.
+     * Telling them apart lets the caller keep a copy before it replaces one.
      */
-    private fun readConfig(path: Path): JsonObject {
+    private fun readConfig(path: Path): JsonObject? {
         if (!Files.exists(path)) return JsonObject()
         return runCatching {
             JsonParser.parseString(Files.readString(path)).asJsonObject
-        }.getOrElse { JsonObject() }
+        }.getOrNull()
     }
+
+    /**
+     * Copy the unparseable config aside, returning where it went.
+     *
+     * A failure here is not fatal to the registration, but it does mean there
+     * is no copy: null says so rather than implying one exists.
+     */
+    private fun backUp(path: Path): Path? =
+        runCatching {
+            val backup = path.resolveSibling(path.fileName.toString() + BACKUP_SUFFIX)
+            Files.copy(path, backup, StandardCopyOption.REPLACE_EXISTING)
+            backup
+        }.getOrNull()
 
     private fun serverEntry(project: Project): JsonObject? {
         val settings = CodeGraphSettings.getInstance(project).state

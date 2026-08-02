@@ -15,9 +15,12 @@
         </p>
         <h3>Requirements</h3>
         <p>
-        This plugin needs the CodeGraph engine installed separately:
-        <code>npm i -g @astudioplus/codegraph-mcp</code>. Your code is analysed
-        locally by that engine and is never uploaded.
+        The plugin runs a native analysis engine, which it offers to download
+        for your platform the first time you open a project. If you would rather
+        supply it yourself, install <code>npm i -g @astudioplus/codegraph-mcp</code>
+        or point the plugin at your own build in
+        <b>Settings | Tools | CodeGraph</b>. Your code is analysed locally by
+        that engine and is never uploaded.
         </p>
         <h3>Data collection</h3>
         <p>

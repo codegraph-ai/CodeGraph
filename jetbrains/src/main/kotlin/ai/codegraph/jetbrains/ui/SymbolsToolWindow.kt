@@ -171,10 +171,16 @@ private class SymbolsPanel(private val project: Project) : JPanel(BorderLayout()
 
     private fun navigateToSelection() {
         val symbol = (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? SymbolInfo ?: return
+        // The fallback parses the URI itself, and both steps throw on anything
+        // malformed or non-`file:`. This runs on the EDT from a double-click,
+        // so an escape surfaces as an IDE error dialog instead of the status
+        // message the fallback exists to produce.
         val file = VirtualFileManager.getInstance().findFileByUrl(symbol.uri)
-            ?: VirtualFileManager.getInstance().findFileByNioPath(
-                java.nio.file.Paths.get(java.net.URI.create(symbol.uri)),
-            )
+            ?: runCatching {
+                VirtualFileManager.getInstance().findFileByNioPath(
+                    java.nio.file.Paths.get(java.net.URI.create(symbol.uri)),
+                )
+            }.getOrNull()
             ?: run {
                 setStatus("Cannot open ${symbol.uri}")
                 return

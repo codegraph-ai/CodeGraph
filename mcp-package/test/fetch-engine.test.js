@@ -23,8 +23,14 @@ const http = require("http");
 const os = require("os");
 const path = require("path");
 
-const { ensureEngine, requiredAssets, platformBinaryName, WINDOWS_SIDECAR } =
-  require("../bin/fetch-engine");
+const {
+  ensureEngine,
+  requiredAssets,
+  platformBinaryName,
+  installedVersion,
+  WINDOWS_SIDECAR,
+  VERSION_MARKER,
+} = require("../bin/fetch-engine");
 
 const VERSION = "0.20.0";
 let failures = 0;
@@ -107,21 +113,52 @@ async function run() {
     }
   }
 
-  // --- an already-present engine is not re-downloaded ------------------
+  // --- an already-present engine of the same version is not re-downloaded --
   {
     const dir = scratch();
     const name = platformBinaryName();
     for (const asset of requiredAssets()) fs.writeFileSync(path.join(dir, asset), "existing");
+    fs.writeFileSync(path.join(dir, VERSION_MARKER), `${VERSION}\n`);
     // Serve nothing: any fetch attempt would 404 and fail the call.
     const { server, baseUrl } = await startRelease({});
     try {
       const { fetched } = await ensureEngine(VERSION, dir, { baseUrl });
-      check(fetched.length === 0, "an existing install is left alone");
+      check(fetched.length === 0, "an existing install of the same version is left alone");
       check(fs.readFileSync(path.join(dir, name), "utf8") === "existing", "it is not overwritten");
     } finally {
       server.close();
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  }
+
+  // --- an engine from an older client is replaced ----------------------
+  // Resolving by filename alone is what let a client keep talking to the
+  // engine a previous release installed, forever.
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    for (const asset of requiredAssets()) fs.writeFileSync(path.join(dir, asset), "stale");
+    fs.writeFileSync(path.join(dir, VERSION_MARKER), "0.19.1\n");
+
+    const assets = { [name]: { content: "engine" } };
+    for (const asset of requiredAssets().slice(1)) assets[asset] = { content: "sidecar" };
+    const { server, baseUrl } = await startRelease(assets);
+    try {
+      const { binary, fetched } = await ensureEngine(VERSION, dir, { baseUrl });
+      check(fetched.length === requiredAssets().length, "a version mismatch re-fetches every asset");
+      check(fs.readFileSync(binary, "utf8") === "engine", "the stale engine is replaced");
+      check(installedVersion(dir) === VERSION, "the installed version is recorded");
+    } finally {
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // --- an unmarked install is treated as unknown, not as current -------
+  {
+    const dir = scratch();
+    for (const asset of requiredAssets()) fs.writeFileSync(path.join(dir, asset), "unmarked");
+    check(installedVersion(dir) === null, "an install with no marker reports no version");
   }
 
   // --- a missing release fails loudly ----------------------------------
@@ -139,6 +176,39 @@ async function run() {
     }
   }
 
+  // --- a transfer that dies after the headers ---------------------------
+  // A half-finished download must reject, install nothing, and leave no
+  // staged file behind. Silently keeping the truncated bytes would produce an
+  // install that looks complete and fails at first use.
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    const digest = crypto.createHash("sha256").update("engine").digest("hex");
+    const server = http.createServer((req, res) => {
+      if (req.url.endsWith(".sha256")) {
+        res.writeHead(200);
+        res.end(`${digest}  ${name}\n`);
+        return;
+      }
+      // Promise far more than we send, then cut the connection.
+      res.writeHead(200, { "Content-Length": 4096 });
+      res.write("partial");
+      res.socket.destroy();
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    try {
+      let threw = null;
+      await ensureEngine(VERSION, dir, { baseUrl }).catch((e) => (threw = e));
+      check(threw !== null, "an aborted transfer rejects rather than throwing uncaught");
+      check(!fs.existsSync(path.join(dir, name)), "an aborted transfer installs nothing");
+      check(fs.readdirSync(dir).length === 0, "an aborted transfer leaves nothing behind");
+    } finally {
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   // --- the windows sidecar rule ----------------------------------------
   check(
     requiredAssets("win32", "x64").includes(WINDOWS_SIDECAR),
@@ -148,6 +218,18 @@ async function run() {
     !requiredAssets("linux", "x64").includes(WINDOWS_SIDECAR),
     "other platforms do not"
   );
+
+  // --- only published platform/arch pairs resolve to an asset ----------
+  // An x64 asset handed to an arm64 machine downloads and chmods cleanly and
+  // then fails to exec, which is far harder to read than "not published".
+  check(platformBinaryName("linux", "arm64") === null, "linux-arm64 has no published engine");
+  check(platformBinaryName("win32", "arm64") === null, "win32-arm64 has no published engine");
+  check(
+    platformBinaryName("darwin", "arm64") === "codegraph-server-darwin-arm64",
+    "darwin-arm64 does"
+  );
+  check(platformBinaryName("linux", "x64") === "codegraph-server-linux-x64", "linux-x64 does");
+  check(requiredAssets("linux", "arm64").length === 0, "an unpublished pair needs no assets");
 
   console.log("");
   console.log(`${failures} failure(s)`);
