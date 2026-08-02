@@ -17,6 +17,7 @@ import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath } from './server';
+import { offerEngineDownload } from './engineDownload';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
 import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from './funnel';
@@ -269,7 +270,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Determine server binary path — may upgrade the edition label from
     // 'community' to 'pro' if the user has the pro binary on PATH.
-    const serverInfo = getServerPath(context);
+    //
+    // The published VSIX no longer bundles engines: shipping all four platform
+    // binaries meant a 118 MB download for the one a user can actually run.
+    // When none is found we offer to fetch this platform's engine, which is
+    // also where an npm- or JetBrains-installed engine gets picked up, since
+    // all three channels share ~/.codegraph/bin.
+    let serverInfo: ReturnType<typeof getServerPath>;
+    try {
+        serverInfo = getServerPath(context);
+    } catch {
+        const downloaded = await offerEngineDownload(context.extension.packageJSON.version);
+        if (!downloaded) {
+            reporter.activationServerStartResult({
+                outcome: 'spawn_fail',
+                durationMs: 0,
+                serverBinaryFound: false,
+                errorHint: 'engine_not_installed',
+            });
+            return;
+        }
+        serverInfo = getServerPath(context);
+    }
     setServerEdition(serverInfo.edition === 'pro' ? 'pro' : 'community');
 
     // Log server path for debugging

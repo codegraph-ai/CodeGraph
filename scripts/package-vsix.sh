@@ -46,30 +46,16 @@ echo "Building extension..."
 npm run esbuild-base -- --production
 echo ""
 
-if [ "$TARGET" = "all" ]; then
-  # Build platform-specific VSIX for each available binary
-  for entry in "${PLATFORMS[@]}"; do
-    PLAT="${entry%%:*}"
-    BIN="${entry##*:}"
-    if [ -f "$BIN_DIR/$BIN" ]; then
-      echo "Packaging for $PLAT..."
-      npx @vscode/vsce package --target "$PLAT" 2>&1 | grep -E "DONE|ERROR"
-    else
-      echo "  ⚠ Skipping $PLAT (binary not found: bin/$BIN)"
-    fi
-  done
-
-  # Combined VSIX: no --target, includes all 4 platform binaries + the
-  # Windows onnxruntime.dll. Useful for manual sideload + as a fallback
-  # for marketplace listings that don't yet have platform-targeted
-  # distribution wired up.
-  echo "Packaging combined (no --target)..."
-  npx @vscode/vsce package 2>&1 | grep -E "DONE|ERROR"
-else
-  # Single platform
-  echo "Packaging for $TARGET..."
-  npx @vscode/vsce package --target "$TARGET" 2>&1 | grep -E "DONE|ERROR"
-fi
+# One VSIX for every platform. The extension fetches the engine for the
+# machine it lands on (src/engineDownload.ts), so there is nothing
+# platform-specific left to package. Building four targeted VSIXs plus a
+# combined one previously produced a 118 MB artifact in which any given user
+# could run a quarter of the payload.
+#
+# Publish the release assets first with ./scripts/publish-release-assets.sh, or
+# installs of this version will have no engine to fetch.
+echo "Packaging (platform-independent; the engine is fetched at first use)..."
+npx @vscode/vsce package 2>&1 | grep -E "DONE|ERROR"
 
 echo ""
 echo "VSIX packages:"

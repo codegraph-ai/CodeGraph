@@ -86,10 +86,18 @@ function findCommunityBinary(context: vscode.ExtensionContext): string {
             throw new Error(`Unsupported platform: ${platform}`);
     }
 
-    // Packaged binary (production)
+    // Packaged binary — only present in a VSIX built with binaries bundled.
+    // The published VSIX no longer carries one; see engineDownload.ts.
     const packagedPath = context.asAbsolutePath(path.join('bin', binaryName));
     if (fs.existsSync(packagedPath)) {
         return packagedPath;
+    }
+
+    // Engine downloaded on demand, shared with the CLI and the JetBrains
+    // plugin so a user who installed via any channel is found by all of them.
+    const managedPath = path.join(os.homedir(), '.codegraph', 'bin', binaryName);
+    if (fs.existsSync(managedPath)) {
+        return managedPath;
     }
 
     // Cargo release build (development)

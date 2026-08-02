@@ -6,7 +6,13 @@
 # Run from the repo root after all platform binaries are built.
 #
 # Usage:
-#   ./scripts/package-npm.sh          # copy from vscode/bin/
+# The engine is not bundled: it is fetched from the GitHub release at install
+# time by bin/postinstall.js. Publish the release assets first with
+# ./scripts/publish-release-assets.sh, or installs of this version will fail to
+# find an engine.
+#
+# Usage:
+#   ./scripts/package-npm.sh           # pack only
 #   ./scripts/package-npm.sh --publish # also publish to npmjs.com
 
 set -euo pipefail
@@ -14,66 +20,32 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PKG_DIR="$REPO_ROOT/mcp-package"
 BIN_DIR="$PKG_DIR/bin"
-VSCODE_BIN="$REPO_ROOT/vscode/bin"
 
-BINARIES=(
-  "codegraph-server-darwin-arm64"
-  "codegraph-server-darwin-x64"
-  "codegraph-server-linux-x64"
-  "codegraph-server-win32-x64.exe"
-)
-
+# The package no longer bundles platform binaries. Shipping all four made it
+# 88 MB compressed and 498 MB unpacked so that every user could run exactly one
+# of them; the engine is now published once as release assets and fetched by
+# bin/postinstall.js for the platform doing the installing.
+#
+# Any binary left over in mcp-package/bin/ from an older build is removed here,
+# so a stale one cannot be published by accident.
 echo "=== CodeGraph npm package builder ==="
 echo ""
 
-# Step 1: Check that source binaries exist
-MISSING=0
-for bin in "${BINARIES[@]}"; do
-  if [ ! -f "$VSCODE_BIN/$bin" ]; then
-    echo "  ✗ Missing: vscode/bin/$bin"
-    MISSING=1
-  else
-    SIZE=$(du -h "$VSCODE_BIN/$bin" | cut -f1)
-    echo "  ✓ Found: vscode/bin/$bin ($SIZE)"
+echo "Removing any bundled binaries (the engine is fetched at install time)..."
+for stale in "$BIN_DIR"/codegraph-server-* "$BIN_DIR/onnxruntime.dll"; do
+  if [ -e "$stale" ]; then
+    rm -f "$stale"
+    echo "  - removed $(basename "$stale")"
   fi
 done
 
-if [ "$MISSING" -eq 1 ]; then
-  echo ""
-  echo "ERROR: Not all platform binaries are present in vscode/bin/"
-  echo "Build missing platforms first. See: scripts/build-all.sh or ~/.claude/cross-platform-builds.md"
-  exit 1
-fi
-
-# Step 2: Copy binaries to mcp-package/bin/
+# The fetch path is what every install now depends on, so it is checked here
+# rather than discovered by the first user to install the package.
 echo ""
-echo "Copying binaries to mcp-package/bin/..."
-mkdir -p "$BIN_DIR"
-
-for bin in "${BINARIES[@]}"; do
-  cp "$VSCODE_BIN/$bin" "$BIN_DIR/$bin"
-  # Set executable on Unix binaries
-  if [[ "$bin" != *.exe ]]; then
-    chmod +x "$BIN_DIR/$bin"
-  fi
-done
-
-# Copy Windows ONNX runtime DLL (required for Windows binary)
-if [ -f "$VSCODE_BIN/onnxruntime.dll" ]; then
-  cp "$VSCODE_BIN/onnxruntime.dll" "$BIN_DIR/"
-  echo "  ✓ Copied onnxruntime.dll"
-elif [ -f "$BIN_DIR/codegraph-server-win32-x64.exe" ]; then
-  echo "  ⚠ WARNING: Windows binary present but onnxruntime.dll missing!"
-  echo "    Windows users will fail at runtime without this DLL."
-  echo "    Copy from Windows build host: C:\\Users\\Administrator\\projects\\codegraph\\target\\release\\onnxruntime.dll"
-fi
-
-# Ensure launcher scripts are executable
-chmod +x "$BIN_DIR/codegraph-mcp.js"
-
-echo ""
-echo "Package contents:"
-ls -lh "$BIN_DIR/"
+echo "Checking the engine fetch..."
+( cd "$PKG_DIR" && node test/fetch-engine.test.js >/dev/null ) \
+  && echo "  ✓ fetch-engine tests pass" \
+  || { echo "  ✗ fetch-engine tests FAILED — not packaging"; exit 1; }
 
 # Step 3: Verify version consistency
 PKG_VERSION=$(node -e "console.log(require('$PKG_DIR/package.json').version)")
