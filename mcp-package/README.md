@@ -8,6 +8,24 @@ Cross-language code intelligence for AI agents — 42 tools, 38 languages, persi
 npm install -g @astudioplus/codegraph-mcp
 ```
 
+The analysis engine is not bundled in the package.
+Install downloads the engine built for your platform from its GitHub release -
+tagged with the *engine's* version, which an npm-only patch release does not
+move - and verifies it against the published `.sha256` before installing it
+(on Windows the ONNX Runtime sidecar comes with it).
+
+A failed download never fails the install, because the CLI, the hooks and the
+docs all still work - it prints a warning instead. Retry it with:
+
+```bash
+npx codegraph-mcp-fetch-engine          # --force re-downloads an engine that is already present
+```
+
+For air-gapped machines, or if you vendor the binary yourself, set
+`CODEGRAPH_SKIP_BINARY_FETCH=1` to skip the download and place the engine at
+`<package>/bin/codegraph-server-<platform>-<arch>` (`.exe` on Windows) yourself -
+that is the path `codegraph-mcp` launches.
+
 ## Usage
 
 ### Claude Code

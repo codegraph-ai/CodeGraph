@@ -152,8 +152,9 @@ check("error" not in response, f"getParserMetrics -> {str(response.get('error') 
 response = execute_command("codegraph.symbolSearch", {"query": "main", "limit": 5})
 check("error" not in response, f"symbolSearch -> {json.dumps(response.get('result'))[:160]}")
 
-# getDocumentCodeLens backs the Code Vision surface. Call it directly rather
-# than trusting the advertised list, because that list is currently incomplete.
+# getDocumentCodeLens backs the Code Vision surface. Called directly rather than
+# inferred from the advertised list: it went unadvertised once, and a probe that
+# only reads capabilities would have called that a clean run.
 response = execute_command(
     "codegraph.getDocumentCodeLens", {"uri": "file://" + os.path.join(ROOT, "README.md")}
 )

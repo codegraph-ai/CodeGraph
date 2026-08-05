@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **45 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **37 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
+CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **45 MCP tools**, a **VS Code extension**, a **JetBrains IDE plugin**, and a **persistent memory layer**. Parses **38 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
 
 ## Quick Start
 
@@ -30,10 +30,26 @@ The server indexes the current working directory automatically.
 Install the VSIX:
 
 ```bash
-code --install-extension codegraph-0.14.0.vsix
+code --install-extension codegraph-0.20.0.vsix
 ```
 
-The extension starts the server automatically and registers all tools as Language Model Tools for Copilot.
+One VSIX serves every platform.
+The analysis engine is not bundled: on first activation the extension offers to download the engine built for your platform, verifies it against the published checksum, and installs it into `~/.codegraph/bin` - the same location the JetBrains plugin uses, so one download serves both.
+The download is offered rather than performed automatically, because it is a native binary that runs with your permissions.
+Decline it and run **CodeGraph: Download Analysis Engine** from the command palette whenever you are ready.
+
+Once an engine is present, the extension starts it automatically and registers all tools as Language Model Tools for Copilot.
+
+### JetBrains IDEs
+
+A plugin for IntelliJ IDEA, PyCharm, GoLand, Android Studio and the rest of the
+family drives the same engine over LSP: Code Vision, Symbols and Memories tool
+windows, a graph panel, and one-click MCP registration for the AI Assistant.
+It resolves or downloads the engine the same way the VS Code extension does,
+sharing `~/.codegraph/bin`.
+
+→ **[jetbrains/README.md](jetbrains/README.md)** for surfaces, engine
+resolution order, and building from source.
 
 ### Rules for AI agents
 
@@ -137,6 +153,8 @@ The full 32-tool surface is convenient but inflates the agent's prompt-context c
   "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
   "codegraph.staticModelPath": "",                // model2vec model dir when embeddingModel is "static"
   "codegraph.maxFileSizeKB": 1024,
+  "codegraph.codeLens.enabled": true,             // caller / test / complexity counts above functions
+  "codegraph.hover.enabled": true,                // the same stats on hover
   "codegraph.debug": false
 }
 ```
@@ -150,6 +168,9 @@ Built-in exclusions (always skipped) cover ~47 directories across three categori
 - **Sensitive credential dirs**: `.aws`, `.ssh`, `.gnupg`, `.kube`, `.docker`
 
 Plus glob patterns for binary archives, native libraries, OS metadata, and **secret file extensions** (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.crt`, `*.gpg`, `*.kdbx`, SSH key conventions like `id_rsa`, etc.) — defense in depth against accidentally embedding credentials.
+
+Indexing produced zero files, or something else looks wrong? See
+**[docs/troubleshooting.md](docs/troubleshooting.md)**.
 
 ---
 
@@ -356,11 +377,11 @@ HTTP handler detection: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java
 ## Architecture
 
 ```
-MCP Client (Claude, Cursor, ...)        VS Code Extension
-        |                                       |
-    MCP (stdio)                            LSP Protocol
-        |                                       |
-        └───────────┐               ┌───────────┘
+MCP Client (Claude, Cursor, ...)   VS Code Extension   JetBrains Plugin
+        |                                  |                  |
+    MCP (stdio)                       LSP Protocol       LSP Protocol
+        |                                  |                  |
+        └───────────┐               ┌──────┴──────────────────┘
                     ▼               ▼
             ┌─────────────────────────────┐
             │       codegraph-server      │

@@ -38,10 +38,11 @@ the dependency ever becomes a problem.
 
 ## Engine resolution
 
-The plugin does **not** bundle engine binaries.
-The VSIX can, because VS Code ships per-platform artifacts; the JetBrains
-Marketplace has no equivalent, so bundling all four platforms would mean a
-~120 MB download for every user regardless of platform.
+The plugin does **not** bundle engine binaries, and neither does any other
+client any more: bundling all four platforms meant a ~120 MB download for the
+one binary a given user can actually run.
+The engine is published once as GitHub release assets and each client fetches
+what its platform needs, into the shared `~/.codegraph/bin`.
 
 Resolution order, implemented in
 [`CodeGraphServerResolver`](src/main/kotlin/ai/codegraph/jetbrains/server/CodeGraphServerResolver.kt):
@@ -55,8 +56,11 @@ Resolution order, implemented in
 ### Installing the engine
 
 When no engine is found, the plugin offers to download the one built for this
-platform from the GitHub release matching its own version, verifying it against
-the published `.sha256` before installing it into `~/.codegraph/bin`.
+platform, verifying it against the published `.sha256` before installing it into
+`~/.codegraph/bin`.
+The release it asks for is `CodeGraphServerResolver.ENGINE_VERSION` - the
+*engine's* version, not the plugin's, since the assets are tagged with the
+former and a plugin-only patch would otherwise 404.
 It is offered rather than done automatically: this is a native binary that will
 run with the user's permissions, and starting that unasked on project open is
 not the plugin's decision to make.
@@ -217,7 +221,11 @@ advertises so that hand-transcribed enum cannot drift unnoticed.
 python3 scripts/engine_probe.py ../target/release/codegraph-server ..
 ```
 
-Two known engine deviations are recorded in the probe rather than hidden by it:
-`codegraph.getDocumentCodeLens` is dispatched but not advertised, and the engine
-ignores the LSP `exit` notification, terminating only when stdin closes.
-Both are masked by the clients today and are tracked as engine fixes.
+Two engine deviations the probe was written to expose are now fixed in the
+engine, and the probe asserts the fixed behaviour rather than tolerating the
+old one: `codegraph.getDocumentCodeLens` is advertised as well as dispatched,
+and the engine terminates on the LSP `exit` notification instead of waiting for
+stdin to close.
+The probe's `UNADVERTISED_BY_DESIGN` set is empty on purpose - a command that is
+dispatched but not advertised is invisible to clients that gate on
+`ServerCapabilities`, LSP4IJ among them, so a new entry needs a stated reason.
