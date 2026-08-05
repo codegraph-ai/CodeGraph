@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **45 MCP tools**, a **VS Code extension**, a **JetBrains IDE plugin**, and a **persistent memory layer**. Parses **38 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
+CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **42 MCP tools**, a **VS Code extension**, a **JetBrains IDE plugin**, and a **persistent memory layer**. Parses **38 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
 
 ## Quick Start
 
@@ -105,16 +105,22 @@ one tool and exits without the MCP stdio handshake — ideal for scripting.
 Static (model2vec) embeddings replace the ONNX transformer with a token→vector
 lookup table: indexing is **~100× faster** (this repo's 5,873 symbols embed in
 ~1 s vs ~3.4 min with BGE) and there's **no ONNX runtime or 1.5 GB RAM gate**.
-Retrieval stays **hybrid (BM25 + semantic)**, so end-to-end quality is **~90% of
-BGE**. The VS Code extension ships the model bundled, so `static` works there
-with no setup. For the CLI/MCP server it needs a local model directory
-(`config.json` + `tokenizer.json` + `model.safetensors`):
+Retrieval stays **hybrid (BM25 + semantic)**, so end-to-end quality is **~90% of BGE**.
+The model is not bundled with any client — it needs a local model directory
+(`config.json` + `tokenizer.json` + `model.safetensors`) at
+`~/.codegraph/static_models/jina-code-static-256`, or wherever
+`CODEGRAPH_STATIC_MODEL` points:
 
-- Point at it with `CODEGRAPH_STATIC_MODEL=/path/to/model` (or the VS Code
-  `codegraph.staticModelPath` setting to override the bundled model). Default:
-  `~/.codegraph/static_models/jina-code-static-256`.
-- Distill one from any sentence-transformer (Apache-2.0 Jina-Code by default) in
-  ~30 s on CPU: `python scripts/distill_static_model.py`.
+- Installing `@astudioplus/codegraph-mcp` from npm downloads it into that
+  default location for you (best-effort; set `CODEGRAPH_SKIP_MODEL_FETCH=1` to
+  skip, and the install never fails over it).
+- Otherwise fetch the prebuilt one with `scripts/fetch-static-model.sh`, or
+  distill your own from any sentence-transformer (Apache-2.0 Jina-Code by
+  default) in ~30 s on CPU: `python scripts/distill_static_model.py`.
+- In VS Code set `codegraph.staticModelPath` to the model directory; in
+  JetBrains use *Settings → Tools → CodeGraph → Embeddings → Static model
+  directory*. Both IDE clients pass it to the server as
+  `CODEGRAPH_STATIC_MODEL`.
 
 #### `CODEGRAPH_SKIP_MEMORY_CHECK` — force the embedding model past the RAM gate
 
@@ -133,14 +139,14 @@ It works in both MCP and one-shot `--run-tool` modes.
 
 #### `--profile` — narrow the MCP tool surface
 
-The full 32-tool surface is convenient but inflates the agent's prompt-context cost. A profile exposes only the slice you need (also settable via the `CODEGRAPH_TOOL_PROFILE` env var):
+The full 42-tool surface is convenient but inflates the agent's prompt-context cost. A profile exposes only the slice you need (also settable via the `CODEGRAPH_TOOL_PROFILE` env var):
 
 | Profile | Tools | Use when |
 |---------|-------|----------|
 | `all` *(default)* | every tool (community + pro) | normal sessions |
 | `core` | 8 — search + symbol info + AI context | chatty agent sessions where you only need lookups |
-| `graph` | 16 — callers/callees/deps/impact/traverse | refactoring + structural analysis |
-| `memory` | 7 — `codegraph_memory_*` only | note-taking / knowledge-base workflows |
+| `graph` | 17 — callers/callees/deps/impact/traverse/PR context | refactoring + structural analysis |
+| `memory` | 14 — `codegraph_memory_*` plus the docs tools | note-taking / knowledge-base workflows |
 | `security` | pro security tools only (empty on community) | pro security audits |
 
 ### VS Code settings
@@ -151,7 +157,7 @@ The full 32-tool surface is convenient but inflates the agent's prompt-context c
   "codegraph.indexPaths": ["/path/to/project-a", "/path/to/project-b"],
   "codegraph.excludePatterns": ["**/cmake-build-debug/**", "**/generated/**"],
   "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
-  "codegraph.staticModelPath": "",                // model2vec model dir when embeddingModel is "static"
+  "codegraph.staticModelPath": "",                // required when embeddingModel is "static": the model2vec model dir
   "codegraph.maxFileSizeKB": 1024,
   "codegraph.codeLens.enabled": true,             // caller / test / complexity counts above functions
   "codegraph.hover.enabled": true,                // the same stats on hover
@@ -174,7 +180,9 @@ Indexing produced zero files, or something else looks wrong? See
 
 ---
 
-## Tools (42 community + 27 pro, 17 security)
+## Tools
+
+42 community tools, plus 27 more (17 of them security analyzers) in CodeGraph Pro.
 
 ### Code Analysis (11)
 
@@ -360,7 +368,7 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 | **Functional** | Haskell, OCaml, Julia, Erlang, Elm, Clojure |
 | **Enterprise** | C#, COBOL, Fortran, Go |
 | **Blockchain** | Solidity |
-| **Shell/Config** | Bash, HCL/Terraform, TOML, YAML |
+| **Shell/Config** | Bash, Dockerfile, HCL/Terraform, TOML, YAML |
 | **Hardware** | Verilog/SystemVerilog, Tcl |
 | **Data Science** | R, Julia |
 

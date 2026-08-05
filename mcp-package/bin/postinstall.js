@@ -64,7 +64,9 @@ const missingAssets = () =>
       // be supplied by hand.
       console.warn(`⚠ codegraph-mcp: could not download the engine — ${err.message}`);
       console.warn(`  Retry with: npx codegraph-mcp-fetch-engine`);
-      console.warn(`  Or set CODEGRAPH_SERVER_PATH to an engine you already have.`);
+      // codegraph-mcp resolves the engine from its own bin directory and
+      // nowhere else, so naming that path is the only actionable advice here.
+      console.warn(`  Or place an engine you already have at ${binaryPath}`);
     }
   }
 

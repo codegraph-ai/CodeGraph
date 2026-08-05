@@ -44,8 +44,10 @@ ensureEngine(version, targetDir, {
   .catch((err) => {
     console.error(`✗ ${err.message}`);
     console.error("");
+    // The only supported hand-install is this exact path: codegraph-mcp
+    // resolves the engine from its own bin directory and nowhere else.
     console.error("If this machine has no network access, supply the engine yourself:");
-    console.error(`  - place it at ${path.join(targetDir, binaryName)}, or`);
-    console.error("  - set CODEGRAPH_SERVER_PATH to an engine you already have");
+    console.error(`  - place it at ${path.join(targetDir, binaryName)}`);
+    console.error("  - on Windows, put onnxruntime.dll in that directory too");
     process.exit(1);
   });
