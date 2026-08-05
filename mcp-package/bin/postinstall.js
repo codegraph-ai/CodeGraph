@@ -6,7 +6,12 @@ const os = require("os");
 const fs = require("fs");
 const { execFileSync } = require("child_process");
 
-const { ensureEngine, platformBinaryName, ENGINE_VERSION } = require("./fetch-engine");
+const {
+  ensureEngine,
+  platformBinaryName,
+  requiredAssets,
+  ENGINE_VERSION,
+} = require("./fetch-engine");
 
 const platform = os.platform();
 const arch = os.arch();
@@ -34,10 +39,19 @@ const version = ENGINE_VERSION;
 // consumers resolve it directly, the PR-review workflow among them.
 //
 // CODEGRAPH_SKIP_BINARY_FETCH exists for air-gapped installs and for anyone
-// vendoring the binary themselves; the file already being present skips the
+// vendoring the binary themselves; every asset already being present skips the
 // fetch anyway.
+//
+// The guard asks about all required assets, not just the executable: on Windows
+// the engine also needs its ONNX Runtime sidecar, and an install that moved the
+// exe and then failed on the sidecar would otherwise never be retried - the
+// binary is there, so the fetch is skipped, and the engine can never start.
+// ensureEngine's own per-asset filter decides what actually gets downloaded.
+const missingAssets = () =>
+  requiredAssets().some((asset) => !fs.existsSync(path.join(__dirname, asset)));
+
 (async () => {
-  if (!fs.existsSync(binaryPath) && !process.env.CODEGRAPH_SKIP_BINARY_FETCH) {
+  if (missingAssets() && !process.env.CODEGRAPH_SKIP_BINARY_FETCH) {
     try {
       console.log(`codegraph-mcp: fetching engine ${version} for ${platform}-${arch}...`);
       const { fetched } = await ensureEngine(version, __dirname, {

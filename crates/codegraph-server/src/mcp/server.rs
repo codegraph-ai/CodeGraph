@@ -4098,12 +4098,20 @@ impl McpServer {
                         }
                         changed_func_names.push(func_name.as_str());
 
-                        // Collect callers
+                        // Collect callers. Only genuine call edges: a raw
+                        // incoming-neighbor scan also returns the containing
+                        // file/class `Contains` edge, which would report the
+                        // declaring file as a breaking caller of every function.
+                        // Same filter as the CodeLens handler, so PR-review and
+                        // CodeLens agree on the count as well as on what a test
+                        // caller is.
                         let mut caller_count = 0u32;
                         let mut has_test_caller = false;
-                        if let Ok(neighbors) =
-                            graph.get_neighbors(*node_id, codegraph::Direction::Incoming)
-                        {
+                        if let Ok(neighbors) = graph.get_neighbors_by_edge_type(
+                            *node_id,
+                            codegraph::Direction::Incoming,
+                            codegraph::EdgeType::Calls,
+                        ) {
                             for caller_id in neighbors {
                                 if let Ok(caller) = graph.get_node(caller_id) {
                                     let cname = crate::domain::node_props::name(caller);

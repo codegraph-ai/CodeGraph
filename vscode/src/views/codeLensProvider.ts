@@ -105,14 +105,32 @@ class DocumentStatsCache {
     }
 }
 
-function formatLensTitle(s: CodeLensSymbol): string {
+/**
+ * Below this, cyclomatic complexity is not worth a line of editor chrome.
+ * Shared value with the JetBrains code vision (COMPLEXITY_FLOOR there) so the
+ * two clients render the same amount of chrome for the same graph.
+ */
+const COMPLEXITY_FLOOR = 5;
+
+/**
+ * The lens text, or null when the symbol has nothing to report. Zero counts are
+ * omitted rather than rendered: a lens reading `0 callers · 0 tests` above every
+ * uncalled function in a library crate is noise, and a lens that renders and
+ * says nothing is worse than no lens. The hover still shows every stat,
+ * including the zeroes, because it is asked for explicitly.
+ */
+function formatLensTitle(s: CodeLensSymbol): string | null {
     const parts: string[] = [];
-    parts.push(`$(references) ${s.callerCount} caller${s.callerCount === 1 ? '' : 's'}`);
-    parts.push(`$(beaker) ${s.testCount} test${s.testCount === 1 ? '' : 's'}`);
-    if (s.complexity > 0) {
+    if (s.callerCount > 0) {
+        parts.push(`$(references) ${s.callerCount} caller${s.callerCount === 1 ? '' : 's'}`);
+    }
+    if (s.testCount > 0) {
+        parts.push(`$(beaker) ${s.testCount} test${s.testCount === 1 ? '' : 's'}`);
+    }
+    if (s.complexity >= COMPLEXITY_FLOOR) {
         parts.push(`$(pulse) complexity ${s.complexity}`);
     }
-    return parts.join('  ·  ');
+    return parts.length > 0 ? parts.join('  ·  ') : null;
 }
 
 class CodeGraphCodeLensProvider implements vscode.CodeLensProvider {
@@ -131,10 +149,12 @@ class CodeGraphCodeLensProvider implements vscode.CodeLensProvider {
         const lenses: vscode.CodeLens[] = [];
         for (const s of symbols) {
             if (s.line < 0 || s.line >= document.lineCount) continue;
+            const title = formatLensTitle(s);
+            if (title === null) continue;
             const range = document.lineAt(s.line).range;
             lenses.push(
                 new vscode.CodeLens(range, {
-                    title: formatLensTitle(s),
+                    title,
                     command: 'codegraph.revealCallGraphAt',
                     arguments: [document.uri, s.line],
                 }),
