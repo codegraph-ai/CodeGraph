@@ -67,6 +67,10 @@ class EngineLifecycle(private val project: Project) {
     val isRestartBlocked: Boolean get() = breaker.isOpen
 
     fun onEngineStarted() {
+        // A deliberate stop that never produced a stop event would otherwise
+        // leave the flag armed for the lifetime of the project, and the first
+        // real crash after it would be swallowed silently.
+        shutdownExpected = false
         if (startedAt.getAndSet(System.currentTimeMillis()) > 0) {
             restarts.incrementAndGet()
         }

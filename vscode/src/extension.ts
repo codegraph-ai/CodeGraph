@@ -268,6 +268,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
     }
 
+    // The one command registered before the engine is resolved, because
+    // declining the download below ends activation and nothing after it -
+    // commands, tree views, lenses - is ever contributed. Without this, a user
+    // who says "Not Now" and later changes their mind has no way back short of
+    // reloading the window and guessing that the prompt returns; the npm
+    // channel ships `codegraph-mcp-fetch-engine` for exactly that case.
+    //
+    // Reloading is what puts a late download to use, so the command offers it -
+    // but only when activation did stop early, since in a session that already
+    // has an engine running a reload prompt is noise.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('codegraph.downloadEngine', async () => {
+            const activationStopped = !client;
+            if (!(await offerEngineDownload(engineVersion()))) {
+                return;
+            }
+            if (!activationStopped) {
+                return;
+            }
+            const choice = await vscode.window.showInformationMessage(
+                'Reload the window to start the CodeGraph engine.',
+                'Reload Window',
+            );
+            if (choice === 'Reload Window') {
+                void vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
+        }),
+    );
+
     // Determine server binary path — may upgrade the edition label from
     // 'community' to 'pro' if the user has the pro binary on PATH.
     //

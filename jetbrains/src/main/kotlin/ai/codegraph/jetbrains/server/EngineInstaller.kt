@@ -33,6 +33,14 @@ object EngineInstaller {
                             if (client.isRunning()) {
                                 indicator.text = "Stopping the CodeGraph engine to replace it"
                                 stopped = true
+                                // Without this the stop we asked for arrives as
+                                // an unexpected one: it reports a crash nobody
+                                // had, eats the breadcrumb an actual crash would
+                                // have needed, and counts against the restart
+                                // breaker, which three updates in a minute would
+                                // open - leaving the engine unable to start
+                                // again after a successful install.
+                                EngineLifecycle.getInstance(project).expectShutdown()
                                 if (!client.stopAndAwait()) {
                                     LOG.warn("CodeGraph engine did not stop before the update; replacing anyway")
                                 }

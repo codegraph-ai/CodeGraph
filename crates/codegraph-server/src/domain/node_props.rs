@@ -141,16 +141,39 @@ fn is_test_name(name: &str) -> bool {
     name.starts_with("test_") || name.ends_with("_test")
 }
 
-/// Path heuristic for test files: a `tests` directory component or a
-/// `test_`-prefixed file name. Separators are normalised first because node
-/// paths are stored with the indexing host's native separator, so a Windows
-/// `tests\foo.rs` would otherwise never match.
+/// Path heuristic for test files: a `tests` directory component, a `test_`
+/// prefix, or a file name following one of the suffix conventions the supported
+/// languages use. Rust and Python put the marker in front (`test_foo.py`); Go,
+/// JavaScript, Ruby and Java put it behind (`foo_test.go`, `foo.test.ts`,
+/// `foo_spec.rb`, `FooTest.java`), and recognising only the prefix classified
+/// every Go and Java test as a production caller.
+///
+/// Separators are normalised first because node paths are stored with the
+/// indexing host's native separator, so a Windows `tests\foo.rs` would
+/// otherwise never match.
 fn is_test_path(path: &str) -> bool {
     let path = path.replace('\\', "/");
-    path.starts_with("tests/")
+    if path.starts_with("tests/")
         || path.starts_with("test_")
         || path.contains("/tests/")
         || path.contains("/test_")
+    {
+        return true;
+    }
+
+    let file = path.rsplit('/').next().unwrap_or("");
+    // Anchored on the separator before the extension so `contest.rs` and
+    // `manifest.go` stay production code.
+    if ["_test.", ".test.", "_spec.", ".spec."]
+        .iter()
+        .any(|marker| file.contains(marker))
+    {
+        return true;
+    }
+    // Case-sensitive, and on the stem only: `Test`/`Tests` is the Java and C#
+    // convention, while a lowercase match would claim `latest.rs`.
+    let stem = file.split('.').next().unwrap_or("");
+    stem.ends_with("Test") || stem.ends_with("Tests")
 }
 
 #[cfg(test)]
@@ -186,8 +209,23 @@ mod tests {
     }
 
     #[test]
+    fn test_path_matches_suffix_conventions() {
+        // Go, JavaScript/TypeScript, Ruby and Java all put the marker last.
+        assert!(is_test_path("/repo/internal/parser_test.go"));
+        assert!(is_test_path("/repo/src/parser.test.ts"));
+        assert!(is_test_path("/repo/spec/models/user_spec.rb"));
+        assert!(is_test_path("/repo/src/parser.spec.js"));
+        assert!(is_test_path("/repo/src/main/java/com/x/ParserTest.java"));
+        assert!(is_test_path(r"C:\repo\src\ParserTests.cs"));
+    }
+
+    #[test]
     fn test_path_rejects_production_paths() {
         assert!(!is_test_path("/repo/src/latest/mod.rs"));
         assert!(!is_test_path(r"C:\repo\src\contest.rs"));
+        // Ends in "test" only in lowercase, which is not a suffix convention.
+        assert!(!is_test_path("/repo/src/manifest.go"));
+        assert!(!is_test_path("/repo/src/latest.rs"));
+        assert!(!is_test_path("/repo/src/protest.java"));
     }
 }

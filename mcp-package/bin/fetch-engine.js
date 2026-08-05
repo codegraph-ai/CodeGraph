@@ -36,6 +36,27 @@ function transportFor(url) {
   return url.startsWith("http://") ? http : https;
 }
 
+/**
+ * Where a redirect actually points, refusing one that leaves https.
+ *
+ * The checksum is fetched over the same hops as the binary it verifies, so an
+ * https release URL redirected to plaintext would let whoever is on the path
+ * substitute both and have them agree. GitHub does not do this, but nothing in
+ * the transport stops it, and the http branch exists at all only so the local
+ * test server can exercise this code - an http origin is therefore allowed to
+ * stay http, and nothing else may become it.
+ *
+ * A relative `Location` is resolved against the URL that produced it, which is
+ * also what the transports cannot do for themselves.
+ */
+function redirectTarget(from, location) {
+  const target = new URL(location, from);
+  if (new URL(from).protocol === "https:" && target.protocol !== "https:") {
+    throw new Error(`refusing insecure redirect from ${from} to ${target.href}`);
+  }
+  return target.href;
+}
+
 const RELEASE_BASE = "https://github.com/codegraph-ai/CodeGraph/releases/download";
 
 /**
@@ -171,7 +192,13 @@ function download(url, destination, { redirects = 5 } = {}) {
         // GitHub release assets always redirect to object storage.
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          return resolve(download(res.headers.location, destination, { redirects: redirects - 1 }));
+          let next;
+          try {
+            next = redirectTarget(url, res.headers.location);
+          } catch (error) {
+            return fail(error);
+          }
+          return resolve(download(next, destination, { redirects: redirects - 1 }));
         }
         if (res.statusCode !== 200) {
           res.resume();
@@ -195,7 +222,13 @@ function readText(url, options = {}) {
       .get(url, { headers: { "User-Agent": "codegraph-installer" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          return resolve(readText(res.headers.location, { redirects: redirects - 1 }));
+          let next;
+          try {
+            next = redirectTarget(url, res.headers.location);
+          } catch (error) {
+            return reject(error);
+          }
+          return resolve(readText(next, { redirects: redirects - 1 }));
         }
         if (res.statusCode !== 200) {
           res.resume();
@@ -360,8 +393,10 @@ async function ensureEngine(version, targetDir, options = {}) {
   // Written last, and only when this call put the engine there: a marker
   // recorded before the assets are verified would claim an install that a later
   // failure never completed, and one recorded over an untouched newer install
-  // would mislabel someone else's engine as ours.
-  if (fetched.length > 0 || installedVersion(targetDir) === null) {
+  // would mislabel someone else's engine as ours. An unmarked directory is
+  // always stale, so it is already covered - nothing was fetched only when a
+  // marker was there to compare against.
+  if (fetched.length > 0) {
     fs.writeFileSync(path.join(targetDir, VERSION_MARKER), `${version}\n`);
   }
 
@@ -384,6 +419,7 @@ module.exports = {
   VERSION_MARKER,
   EngineInUseError,
   platformBinaryName,
+  redirectTarget,
   requiredAssets,
   installedVersion,
   compareVersions,

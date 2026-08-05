@@ -65,6 +65,13 @@ class CrashBreadcrumbs(
      * phase to a death that never happened, and deleting it would destroy the
      * only evidence available if it later dies hard, which is the attribution
      * the engine's own sweeper takes care to preserve.
+     *
+     * Only the two breadcrumbs actually consumed here are deleted. The rest
+     * belong to crashes no one has read yet - a VS Code engine that died
+     * moments ago and whose extension has not activated - and clearing them
+     * would leave that crash reported with no cause at all. Breadcrumbs nobody
+     * claims are the engine sweeper's to remove, which it does only once they
+     * are old enough to be certain of.
      */
     fun readAndClear(): CrashDiagnosis {
         val all = runCatching { Files.list(directory).use { it.toList() } }.getOrNull()
@@ -72,7 +79,8 @@ class CrashBreadcrumbs(
 
         val files = all.filter { isBreadcrumb(it) && !belongsToLiveProcess(it) }
 
-        val cause = pickFresh(files, CRASH_PATTERN)?.let { crumb ->
+        val crash = pickFresh(files, CRASH_PATTERN)
+        val cause = crash?.values?.let { crumb ->
             when {
                 crumb["kind"] == "signal" -> CrashDiagnosis.SIGNAL
                 crumb["kind"] == "panic" -> crumb["class"]
@@ -80,12 +88,16 @@ class CrashBreadcrumbs(
             }
         } ?: CrashDiagnosis.HARD_CRASH
 
-        val phase = pickFresh(files, PHASE_PATTERN)?.get("phase")
+        val phaseCrumb = pickFresh(files, PHASE_PATTERN)
 
-        files.forEach { runCatching { Files.deleteIfExists(it) } }
+        listOfNotNull(crash?.path, phaseCrumb?.path)
+            .forEach { runCatching { Files.deleteIfExists(it) } }
 
-        return CrashDiagnosis(cause, phase)
+        return CrashDiagnosis(cause, phaseCrumb?.values?.get("phase"))
     }
+
+    /** A breadcrumb this call consumed: its file, and whatever could be read from it. */
+    private data class Breadcrumb(val path: Path, val values: Map<String, String>)
 
     private fun isBreadcrumb(path: Path): Boolean {
         val name = path.fileName.toString()
@@ -107,8 +119,12 @@ class CrashBreadcrumbs(
      * it was written recently enough to belong to the crash we are diagnosing.
      * Without the freshness window a breadcrumb from a previous session would
      * mislabel today's crash.
+     *
+     * An unreadable file is still returned, with no values: it was selected, so
+     * it is this call's to clean up, and leaving it would let the same
+     * unparseable file be reselected ahead of every later crash in the window.
      */
-    private fun pickFresh(files: List<Path>, pattern: Regex): Map<String, String>? {
+    private fun pickFresh(files: List<Path>, pattern: Regex): Breadcrumb? {
         val newest = files
             .filter { pattern.matches(it.fileName.toString()) }
             .mapNotNull { path -> runCatching { path to Files.getLastModifiedTime(path).toMillis() }.getOrNull() }
@@ -117,7 +133,7 @@ class CrashBreadcrumbs(
 
         if (clock() - newest.second > FRESHNESS_WINDOW_MS) return null
 
-        return runCatching {
+        val values = runCatching {
             JsonParser.parseString(Files.readString(newest.first)).asJsonObject
                 .entrySet()
                 .mapNotNull { (key, value) ->
@@ -125,7 +141,9 @@ class CrashBreadcrumbs(
                     key to primitive.asString
                 }
                 .toMap()
-        }.onFailure { LOG.debug("Unreadable CodeGraph crash breadcrumb", it) }.getOrNull()
+        }.onFailure { LOG.debug("Unreadable CodeGraph crash breadcrumb", it) }.getOrDefault(emptyMap())
+
+        return Breadcrumb(newest.first, values)
     }
 
     private companion object {

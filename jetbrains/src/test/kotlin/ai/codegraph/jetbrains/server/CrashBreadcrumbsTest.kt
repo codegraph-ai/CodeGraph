@@ -103,7 +103,7 @@ class CrashBreadcrumbsTest {
     }
 
     @Test
-    fun `every breadcrumb is deleted so the next crash starts clean`() {
+    fun `the breadcrumbs it consumed are deleted so the next crash starts clean`() {
         write("last-crash.1.json", """{"kind":"panic","class":"oom"}""")
         write("last-phase.1.json", """{"phase":"startup"}""")
         write("unrelated.json", "{}")
@@ -113,6 +113,34 @@ class CrashBreadcrumbsTest {
         assertTrue(Files.notExists(dir.resolve("last-crash.1.json")))
         assertTrue(Files.notExists(dir.resolve("last-phase.1.json")))
         assertTrue("unrelated files must be left alone", Files.exists(dir.resolve("unrelated.json")))
+    }
+
+    @Test
+    fun `another dead engine's breadcrumbs are left for its own client to read`() {
+        // `~/.codegraph` is shared: a VS Code engine can die seconds before this
+        // one stops. Deleting its breadcrumb here means that crash is reported
+        // with no cause, because its extension has not activated to read it yet.
+        write("last-crash.2.json", """{"kind":"panic","class":"oom"}""", ageMillis = 200)
+        write("last-phase.2.json", """{"phase":"onnx_load"}""", ageMillis = 200)
+        write("last-crash.3.json", """{"kind":"signal"}""", ageMillis = 5_000)
+        write("last-phase.3.json", """{"phase":"indexing"}""", ageMillis = 5_000)
+
+        val diagnosis = breadcrumbs().readAndClear()
+
+        assertEquals("oom", diagnosis.cause)
+        assertTrue(Files.notExists(dir.resolve("last-crash.2.json")))
+        assertTrue(Files.notExists(dir.resolve("last-phase.2.json")))
+        assertTrue(Files.exists(dir.resolve("last-crash.3.json")))
+        assertTrue(Files.exists(dir.resolve("last-phase.3.json")))
+    }
+
+    @Test
+    fun `a breadcrumb too old to trust is left for the engine's own sweeper`() {
+        write("last-crash.4242.json", """{"kind":"panic","class":"oom"}""", ageMillis = 60_000)
+
+        breadcrumbs().readAndClear()
+
+        assertTrue(Files.exists(dir.resolve("last-crash.4242.json")))
     }
 
     @Test

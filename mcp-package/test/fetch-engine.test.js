@@ -27,6 +27,7 @@ const {
   ensureEngine,
   requiredAssets,
   platformBinaryName,
+  redirectTarget,
   installedVersion,
   compareVersions,
   ENGINE_VERSION,
@@ -43,8 +44,14 @@ function check(ok, message) {
   if (!ok) failures++;
 }
 
-/** A release server whose assets and checksums the test controls. */
-function startRelease(assets) {
+/**
+ * A release server whose assets and checksums the test controls.
+ *
+ * With `redirect`, every asset is served one 302 away at a *relative*
+ * `Location`, which is how real object storage answers and what the transports
+ * cannot resolve on their own.
+ */
+function startRelease(assets, { redirect = false } = {}) {
   const routes = {};
   for (const [name, body] of Object.entries(assets)) {
     const content = Buffer.from(body.content);
@@ -54,9 +61,15 @@ function startRelease(assets) {
     routes[`/v${VERSION}/${name}.sha256`] = Buffer.from(`${digest}  ${name}\n`);
   }
   const server = http.createServer((req, res) => {
-    const body = routes[req.url];
+    const target = redirect ? req.url.replace(/^\/objects/, "") : req.url;
+    const body = routes[target];
     if (!body) {
       res.writeHead(404);
+      res.end();
+      return;
+    }
+    if (redirect && target === req.url) {
+      res.writeHead(302, { Location: `/objects${req.url}` });
       res.end();
       return;
     }
@@ -341,6 +354,50 @@ async function run() {
   // assets are tagged with the engine's version, so a client-only patch would
   // otherwise ask for a tag that was never published and get no engine at all.
   check(/^\d+\.\d+\.\d+/.test(ENGINE_VERSION), `a concrete engine version is pinned (${ENGINE_VERSION})`);
+
+  // --- redirects are followed, but never off https ---------------------
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    const assets = { [name]: { content: "engine" } };
+    for (const a of requiredAssets().slice(1)) assets[a] = { content: "sidecar" };
+    const { server, baseUrl } = await startRelease(assets, { redirect: true });
+    try {
+      const { binary } = await ensureEngine(VERSION, dir, { baseUrl });
+      check(
+        fs.readFileSync(binary, "utf8") === "engine",
+        "an asset served behind a relative redirect still arrives"
+      );
+    } finally {
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // The binary and the checksum that verifies it travel the same hops, so a
+  // redirect off https would let one party serve both and have them agree.
+  check(
+    redirectTarget("https://example.com/v1/engine", "https://cdn.example.net/engine") ===
+      "https://cdn.example.net/engine",
+    "an https redirect to https is followed"
+  );
+  let downgrade = null;
+  try {
+    redirectTarget("https://example.com/v1/engine", "http://cdn.example.net/engine");
+  } catch (error) {
+    downgrade = error;
+  }
+  check(downgrade !== null, "a redirect off https is refused rather than followed");
+  check(
+    redirectTarget("http://127.0.0.1:9/v1/engine", "http://127.0.0.1:9/objects/engine") ===
+      "http://127.0.0.1:9/objects/engine",
+    "an http origin - the test server - may stay http"
+  );
+  check(
+    redirectTarget("https://example.com/v1/engine", "/objects/engine") ===
+      "https://example.com/objects/engine",
+    "a relative Location resolves against the URL that produced it"
+  );
 
   // --- the windows sidecar rule ----------------------------------------
   check(

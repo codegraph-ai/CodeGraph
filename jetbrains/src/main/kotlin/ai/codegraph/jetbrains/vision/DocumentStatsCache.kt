@@ -12,6 +12,7 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiFile
 import java.util.concurrent.ConcurrentHashMap
 
@@ -68,6 +69,17 @@ class DocumentStatsCache(private val project: Project) {
         DaemonCodeAnalyzer.getInstance(project).restart()
     }
 
+    /**
+     * Drop one file's entry, for when its editor closes.
+     *
+     * Entries hold a full symbol list each and are keyed by URI, so without a
+     * per-file eviction a session that browses a large tree keeps one for every
+     * file it ever opened, for as long as the project stays open.
+     */
+    fun evict(file: VirtualFile) {
+        uriOf(file)?.let { entries.remove(it) }
+    }
+
     private fun requestRefresh(file: PsiFile, uri: String, stamp: Long) {
         if (!inFlight.add(uri)) return
 
@@ -96,8 +108,10 @@ class DocumentStatsCache(private val project: Project) {
             }
     }
 
-    private fun uriOf(file: PsiFile): String? =
-        file.virtualFile?.takeIf { it.isInLocalFileSystem }?.let { java.io.File(it.path).toURI().toString() }
+    private fun uriOf(file: PsiFile): String? = file.virtualFile?.let { uriOf(it) }
+
+    private fun uriOf(file: VirtualFile): String? =
+        file.takeIf { it.isInLocalFileSystem }?.let { java.io.File(it.path).toURI().toString() }
 
     companion object {
         private val LOG = logger<DocumentStatsCache>()

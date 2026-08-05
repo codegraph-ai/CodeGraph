@@ -20,6 +20,7 @@ export interface ServerInfo {
  * 1. CodeGraph Pro binary (if installed)
  * 2. Community binary (packaged with extension)
  * 3. Development builds (cargo target dir)
+ * 4. The engine downloaded into ~/.codegraph/bin, shared with the other clients
  */
 export function getServerPath(context: vscode.ExtensionContext): ServerInfo {
     // Try pro binary first — check PATH and common locations
@@ -85,13 +86,6 @@ function findCommunityBinary(context: vscode.ExtensionContext): string {
         return packagedPath;
     }
 
-    // Engine downloaded on demand, shared with the CLI and the JetBrains
-    // plugin so a user who installed via any channel is found by all of them.
-    const managedPath = managedEnginePath();
-    if (managedPath && fs.existsSync(managedPath)) {
-        return managedPath;
-    }
-
     // Cargo release build (development)
     const releasePath = context.asAbsolutePath(
         path.join('..', 'crates', 'codegraph-server', 'target', 'release', 'codegraph-server')
@@ -124,6 +118,19 @@ function findCommunityBinary(context: vscode.ExtensionContext): string {
                 return exe;
             }
         }
+    }
+
+    // Engine downloaded on demand, shared with the CLI and the JetBrains
+    // plugin so a user who installed via any channel is found by all of them.
+    //
+    // Last, and after the cargo paths on purpose. Those only exist in a source
+    // checkout, so ordinary installs never reach past this point anyway, while
+    // a contributor who has also downloaded an engine - through npm, the
+    // JetBrains plugin, or an earlier prompt - would otherwise silently run
+    // that one instead of the build they just made.
+    const managedPath = managedEnginePath();
+    if (managedPath && fs.existsSync(managedPath)) {
+        return managedPath;
     }
 
     // A platform with no published engine reaches here too, once the cargo

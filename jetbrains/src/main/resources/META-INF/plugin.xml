@@ -70,6 +70,12 @@
             order="last"/>
     </extensions>
 
+    <projectListeners>
+        <!-- Bounds the code-vision cache: a closed editor's stats are residue. -->
+        <listener class="ai.codegraph.jetbrains.vision.DocumentStatsEvictor"
+                  topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
+    </projectListeners>
+
     <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
         <server id="codegraph"
                 name="CodeGraph"

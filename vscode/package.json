@@ -141,6 +141,11 @@
                 "command": "codegraph.indexDirectory",
                 "title": "Index Directory",
                 "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.downloadEngine",
+                "title": "Download Analysis Engine",
+                "category": "CodeGraph"
             }
         ],
         "configuration": {

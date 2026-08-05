@@ -49,7 +49,14 @@ function hoverEnabled(): boolean {
  * or an explicit {@link refreshCodeLenses} invalidates the entry.
  */
 class DocumentStatsCache {
-    private entries = new Map<string, { version: number; symbols: CodeLensSymbol[] }>();
+    /**
+     * The entry is the *promise*, not the resolved symbols, so concurrent
+     * misses share one request. The lens provider and the hover provider hold
+     * the same cache and both fire on open and on every version bump; caching
+     * only on resolution had each of them walk the whole file's symbols and
+     * their incoming edges under the server's graph read lock.
+     */
+    private entries = new Map<string, { version: number; symbols: Promise<CodeLensSymbol[]> }>();
 
     constructor(private client: LanguageClient) {}
 
@@ -62,30 +69,39 @@ class DocumentStatsCache {
         this.entries.delete(uri.toString());
     }
 
-    async get(document: vscode.TextDocument): Promise<CodeLensSymbol[]> {
+    get(document: vscode.TextDocument): Promise<CodeLensSymbol[]> {
         const key = document.uri.toString();
         const cached = this.entries.get(key);
         if (cached && cached.version === document.version) {
             return cached.symbols;
         }
-        try {
-            // Dispatched via workspace/executeCommand (the server's live custom
-            // command path); the `codegraph/*` LSP request namespace is not
-            // registered on the service.
-            const response = await this.client.sendRequest<DocumentCodeLensResponse>(
-                'workspace/executeCommand',
-                {
-                    command: 'codegraph.getDocumentCodeLens',
-                    arguments: [{ uri: document.uri.toString() }],
-                },
-            );
-            const symbols = response?.symbols ?? [];
-            this.entries.set(key, { version: document.version, symbols });
-            return symbols;
-        } catch {
+        const version = document.version;
+        const symbols = this.fetch(document).catch(() => {
             // Server not ready / not indexed / unsupported file - no lenses.
-            return [];
-        }
+            // The failed entry is dropped rather than remembered: the usual
+            // cause is an engine still starting, and caching the emptiness
+            // would hide the stats until the next edit.
+            if (this.entries.get(key)?.version === version) {
+                this.entries.delete(key);
+            }
+            return [] as CodeLensSymbol[];
+        });
+        this.entries.set(key, { version, symbols });
+        return symbols;
+    }
+
+    private async fetch(document: vscode.TextDocument): Promise<CodeLensSymbol[]> {
+        // Dispatched via workspace/executeCommand (the server's live custom
+        // command path); the `codegraph/*` LSP request namespace is not
+        // registered on the service.
+        const response = await this.client.sendRequest<DocumentCodeLensResponse>(
+            'workspace/executeCommand',
+            {
+                command: 'codegraph.getDocumentCodeLens',
+                arguments: [{ uri: document.uri.toString() }],
+            },
+        );
+        return response?.symbols ?? [];
     }
 }
 

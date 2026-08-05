@@ -66,10 +66,10 @@ class CodeGraphConnectionProvider(private val project: Project) : OSProcessStrea
      * `backend.rs::initialize`.
      *
      * `extensionPath` is a VS Code-era name for "the directory the client owns
-     * for its resources". The engine currently only uses it as the gate that
-     * enables `embeddingModel` and `fullBodyEmbedding`, so it must be present or
-     * full-body embeddings silently turn off. We pass a stable per-client
-     * directory; see the follow-up to un-gate those settings server-side.
+     * for its resources", and it is optional: the engine reads the embedding
+     * settings whether or not it is sent, and falls back to
+     * `~/.codegraph/fastembed_cache` for the model cache. We pass a stable
+     * per-client directory so this plugin's downloads stay its own.
      */
     override fun getInitializationOptions(rootUri: VirtualFile?): Any {
         val settings = CodeGraphSettings.getInstance(project).state
