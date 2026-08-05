@@ -304,7 +304,7 @@
                     "enumDescriptions": [
                         "BGE-Small-EN-v1.5 (384d) — fast, good quality with full-body embeddings. ~127MB download.",
                         "Jina Code V2 (768d) — 6x slower indexing, no quality advantage with full-body embeddings. ~642MB download.",
-                        "Static (model2vec, 256d) — ~100x faster indexing, no ONNX runtime or 1.5GB RAM gate, ~90% of BGE quality in hybrid search. Requires a local model dir (codegraph.staticModelPath or CODEGRAPH_STATIC_MODEL env)."
+                        "Static (model2vec, 256d) — ~100x faster indexing, no ONNX runtime or 1.5GB RAM gate, ~90% of BGE quality in hybrid search. Requires a local model dir in codegraph.staticModelPath."
                     ],
                     "description": "Embedding model for semantic search and code similarity"
                 },
@@ -312,7 +312,7 @@
                     "type": "string",
                     "default": "",
                     "scope": "resource",
-                    "description": "Directory of the model2vec static model (config.json + tokenizer.json + model.safetensors) used when embeddingModel is 'static'. Empty defaults to ~/.codegraph/static_models/jina-code-static-256. Distill one with scripts/distill_static_model.py."
+                    "description": "Directory of the model2vec static model (config.json + tokenizer.json + model.safetensors). Required when embeddingModel is 'static' - the model is not bundled with the extension. Installing @astudioplus/codegraph-mcp from npm puts a copy in ~/.codegraph/static_models/jina-code-static-256, or distill one with scripts/distill_static_model.py."
                 },
                 "codegraph.fullBodyEmbedding": {
                     "type": "boolean",

@@ -366,14 +366,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // vscode-languageclient uses for the LSP transport (stderr → outputChannel).
     const serverOptions: ServerOptions = () => {
         // When the static (model2vec) embedding model is selected, point the
-        // server at the model dir via CODEGRAPH_STATIC_MODEL — the server
-        // resolves the static path from this env, falling back to
-        // ~/.codegraph/static_models/jina-code-static-256.
+        // server at the model dir via CODEGRAPH_STATIC_MODEL. The model is not
+        // bundled in the VSIX (see .vscodeignore), so codegraph.staticModelPath
+        // is effectively required; the bin/ fallback below only resolves for a
+        // locally built extension that staged one there.
         const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
         const cfg = vscode.workspace.getConfiguration('codegraph', wsFolder);
         const spawnEnv = { ...process.env };
         if (cfg.get<string>('embeddingModel') === 'static') {
-            // staticModelPath override, else the model bundled next to the binary.
+            // staticModelPath override, else the legacy locally-built bin/ dir.
             const staticModelPath = cfg.get<string>('staticModelPath')
                 || path.join(context.extensionPath, 'bin', 'jina-code-static-256');
             spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
