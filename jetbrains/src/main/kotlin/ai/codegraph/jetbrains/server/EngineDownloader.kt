@@ -18,11 +18,11 @@ import java.util.Locale
  * Fetches the engine for this platform into the managed install directory.
  *
  * The plugin does not bundle engines: the JetBrains Marketplace serves one
- * artifact to every platform, so bundling all four would mean a ~120 MB
- * download for every user to obtain the ~30 MB they can run. The alternative
- * for users without Node is worse - install a 498 MB npm package for one
- * binary - so the engine is fetched directly from the release that
- * `scripts/publish-release-assets.sh` produces.
+ * artifact to every platform, so bundling every published engine would mean a
+ * download several times the size of the one a given user can run. Sending
+ * users to the npm package instead is not an answer either: it needs Node, and
+ * it fetches the same engine from the same release. So the engine is fetched
+ * directly from the release that `scripts/publish-release-assets.sh` produces.
  *
  * Downloads are verified against the checksum published beside each asset. An
  * engine is a native binary that runs with the user's permissions; TLS says

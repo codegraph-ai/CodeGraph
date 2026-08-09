@@ -5,15 +5,19 @@
 # Publish the per-platform engine binaries as GitHub release assets.
 #
 # No channel bundles engines any more. Shipping all four platform binaries meant
-# a 118 MB VSIX and a 498 MB npm package for the ~30 MB a given user can
+# a 118 MB VSIX and a 498 MB npm package for the one binary a given user can
 # actually run, and the JetBrains Marketplace cannot ship per-platform artifacts
 # at all. The binaries are published here once, and each client fetches only
 # what it needs - which makes this release the single source of engines, so a
 # missing or mistagged one leaves every channel with no engine at all.
 #
 # This does not build anything. It uploads what ./scripts/package-*.sh already
-# expect to find in vscode/bin/, so it slots in after the existing
-# cross-platform build (see cross-platform-builds.md).
+# expect to find in vscode/bin/, so it slots in after the existing cross-platform
+# build. Each platform is built natively on its own host; those hosts are
+# internal machines, so they are recorded in the maintainer's private build notes
+# rather than here. The one exception is linux-arm64, which has no build host of
+# its own: ./scripts/build-linux-arm64.sh builds it in a container and stages and
+# stamps it into vscode/bin/ itself.
 #
 # Usage:
 #   ./scripts/publish-release-assets.sh              # stage + verify only
@@ -39,12 +43,25 @@ if [ -z "$VERSION" ]; then
 fi
 TAG="v${VERSION}"
 
-BINARIES=(
-  "codegraph-server-darwin-arm64"
-  "codegraph-server-darwin-x64"
-  "codegraph-server-linux-x64"
-  "codegraph-server-win32-x64.exe"
-)
+# Read the platform list from bin/fetch-engine.js instead of repeating it. That
+# module is what every client resolves against, so a copy here can publish a set
+# the clients never ask for, or omit one they do - and the failure only shows up
+# as an empty install on the platform nobody tested. A `while read` loop rather
+# than `mapfile`, which needs bash 4 and is absent from macOS's bash 3.2.
+FETCH_ENGINE="$REPO_ROOT/mcp-package/bin/fetch-engine.js"
+BINARIES=()
+while IFS= read -r asset; do
+  [ -n "$asset" ] && BINARIES+=("$asset")
+done < <(node -e "
+  for (const a of require('$FETCH_ENGINE').PUBLISHED_BINARIES) console.log(a);
+" 2>/dev/null)
+
+if [ "${#BINARIES[@]}" -eq 0 ]; then
+  echo "ERROR: could not read PUBLISHED_BINARIES from $FETCH_ENGINE." >&2
+  echo "That list is what the clients fetch by, so publishing without it would" >&2
+  echo "guess at the platform set." >&2
+  exit 1
+fi
 
 # The Windows engine loads this at runtime. Shipping the exe without it gives
 # users a download that succeeds and then fails at startup, which is a worse
@@ -107,14 +124,42 @@ echo
 #
 # Provenance is recorded where it is knowable rather than guessed here: each
 # binary is stamped into MANIFEST by the build that produced it, on the host
-# that could actually run `--version`. Scraping version strings out of a
+# that could actually run `--info`. Scraping version strings out of a
 # cross-platform image was tried and is not reliable - the engine does not
 # store its version as a standalone string on every target, so good binaries
 # were reported as stale.
 MANIFEST="$VSCODE_BIN/BUILD-MANIFEST"
 
+# The binary name is the last field, so a line whose second field is that name
+# is one written before the manifest carried a commit at all.
+manifest_line() {
+  [ -f "$MANIFEST" ] || return 0
+  awk -v b="$1" '$NF == b { print; exit }' "$MANIFEST"
+}
+
+manifest_version() {
+  local line ver
+  line="$(manifest_line "$1")"
+  if [ -n "$line" ]; then
+    read -r ver _ <<< "$line"
+    printf '%s\n' "$ver"
+  fi
+}
+
+manifest_commit() {
+  local line ver commit
+  line="$(manifest_line "$1")"
+  if [ -n "$line" ]; then
+    read -r ver commit _ <<< "$line"
+    if [ "$commit" != "$1" ]; then
+      printf '%s\n' "$commit"
+    fi
+  fi
+}
+
 missing=0
 stale=0
+COMMITS=()
 for bin in "${BINARIES[@]}" "$WINDOWS_SIDECAR"; do
   if [ ! -f "$VSCODE_BIN/$bin" ]; then
     printf '  ✗ %-36s MISSING\n' "$bin"
@@ -130,12 +175,19 @@ for bin in "${BINARIES[@]}" "$WINDOWS_SIDECAR"; do
     continue
   fi
 
-  if [ -f "$MANIFEST" ] && grep -qxF "$VERSION  $bin" "$MANIFEST"; then
-    printf '  ✓ %-36s %s  (%s)\n' "$bin" "$size" "$VERSION"
-  else
-    recorded="$(grep -F "  $bin" "$MANIFEST" 2>/dev/null | awk '{print $1}' | tr '\n' ' ' || true)"
-    printf '  ✗ %-36s %s  NOT STAMPED %s\n' "$bin" "$size" "${recorded:+(manifest says: $recorded)}"
+  recorded_version="$(manifest_version "$bin")"
+  recorded_commit="$(manifest_commit "$bin")"
+
+  if [ "$recorded_version" != "$VERSION" ]; then
+    printf '  ✗ %-36s %s  NOT STAMPED %s\n' \
+      "$bin" "$size" "${recorded_version:+(manifest says: $recorded_version)}"
     stale=1
+  elif [ -z "$recorded_commit" ]; then
+    printf '  ✗ %-36s %s  NO COMMIT RECORDED\n' "$bin" "$size"
+    stale=1
+  else
+    printf '  ✓ %-36s %s  (%s @ %s)\n' "$bin" "$size" "$VERSION" "$recorded_commit"
+    COMMITS+=("$recorded_commit")
   fi
 done
 
@@ -146,8 +198,8 @@ ERROR: not every platform artifact is present in vscode/bin/.
 
 A partial release is worse than none: a client that resolves its own platform
 and finds nothing has no way to tell "not built yet" from "never supported".
-Build the missing platforms first - see cross-platform-builds.md for the
-per-platform hosts - then re-run.
+Build the missing platforms first, each on its own build host - except
+linux-arm64, which ./scripts/build-linux-arm64.sh builds here - then re-run.
 EOF
   exit 1
 fi
@@ -155,19 +207,64 @@ fi
 if [ "$stale" -ne 0 ]; then
   cat >&2 <<EOF
 
-ERROR: at least one binary is not stamped as $VERSION in
+ERROR: at least one binary is not stamped as $VERSION with a source commit in
 $VSCODE_BIN/BUILD-MANIFEST.
 
 vscode/bin/ is not cleaned between releases, so an unstamped binary is assumed
 to be left over from an earlier one. Rebuild it and record it with:
 
-  ./scripts/stamp-binary.sh <name> <version>
+  ./scripts/stamp-binary.sh <name> <version> [commit]
+
+A binary stamped with no commit was recorded before the manifest carried one;
+re-stamp it, from the host that can run it or with the commit stated, so the
+set can be checked for agreement.
 
 Publishing an unverified binary would produce a release whose checksums are
 perfectly valid for the wrong build - the hardest kind of mistake to notice.
 EOF
   exit 1
 fi
+
+# ------------------------------------------------------ one commit, all assets
+# A shared version number is not a shared source. Each platform is built on its
+# own host, so five binaries can all be stamped $VERSION and still come from
+# five different trees - and then a bug reported against $VERSION on Linux and
+# one reported against $VERSION on macOS describe different software under the
+# same name. Compared by prefix: each host's git abbreviates commits to its own
+# length, so the same commit legitimately appears as 7 and 12 hex digits.
+ref_commit=""
+for c in "${COMMITS[@]}"; do
+  if [ -z "$ref_commit" ] || [ "${#c}" -lt "${#ref_commit}" ]; then
+    ref_commit="$c"
+  fi
+done
+
+commit_mismatch=0
+for c in "${COMMITS[@]}"; do
+  case "$c" in "$ref_commit"*) ;; *) commit_mismatch=1 ;; esac
+done
+
+if [ "$commit_mismatch" -ne 0 ]; then
+  {
+    echo
+    echo "ERROR: the staged binaries were not all built from the same commit."
+    echo
+    for bin in "${BINARIES[@]}"; do
+      printf '  %-36s %s\n' "$bin" "$(manifest_commit "$bin")"
+    done
+    cat <<EOF
+
+Everything in one release has to come from one tree, or the tag names a build
+that never existed as a whole. Rebuild the assets that disagree from the commit
+being released, each on its own build host, and re-stamp them with
+./scripts/stamp-binary.sh.
+EOF
+  } >&2
+  exit 1
+fi
+
+echo
+printf '  all %d engine binaries built from %s\n' "${#COMMITS[@]}" "$ref_commit"
 
 # ---------------------------------------------------------------- checksums
 # An engine binary runs on the user's machine with their permissions, so the

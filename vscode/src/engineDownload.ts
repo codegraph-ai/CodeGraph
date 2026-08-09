@@ -22,7 +22,7 @@ import * as vscode from 'vscode';
 // The canonical implementation lives with the npm package; esbuild follows the
 // path and inlines it into out/extension.js, so both JavaScript channels ship
 // the same code rather than two implementations that drift.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const fetchEngine = require('../../mcp-package/bin/fetch-engine.js');
 
 /** Where downloaded engines live, shared with the CLI and the JetBrains plugin. */
@@ -107,7 +107,7 @@ export async function downloadEngine(
  * built against a newer engine keeps talking to the old one.
  *
  * Offered rather than done, for the same reason `downloadEngine` is: this is
- * ~30 MB of native binary that will run with the user's permissions. It is also
+ * ~120 MB of native binary that will run with the user's permissions. It is also
  * deliberately not awaited by the caller - the engine on disk still works, so
  * blocking activation behind a transfer would cost every surface the extension
  * provides for an update that is not urgent.

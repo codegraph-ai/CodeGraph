@@ -38,7 +38,7 @@ class IndexingStartupActivity : ProjectActivity {
 
         val resolved = CodeGraphServerResolver.resolve(project.basePath, settings.serverPath)
         if (resolved == null) {
-            // Offered rather than done automatically: this is a ~30 MB download
+            // Offered rather than done automatically: this is a ~120 MB download
             // of a native binary that will run with the user's permissions, and
             // starting that unasked on project open is not a decision the
             // plugin should make for them.

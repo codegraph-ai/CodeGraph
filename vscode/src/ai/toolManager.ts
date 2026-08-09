@@ -688,7 +688,7 @@ export class CodeGraphToolManager {
 
                             try {
                                 references = await Promise.race([refPromise, timeoutPromise]);
-                            } catch (timeoutErr) {
+                            } catch {
                                 // Reference search timed out, continue without references
                                 console.log('[CodeGraph] Reference search timed out, returning partial results');
                             }

@@ -27,6 +27,7 @@ const {
   ensureEngine,
   requiredAssets,
   platformBinaryName,
+  PUBLISHED_BINARIES,
   redirectTarget,
   installedVersion,
   compareVersions,
@@ -103,6 +104,39 @@ async function run() {
       for (const asset of requiredAssets()) {
         check(fs.existsSync(path.join(dir, asset)), `${asset} is installed`);
       }
+    } finally {
+      release.server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // --- an arm64 linux machine installs the arm64 engine ----------------
+  // The whole install, not just the name mapping: before linux-arm64 was
+  // published this threw, and the failure worth guarding against now is the
+  // quiet one - the x64 asset is served alongside, so a rule that fell back to
+  // it would install cleanly here and only fail when the user tried to run it.
+  {
+    const dir = scratch();
+    const release = await startRelease({
+      "codegraph-server-linux-arm64": { content: "arm64 engine" },
+      "codegraph-server-linux-x64": { content: "x64 engine" },
+    });
+    try {
+      const { binary, fetched } = await ensureEngine(VERSION, dir, {
+        platform: "linux",
+        arch: "arm64",
+        baseUrl: release.baseUrl,
+      });
+      check(
+        path.basename(binary) === "codegraph-server-linux-arm64",
+        "an arm64 linux install fetches the arm64 engine"
+      );
+      check(fs.readFileSync(binary, "utf8") === "arm64 engine", "and it is the arm64 build");
+      check(
+        fetched.length === 1 && !fs.existsSync(path.join(dir, "codegraph-server-linux-x64")),
+        "and nothing else, least of all the x64 build"
+      );
+      check(installedVersion(dir) === VERSION, "and the release it came from is recorded");
     } finally {
       release.server.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -412,8 +446,12 @@ async function run() {
   // --- only published platform/arch pairs resolve to an asset ----------
   // An x64 asset handed to an arm64 Linux machine downloads and chmods cleanly
   // and then fails to exec, which is far harder to read than "not published".
-  // Windows on ARM is the exception: it emulates x64, so the x64 build runs.
-  check(platformBinaryName("linux", "arm64") === null, "linux-arm64 has no published engine");
+  // Linux arm64 now has its own build, so it must resolve to that one and never
+  // to the x64 asset. Windows on ARM stays the exception: it emulates x64.
+  check(
+    platformBinaryName("linux", "arm64") === "codegraph-server-linux-arm64",
+    "linux-arm64 resolves to its own engine, not the x64 one"
+  );
   check(
     platformBinaryName("win32", "arm64") === "codegraph-server-win32-x64.exe",
     "win32-arm64 uses the x64 engine, which Windows emulates"
@@ -427,7 +465,30 @@ async function run() {
     "darwin-arm64 does"
   );
   check(platformBinaryName("linux", "x64") === "codegraph-server-linux-x64", "linux-x64 does");
-  check(requiredAssets("linux", "arm64").length === 0, "an unpublished pair needs no assets");
+  check(
+    requiredAssets("linux", "arm64").length === 1 &&
+      requiredAssets("linux", "arm64")[0] === "codegraph-server-linux-arm64",
+    "linux-arm64 needs the engine and no sidecar"
+  );
+  // A platform with no build must still resolve to nothing rather than to
+  // someone else's binary.
+  check(platformBinaryName("linux", "riscv64") === null, "an unbuilt arch resolves to nothing");
+  check(requiredAssets("linux", "riscv64").length === 0, "an unpublished pair needs no assets");
+  // Every name the mapping can return has to be a name the release publishes,
+  // or an install fetches a 404.
+  for (const [p, a] of [
+    ["darwin", "arm64"],
+    ["darwin", "x64"],
+    ["linux", "arm64"],
+    ["linux", "x64"],
+    ["win32", "x64"],
+  ]) {
+    const name = platformBinaryName(p, a);
+    check(
+      PUBLISHED_BINARIES.includes(name),
+      `${p}-${a} resolves to a published asset (${name})`
+    );
+  }
 
   console.log("");
   console.log(`${failures} failure(s)`);

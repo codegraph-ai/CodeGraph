@@ -64,9 +64,12 @@ class EngineDownloaderTest : BasePlatformTestCase() {
         ResolverEnvironment(homeDir = home, pathEntries = emptyList(), osName = os, osArch = arch)
 
     /**
-     * Windows and Linux are published for x64 only, so an arm64 environment
-     * there is an unsupported platform rather than a machine that downloads the
-     * x64 build.
+     * Defaults to arm64 because that is the machine these tests describe: macOS
+     * and Linux each publish their own arm64 engine, and Windows on ARM is
+     * served the x64 one it emulates. The Windows cases below pass `amd64`
+     * explicitly so they read as the platform they are testing rather than
+     * relying on that fallback. Which name each pair resolves to is
+     * `CodeGraphServerResolverTest`'s subject, not this file's.
      */
     private fun downloader(os: String, arch: String = "aarch64") =
         EngineDownloader(env(os, arch), baseUrl())
@@ -78,6 +81,21 @@ class EngineDownloaderTest : BasePlatformTestCase() {
         val path = downloader("Mac OS X").download("0.19.1")
 
         assertEquals(String(content), Files.readString(path))
+        assertTrue("the engine must be executable", path.toFile().canExecute())
+    }
+
+    fun `test an arm64 linux ide installs the arm64 engine`() {
+        // The platform this channel gained. Both Linux assets are published, so
+        // a mapping that fell back to x64 would install cleanly here and only
+        // fail when the IDE tried to start the engine - which is why the whole
+        // download is exercised and not just the name it resolves to.
+        publish("0.20.1", "codegraph-server-linux-arm64", "arm64 engine".toByteArray())
+        publish("0.20.1", "codegraph-server-linux-x64", "x64 engine".toByteArray())
+
+        val path = downloader("Linux").download("0.20.1")
+
+        assertEquals("codegraph-server-linux-arm64", path.fileName.toString())
+        assertEquals("arm64 engine", Files.readString(path))
         assertTrue("the engine must be executable", path.toFile().canExecute())
     }
 

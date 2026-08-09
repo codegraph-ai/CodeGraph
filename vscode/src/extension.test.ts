@@ -7,7 +7,6 @@ import {
   reset,
   getCalls,
   clearAllMocks,
-  vscode,
 } from '@vsforge/shim';
 import { mockConfiguration } from '@vsforge/test';
 

@@ -39,8 +39,8 @@ the dependency ever becomes a problem.
 ## Engine resolution
 
 The plugin does **not** bundle engine binaries, and neither does any other
-client any more: bundling all four platforms meant a ~120 MB download for the
-one binary a given user can actually run.
+client any more: bundling every platform meant a download several times the size
+of the one binary a given user can actually run.
 The engine is published once as GitHub release assets and each client fetches
 what its platform needs, into the shared `~/.codegraph/bin`.
 

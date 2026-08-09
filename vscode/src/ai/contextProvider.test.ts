@@ -3,7 +3,6 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
-  setMock,
   reset,
   clearAllMocks,
 } from '@vsforge/shim';

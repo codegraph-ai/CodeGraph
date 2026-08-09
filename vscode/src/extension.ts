@@ -41,7 +41,6 @@ let lastExitSignal: string | null = null;
 const MAX_RAPID_CRASHES = 3;
 const RAPID_CRASH_WINDOW_MS = 60_000;
 let rapidCrashTimestamps: number[] = [];
-let crashLoopDetected = false;
 // Set true right before an intentional server stop (crash-loop give-up,
 // deactivate) so the onDidChangeState→Stopped that follows isn't logged
 // as a crash. Consume-once: the handler resets it after skipping.
@@ -330,7 +329,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     //
     // Not awaited: the engine on disk still runs, and holding activation - and
     // with it the language client, the tree views and the lenses - behind a
-    // 30 MB transfer on a slow network is a far worse trade than one release of
+    // ~120 MB transfer on a slow network is a far worse trade than one release of
     // drift. The lifecycle callbacks read `client` lazily for the same reason:
     // by the time the user answers the prompt it has been created and started.
     if (serverInfo.path === managedEnginePath()) {
@@ -468,7 +467,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         else if (lower.includes('spawn')) errorHint = 'spawn_error';
         else {
             // Last resort: first 80 chars, strip anything that looks like a path
-            errorHint = errStr.substring(0, 80).replace(/[\/\\][^\s:]+/g, '<path>');
+            errorHint = errStr.substring(0, 80).replace(/[/\\][^\s:]+/g, '<path>');
         }
 
         reporter.activationServerStartResult({
@@ -518,7 +517,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 );
 
                 if (rapidCrashTimestamps.length >= MAX_RAPID_CRASHES) {
-                    crashLoopDetected = true;
                     expectedShutdown = true;
                     client.stop().catch(() => {});
                     vscode.window
@@ -531,7 +529,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                         )
                         .then((choice) => {
                             if (choice === 'Retry') {
-                                crashLoopDetected = false;
                                 rapidCrashTimestamps = [];
                                 serverRestartCount = 0;
                                 client.start().catch(() => {});

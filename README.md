@@ -405,6 +405,42 @@ A single Rust binary serves both MCP and LSP protocols.
 
 ---
 
+## Supported platforms
+
+The engine is a native binary, downloaded for your platform on first run.
+
+| Platform | Architectures |
+|---|---|
+| macOS | Apple Silicon (arm64) and Intel (x64) |
+| Linux | x64 and arm64 |
+| Windows | x64 (Windows on ARM runs the x64 build under emulation) |
+
+**Linux requires glibc 2.30 or newer *and* a libstdc++ from GCC 11 or newer
+(`GLIBCXX_3.4.29`).** The second requirement is the binding one, and it is not
+implied by the first — the engine embeds ONNX Runtime, which is built with
+GCC 11.
+
+| Runs | Does not run |
+|---|---|
+| SLES 15 SP4 | Ubuntu 20.04 |
+| Ubuntu 22.04 and newer | Debian 11 |
+| Debian 12 and newer | RHEL / CentOS 8 |
+| RHEL 9 and newer | Amazon Linux 2 |
+| Amazon Linux 2023 | |
+
+Both Linux architectures have identical requirements. If the engine exits
+immediately with a message like
+
+```
+version `GLIBCXX_3.4.29' not found (required by codegraph-server)
+```
+
+the distribution's C++ runtime is older than the engine needs; installing a
+newer `libstdc++` (for example RHEL 8's `gcc-toolset-11`) resolves it without
+upgrading the distribution.
+
+---
+
 ## Building from Source
 
 ```bash

@@ -9,7 +9,6 @@ import {
   clearAllMocks,
 } from '@vsforge/shim';
 import {
-  mockActiveTextEditor,
   mockConfiguration,
   mockQuickPickSelection,
 } from '@vsforge/test';
