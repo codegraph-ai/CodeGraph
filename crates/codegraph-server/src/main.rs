@@ -14,11 +14,38 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // glibc 2.31 compat: __libc_single_threaded was added in glibc 2.32 but ONNX
-// Runtime references it. Provide a fallback for SLES 15 SP4 and similar.
-// On newer glibc the real symbol shadows this at runtime.
+// Runtime references it, so a build for SLES 15 SP4 and similar needs a
+// definition to link against.
+//
+// The storage must be WRITABLE. This was previously `pub static ... : u8 = 0`,
+// which lands in .rodata, and the comment claimed "on newer glibc the real
+// symbol shadows this at runtime" - the opposite of how ELF resolves it. A
+// definition in the executable takes precedence over the one in libc, and on
+// aarch64 this symbol is also emitted into .dynsym, so glibc bound its own
+// startup write of the flag to our read-only byte and took SIGSEGV before
+// main(): every invocation died, including `--version` and `--help`
+// (issue #15). x86_64 escaped only because the symbol is not dynamically
+// exported there, so glibc kept using its own copy.
+//
+// glibc owns the value: it sets the flag at startup and clears it when a
+// thread is created. We only supply the storage, and never read it. On a glibc
+// too old to maintain it, the byte stays 0, which is the conservative
+// "not single threaded" answer.
 #[cfg(target_os = "linux")]
-#[no_mangle]
-pub static __libc_single_threaded: u8 = 0;
+mod glibc_compat {
+    use std::cell::UnsafeCell;
+
+    #[repr(transparent)]
+    pub struct SingleThreaded(UnsafeCell<u8>);
+
+    // SAFETY: glibc is the only writer, from its own startup and
+    // thread-creation paths, and this process never reads the byte. The
+    // UnsafeCell is what places it in writable memory rather than .rodata.
+    unsafe impl Sync for SingleThreaded {}
+
+    #[no_mangle]
+    pub static __libc_single_threaded: SingleThreaded = SingleThreaded(UnsafeCell::new(0));
+}
 
 #[derive(Parser)]
 #[command(name = "codegraph-server")]
