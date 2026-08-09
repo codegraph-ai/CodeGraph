@@ -94,6 +94,45 @@ impl HeadingNode {
     }
 }
 
+/// Stable 64-bit FNV-1a over a source path.
+///
+/// Deliberately not `DefaultHasher`: this value is baked into a persisted
+/// RocksDB key, and `DefaultHasher`'s output is explicitly not guaranteed
+/// stable across Rust releases. A toolchain upgrade would silently start
+/// minting different ids for the same file. FNV-1a is a handful of lines,
+/// so it costs no dependency and cannot change under us.
+fn source_hash(source_file: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in source_file.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// Build a chunk id that is unique across *sources*, not just within one.
+///
+/// The id is the RocksDB key (`doc:{id}` and `docvec:{id}`), the
+/// `chunk_cache` key, and the HNSW point id - all of which are a single
+/// global namespace. A bare per-file counter therefore minted `doc-0001`
+/// for every document, so indexing a second file wrote straight over the
+/// first one's chunks: they vanished from `list_doc_sources` and
+/// `search_docs` while indexing still reported success.
+///
+/// Loss was partial and size-dependent, which is what made it look
+/// intermittent: a 3-chunk file overwrote only the first 3 chunks of a
+/// 10-chunk file, and the 7 survivors then made `remove_source` look like
+/// it had done its job on the next re-index.
+///
+/// The counter keeps `{:04}` for readability but is not truncated to it -
+/// a document with more than 9999 chunks simply produces wider ids, which
+/// stay unique.
+fn chunk_id(source_file: &str, counter: u32) -> String {
+    format!("doc-{:016x}-{:04}", source_hash(source_file), counter)
+}
+
 /// Parse a markdown string into a flat list of `DocChunk`s by:
 ///
 /// 1. Building a heading tree from `#`…`######` markers.
@@ -221,7 +260,7 @@ fn collect_leaf_chunks(
         if word_count <= max_chunk_words {
             *counter += 1;
             out.push(DocChunk {
-                id: format!("doc-{:04}", counter),
+                id: chunk_id(source_file, *counter),
                 source_file: source_file.to_string(),
                 heading_path: path.clone(),
                 title: node.title.clone(),
@@ -235,7 +274,7 @@ fn collect_leaf_chunks(
             for para in paragraphs {
                 *counter += 1;
                 out.push(DocChunk {
-                    id: format!("doc-{:04}", counter),
+                    id: chunk_id(source_file, *counter),
                     source_file: source_file.to_string(),
                     heading_path: path.clone(),
                     title: node.title.clone(),
@@ -254,7 +293,7 @@ fn collect_leaf_chunks(
         if !preamble.is_empty() && preamble.split_whitespace().count() > 10 {
             *counter += 1;
             out.push(DocChunk {
-                id: format!("doc-{:04}", counter),
+                id: chunk_id(source_file, *counter),
                 source_file: source_file.to_string(),
                 heading_path: path.clone(),
                 title: format!("{} (overview)", node.title),
@@ -753,6 +792,76 @@ Details B.
         for c in &chunks {
             assert_eq!(c.heading_path, vec!["Section"]);
         }
+    }
+
+    /// The regression behind issue #16. Chunk ids are the RocksDB key, the
+    /// cache key and the HNSW point id, so two sources minting the same id
+    /// meant the second document silently overwrote the first.
+    #[test]
+    fn chunk_ids_do_not_collide_across_sources() {
+        let a = parse_markdown("# Alpha\n\nunique-alpha-marker\n", "/tmp/a.md", 500);
+        let b = parse_markdown("# Beta\n\nunique-beta-marker\n", "/tmp/b.md", 500);
+        assert!(!a.is_empty() && !b.is_empty(), "both docs should chunk");
+
+        for chunk_a in &a {
+            for chunk_b in &b {
+                assert_ne!(
+                    chunk_a.id, chunk_b.id,
+                    "ids from different sources must not collide: {} vs {}",
+                    chunk_a.source_file, chunk_b.source_file
+                );
+            }
+        }
+    }
+
+    /// Uniqueness must not come at the cost of stability: `remove_source`
+    /// and re-indexing rely on the same file producing the same ids, and
+    /// the ids are persisted, so they must survive a restart unchanged.
+    #[test]
+    fn chunk_ids_are_stable_for_the_same_source() {
+        let md = "# Alpha\n\n## One\nbody one\n\n## Two\nbody two\n";
+        let first = parse_markdown(md, "/tmp/a.md", 500);
+        let second = parse_markdown(md, "/tmp/a.md", 500);
+
+        let first_ids: Vec<&str> = first.iter().map(|c| c.id.as_str()).collect();
+        let second_ids: Vec<&str> = second.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(first_ids, second_ids);
+    }
+
+    /// A many-chunk document must not collide with a few-chunk one on the
+    /// low counter values. This is the shape that made the loss look
+    /// intermittent: only the first N chunks of the larger file were taken.
+    #[test]
+    fn large_and_small_sources_do_not_share_low_counters() {
+        let big: String = (1..=12)
+            .map(|i| format!("## Section {}\nbody {}\n\n", i, i))
+            .collect();
+        let big_chunks = parse_markdown(&big, "/tmp/big.md", 500);
+        let small_chunks = parse_markdown("## Only\nbody\n", "/tmp/small.md", 500);
+
+        assert!(
+            big_chunks.len() > small_chunks.len(),
+            "sanity: sizes differ"
+        );
+        let big_ids: std::collections::HashSet<&str> =
+            big_chunks.iter().map(|c| c.id.as_str()).collect();
+        for chunk in &small_chunks {
+            assert!(
+                !big_ids.contains(chunk.id.as_str()),
+                "small doc id {} collides with the large doc",
+                chunk.id
+            );
+        }
+    }
+
+    /// The hash is persisted inside every chunk id, so a change to it
+    /// orphans every chunk already on disk. Pin the values.
+    #[test]
+    fn source_hash_is_the_pinned_fnv1a() {
+        // FNV-1a/64 reference vectors.
+        assert_eq!(source_hash(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(source_hash("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(source_hash("foobar"), 0x8594_4171_f739_67e8);
     }
 
     #[test]
