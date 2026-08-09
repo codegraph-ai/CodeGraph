@@ -330,7 +330,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     //
     // Not awaited: the engine on disk still runs, and holding activation - and
     // with it the language client, the tree views and the lenses - behind a
-    // 30 MB transfer on a slow network is a far worse trade than one release of
+    // ~120 MB transfer on a slow network is a far worse trade than one release of
     // drift. The lifecycle callbacks read `client` lazily for the same reason:
     // by the time the user answers the prompt it has been created and started.
     if (serverInfo.path === managedEnginePath()) {

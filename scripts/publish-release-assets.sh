@@ -5,17 +5,19 @@
 # Publish the per-platform engine binaries as GitHub release assets.
 #
 # No channel bundles engines any more. Shipping all four platform binaries meant
-# a 118 MB VSIX and a 498 MB npm package for the ~30 MB a given user can
+# a 118 MB VSIX and a 498 MB npm package for the one binary a given user can
 # actually run, and the JetBrains Marketplace cannot ship per-platform artifacts
 # at all. The binaries are published here once, and each client fetches only
 # what it needs - which makes this release the single source of engines, so a
 # missing or mistagged one leaves every channel with no engine at all.
 #
 # This does not build anything. It uploads what ./scripts/package-*.sh already
-# expect to find in vscode/bin/, so it slots in after the existing
-# cross-platform build (see cross-platform-builds.md). The one exception is
-# linux-arm64, which has no build host of its own: ./scripts/build-linux-arm64.sh
-# builds it in a container and stages and stamps it into vscode/bin/ itself.
+# expect to find in vscode/bin/, so it slots in after the existing cross-platform
+# build. Each platform is built natively on its own host; those hosts are
+# internal machines, so they are recorded in the maintainer's private build notes
+# rather than here. The one exception is linux-arm64, which has no build host of
+# its own: ./scripts/build-linux-arm64.sh builds it in a container and stages and
+# stamps it into vscode/bin/ itself.
 #
 # Usage:
 #   ./scripts/publish-release-assets.sh              # stage + verify only
@@ -196,8 +198,8 @@ ERROR: not every platform artifact is present in vscode/bin/.
 
 A partial release is worse than none: a client that resolves its own platform
 and finds nothing has no way to tell "not built yet" from "never supported".
-Build the missing platforms first - see cross-platform-builds.md for the
-per-platform hosts - then re-run.
+Build the missing platforms first, each on its own build host - except
+linux-arm64, which ./scripts/build-linux-arm64.sh builds here - then re-run.
 EOF
   exit 1
 fi
@@ -254,8 +256,8 @@ if [ "$commit_mismatch" -ne 0 ]; then
 
 Everything in one release has to come from one tree, or the tag names a build
 that never existed as a whole. Rebuild the assets that disagree from the commit
-being released - see cross-platform-builds.md for the per-platform hosts - and
-re-stamp them with ./scripts/stamp-binary.sh.
+being released, each on its own build host, and re-stamp them with
+./scripts/stamp-binary.sh.
 EOF
   } >&2
   exit 1

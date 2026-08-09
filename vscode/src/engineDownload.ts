@@ -107,7 +107,7 @@ export async function downloadEngine(
  * built against a newer engine keeps talking to the old one.
  *
  * Offered rather than done, for the same reason `downloadEngine` is: this is
- * ~30 MB of native binary that will run with the user's permissions. It is also
+ * ~120 MB of native binary that will run with the user's permissions. It is also
  * deliberately not awaited by the caller - the engine on disk still works, so
  * blocking activation behind a transfer would cost every surface the extension
  * provides for an update that is not urgent.
