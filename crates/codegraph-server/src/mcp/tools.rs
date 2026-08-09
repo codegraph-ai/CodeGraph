@@ -9,7 +9,7 @@
 use super::protocol::{PropertySchema, Tool, ToolInputSchema};
 use std::collections::HashMap;
 
-/// Scoped tool surface selector. The full 32-tool MCP surface is large
+/// Scoped tool surface selector. The full 42-tool MCP surface is large
 /// enough that agents pay non-trivial prompt-context cost listing them;
 /// a profile lets the user expose only the subset relevant to their
 /// session (memory-heavy notetaking, structural refactoring, etc.).

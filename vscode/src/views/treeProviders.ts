@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import * as vscode from 'vscode';
-import { LanguageClient, RequestType } from 'vscode-languageclient/node';
+import { LanguageClient } from 'vscode-languageclient/node';
 import { registerMemoryTreeView } from './memoryProvider';
 import type { Reporter } from '../telemetry/reporter';
 
@@ -23,11 +23,6 @@ interface WorkspaceSymbolsResponse {
     symbols: SymbolInfo[];
 }
 
-namespace GetWorkspaceSymbolsRequest {
-    export const type = new RequestType<{ query?: string }, WorkspaceSymbolsResponse, void>(
-        'codegraph/getWorkspaceSymbols'
-    );
-}
 
 /**
  * Tree item for CodeGraph symbols view.
@@ -118,11 +113,16 @@ export class SymbolTreeProvider implements vscode.TreeDataProvider<SymbolTreeIte
             return [];
         }
 
-        // Root level - fetch symbols from server
+        // Root level - fetch symbols from server via the live executeCommand
+        // path (the `codegraph/*` LSP request namespace is not registered on
+        // the service, so the slash RequestType would return method-not-found).
         try {
-            const response = await this.client.sendRequest(
-                GetWorkspaceSymbolsRequest.type,
-                { query: this.filter || undefined }
+            const response = await this.client.sendRequest<WorkspaceSymbolsResponse>(
+                'workspace/executeCommand',
+                {
+                    command: 'codegraph.getWorkspaceSymbols',
+                    arguments: [{ query: this.filter || undefined }],
+                }
             );
 
             this.symbols = response.symbols;

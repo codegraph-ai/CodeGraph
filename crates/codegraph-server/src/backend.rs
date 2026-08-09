@@ -64,6 +64,47 @@ impl Default for CodeGraphConfig {
 }
 
 /// CodeGraph Language Server backend.
+/// Where the client says the workspace lives.
+///
+/// `workspaceFolders` is optional in LSP - a client may send only `rootUri`, or
+/// the deprecated `rootPath`, and several do. Reading only the first left the
+/// memory subsystem uninitialised for those clients, so every memory command
+/// failed for the whole session while indexing and search kept working: a
+/// half-broken server rather than an obvious failure.
+///
+/// An empty `workspaceFolders` list is treated as absent rather than as "no
+/// workspace", so a client that sends `[]` alongside a usable `rootUri` still
+/// works.
+fn workspace_paths_from(params: &InitializeParams) -> Vec<std::path::PathBuf> {
+    let from_folders: Vec<std::path::PathBuf> = params
+        .workspace_folders
+        .iter()
+        .flatten()
+        .filter_map(|folder| folder.uri.to_file_path().ok())
+        .collect();
+    if !from_folders.is_empty() {
+        return from_folders;
+    }
+
+    #[allow(deprecated)]
+    if let Some(path) = params
+        .root_uri
+        .as_ref()
+        .and_then(|uri| uri.to_file_path().ok())
+    {
+        tracing::info!("No workspaceFolders; falling back to rootUri");
+        return vec![path];
+    }
+
+    #[allow(deprecated)]
+    if let Some(path) = params.root_path.as_ref() {
+        tracing::info!("No workspaceFolders or rootUri; falling back to rootPath");
+        return vec![std::path::PathBuf::from(path)];
+    }
+
+    Vec::new()
+}
+
 pub struct CodeGraphBackend {
     /// LSP client for sending notifications.
     pub client: Client,
@@ -87,7 +128,12 @@ pub struct CodeGraphBackend {
     pub query_engine: Arc<QueryEngine>,
 
     /// Memory manager for persistent AI context.
-    pub memory_manager: Arc<MemoryManager>,
+    ///
+    /// Behind a lock because `initialize` replaces it: the embedding model and
+    /// the client's resource directory are only known once the client has sent
+    /// them, and both are baked in when the manager is constructed. Read it
+    /// through [`CodeGraphBackend::memory_manager`].
+    memory_manager: std::sync::RwLock<Arc<MemoryManager>>,
 
     /// Workspace folders
     pub workspace_folders: Arc<RwLock<Vec<std::path::PathBuf>>>,
@@ -142,7 +188,7 @@ impl CodeGraphBackend {
             file_cache: Arc::new(DashMap::new()),
             query_cache: Arc::new(QueryCache::new(1000)),
             symbol_index: Arc::new(SymbolIndex::new()),
-            memory_manager: Arc::new(MemoryManager::new(None)),
+            memory_manager: std::sync::RwLock::new(Arc::new(MemoryManager::new(None))),
             workspace_folders: Arc::new(RwLock::new(Vec::new())),
             file_watcher: Arc::new(Mutex::new(None)),
             branch_watcher: Arc::new(Mutex::new(None)),
@@ -195,7 +241,7 @@ impl CodeGraphBackend {
             file_cache: Arc::new(DashMap::new()),
             query_cache: Arc::new(QueryCache::new(1000)),
             symbol_index: Arc::new(SymbolIndex::new()),
-            memory_manager: Arc::new(MemoryManager::new(None)),
+            memory_manager: std::sync::RwLock::new(Arc::new(MemoryManager::new(None))),
             workspace_folders: Arc::new(RwLock::new(Vec::new())),
             file_watcher: Arc::new(Mutex::new(None)),
             branch_watcher: Arc::new(Mutex::new(None)),
@@ -208,6 +254,23 @@ impl CodeGraphBackend {
         }
     }
 
+    /// The memory manager currently in use.
+    ///
+    /// Hands back a clone of the `Arc` rather than a guard, so no caller can
+    /// hold the lock across an `.await`. A poisoned lock still yields the
+    /// manager: the value is only ever replaced wholesale, so a panic elsewhere
+    /// cannot have left it half-written, and refusing to serve memory commands
+    /// for the rest of the session would be the larger failure.
+    #[must_use]
+    pub fn memory_manager(&self) -> Arc<MemoryManager> {
+        Arc::clone(
+            &self
+                .memory_manager
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
     /// Start the file watcher for the given workspace folders.
     pub async fn start_file_watcher(&self, folders: &[PathBuf]) {
         // Create the file watcher
@@ -215,7 +278,7 @@ impl CodeGraphBackend {
             Arc::clone(&self.graph),
             Arc::clone(&self.parsers),
             self.client.clone(),
-            Arc::clone(&self.memory_manager),
+            self.memory_manager(),
             Arc::clone(&self.symbol_index),
             Arc::clone(&self.query_engine),
             self.embed_queue.clone(),
@@ -283,7 +346,7 @@ impl CodeGraphBackend {
             Arc::clone(&self.query_engine),
             Arc::clone(&self.query_cache),
             self.client.clone(),
-            Arc::clone(&self.memory_manager),
+            self.memory_manager(),
             workspace_root.to_path_buf(),
         ) {
             Ok(watcher) => {
@@ -332,7 +395,7 @@ impl CodeGraphBackend {
         if !node_id_strings.is_empty() {
             let reason = format!("Code changed: {}", path_str);
             if let Err(e) = self
-                .memory_manager
+                .memory_manager()
                 .invalidate_for_code_nodes(&node_id_strings, &reason)
                 .await
             {
@@ -865,6 +928,9 @@ impl LanguageServer for CodeGraphBackend {
         tracing::info!("Initializing CodeGraph LSP server");
 
         // Extract extension path and config from initialization options
+        // Resolve the workspace location before `params` is partially moved.
+        let folder_paths = workspace_paths_from(&params);
+
         let init_opts = params.initialization_options;
 
         let extension_path = init_opts.as_ref().and_then(|opts| {
@@ -902,68 +968,78 @@ impl LanguageServer for CodeGraphBackend {
             *self.config.write().await = config;
         }
 
-        if let Some(path) = extension_path {
-            tracing::info!(
-                "[LSP::initialize] Extension path received: {}",
-                path.display()
-            );
-            // Update memory manager with extension path by replacing it
-            // Read embedding model from init options
-            let raw_model = init_opts
-                .as_ref()
-                .and_then(|opts| opts.get("embeddingModel"));
-            tracing::info!(
-                "[LSP::initialize] embeddingModel from init options: {:?}",
-                raw_model
-            );
+        // Embedding settings are read unconditionally. They used to sit inside
+        // `if let Some(extension_path)`, which made a VS Code-specific path the
+        // gate for two unrelated settings: any client that omitted it silently
+        // lost its embedding-model choice and fell back to signature-only
+        // embeddings, degrading duplicate detection, clustering and similarity
+        // search with nothing in the logs to say why.
+        let raw_model = init_opts
+            .as_ref()
+            .and_then(|opts| opts.get("embeddingModel"));
 
-            let embedding_model = raw_model
-                .and_then(|v| v.as_str())
-                .map(|s| {
-                    tracing::info!("[LSP::initialize] Parsing embedding model string: {:?}", s);
-                    codegraph_memory::EmbeddingBackend::parse(s)
-                })
-                .unwrap_or_default();
+        let embedding_model = raw_model
+            .and_then(|v| v.as_str())
+            .map(codegraph_memory::EmbeddingBackend::parse)
+            .unwrap_or_default();
 
-            tracing::info!(
-                "[LSP::initialize] Selected embedding model: {}",
-                embedding_model.display_name()
-            );
+        tracing::info!(
+            "[LSP::initialize] Embedding model: {} (requested: {:?})",
+            embedding_model.display_name(),
+            raw_model
+        );
 
-            // Safety: We're replacing the Arc contents during initialization before any use
-            let new_manager = Arc::new(MemoryManager::with_model(
-                Some(path.clone()),
-                embedding_model,
-            ));
-            let self_mut = self as *const Self as *mut Self;
-            unsafe {
-                (*self_mut).memory_manager = new_manager;
-            }
-            tracing::info!("[LSP::initialize] MemoryManager updated with extension path and model");
-
-            // Read full-body embedding setting
-            let full_body = init_opts
-                .as_ref()
-                .and_then(|opts| opts.get("fullBodyEmbedding"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            self.query_engine.set_full_body_embedding(full_body);
-            tracing::info!("[LSP::initialize] Full-body embedding: {}", full_body);
+        // `extensionPath` is really "a directory the client owns for its
+        // resources". It is optional; without it fastembed falls back to
+        // ~/.codegraph/fastembed_cache.
+        if let Some(path) = &extension_path {
+            tracing::info!("[LSP::initialize] Client resource path: {}", path.display());
         } else {
-            tracing::error!(
-                "[LSP::initialize] CRITICAL: No extension path provided in initialization options!"
+            tracing::info!(
+                "[LSP::initialize] No client resource path given; fastembed will use ~/.codegraph/fastembed_cache/"
             );
-            tracing::warn!("[LSP::initialize] No extension path provided — fastembed will auto-download model to ~/.codegraph/fastembed_cache/");
         }
 
-        // Store workspace folders
-        if let Some(folders) = params.workspace_folders {
+        // Swapped rather than mutated in place. This used to cast `&self` to
+        // `&mut Self`, which is undefined behaviour however carefully the
+        // timing is argued - and the timing argument no longer held once this
+        // stopped being gated on the client sending `extensionPath`.
+        *self
+            .memory_manager
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(
+            MemoryManager::with_model(extension_path.clone(), embedding_model),
+        );
+
+        let full_body = init_opts
+            .as_ref()
+            .and_then(|opts| opts.get("fullBodyEmbedding"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        self.query_engine.set_full_body_embedding(full_body);
+        tracing::info!("[LSP::initialize] Full-body embedding: {}", full_body);
+
+        // Store workspace folders.
+        //
+        // `workspaceFolders` is optional in LSP: a client may send only
+        // `rootUri` (or the deprecated `rootPath`), and several do. Treating it
+        // as the sole source left the whole memory subsystem uninitialised, so
+        // every memory command failed for the lifetime of the session while
+        // indexing and search worked normally - a confusing half-broken server
+        // rather than an obvious failure. Fall back through the other fields
+        // the client may have given us.
+        {
+            if folder_paths.is_empty() {
+                tracing::warn!(
+                    "[LSP::initialize] No workspace location given (workspaceFolders, rootUri and \
+                     rootPath are all absent); memory and indexing will be unavailable"
+                );
+            }
+
             let mut workspace_folders = self.workspace_folders.write().await;
-            for folder in folders {
-                if let Ok(path) = folder.uri.to_file_path() {
-                    tracing::info!("Workspace folder: {}", path.display());
-                    workspace_folders.push(path);
-                }
+            for path in folder_paths {
+                tracing::info!("Workspace folder: {}", path.display());
+                workspace_folders.push(path);
             }
 
             // Initialize index state with project slug from first workspace
@@ -1012,6 +1088,13 @@ impl LanguageServer for CodeGraphBackend {
                             format!("{p}.findRelatedTests"),
                             format!("{p}.getNodeLocation"),
                             format!("{p}.getWorkspaceSymbols"),
+                            // Backs the inline CodeLens/Code Vision surface.
+                            // VS Code reaches it through the custom-request form
+                            // so it never noticed the omission, but a client that
+                            // gates on ServerCapabilities - LSP4IJ's
+                            // `supportsCommand` does - would see the whole
+                            // surface as unsupported.
+                            format!("{p}.getDocumentCodeLens"),
                             format!("{p}.analyzeComplexity"),
                             format!("{p}.symbolSearch"),
                             format!("{p}.findByImports"),
@@ -1238,7 +1321,7 @@ impl LanguageServer for CodeGraphBackend {
                 )
                 .await;
 
-            match self.memory_manager.initialize(first_folder).await {
+            match self.memory_manager().initialize(first_folder).await {
                 Ok(_) => {
                     tracing::info!("Memory store initialization succeeded");
                     self.client
@@ -1246,7 +1329,7 @@ impl LanguageServer for CodeGraphBackend {
                         .await;
 
                     // Share vector engine with query engine for semantic symbol search
-                    if let Some(engine) = self.memory_manager.get_vector_engine().await {
+                    if let Some(engine) = self.memory_manager().get_vector_engine().await {
                         self.query_engine.set_vector_engine(engine).await;
 
                         let slug = crate::memory::project_slug(first_folder);
@@ -1374,6 +1457,10 @@ impl LanguageServer for CodeGraphBackend {
 
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("Shutting down CodeGraph LSP server");
+        // tower-lsp handles the `exit` notification that follows without waking
+        // its read loop, so the process would otherwise keep running until
+        // stdin closed. See `crate::lsp_exit`.
+        crate::lsp_exit::request_shutdown();
         Ok(())
     }
 
@@ -2009,6 +2096,18 @@ impl LanguageServer for CodeGraphBackend {
                 Ok(Some(serde_json::to_value(response).unwrap()))
             }
 
+            "codegraph.getDocumentCodeLens" => {
+                let args = params.arguments.first().ok_or_else(|| {
+                    tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")
+                })?;
+                let params: crate::handlers::DocumentCodeLensParams =
+                    serde_json::from_value(args.clone()).map_err(|e| {
+                        tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid params: {e}"))
+                    })?;
+                let response = self.handle_get_document_code_lens(params).await?;
+                Ok(Some(serde_json::to_value(response).unwrap()))
+            }
+
             "codegraph.analyzeComplexity" => {
                 let args = params.arguments.first().ok_or_else(|| {
                     tower_lsp::jsonrpc::Error::invalid_params("Missing arguments")
@@ -2419,7 +2518,7 @@ impl LanguageServer for CodeGraphBackend {
                 let ctx = crate::lsp_pro_hooks::ProCommandContext {
                     graph: Arc::clone(&self.graph),
                     query_engine: Arc::clone(&self.query_engine),
-                    memory_manager: Arc::clone(&self.memory_manager),
+                    memory_manager: self.memory_manager(),
                     workspace_folders: self.workspace_folders.read().await.clone(),
                 };
                 if let Some(future) = self.pro_commands.handle_command(other, args, ctx) {
@@ -2588,12 +2687,16 @@ impl CodeGraphBackend {
             tower_lsp::jsonrpc::Error::invalid_params(format!("Failed to build memory: {e}"))
         })?;
 
-        // Store the memory
-        let id = self
-            .memory_manager
-            .put(memory)
-            .await
-            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+        // Store the memory. Report why it failed rather than discarding the
+        // error: a bare "Internal error" with nothing logged makes every store
+        // failure unactionable from a user report, and hid a kind-specific bug
+        // here for some time.
+        let id = self.memory_manager().put(memory).await.map_err(|e| {
+            tracing::error!("[memoryStore] failed to store memory: {e}");
+            let mut err = tower_lsp::jsonrpc::Error::internal_error();
+            err.message = format!("Failed to store memory: {e}").into();
+            err
+        })?;
 
         Ok(crate::handlers::MemoryStoreResponse { id, success: true })
     }
@@ -2635,7 +2738,7 @@ impl CodeGraphBackend {
 
         // Perform search
         let results = self
-            .memory_manager
+            .memory_manager()
             .search(&params.query, &config, &params.code_context)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2679,7 +2782,7 @@ impl CodeGraphBackend {
         params: crate::handlers::MemoryGetParams,
     ) -> Result<Option<crate::handlers::MemoryGetResponse>> {
         let memory = self
-            .memory_manager
+            .memory_manager()
             .get(&params.id)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2790,7 +2893,7 @@ impl CodeGraphBackend {
         &self,
         params: crate::handlers::MemoryInvalidateParams,
     ) -> Result<crate::handlers::MemoryInvalidateResponse> {
-        self.memory_manager
+        self.memory_manager()
             .invalidate(&params.id, "Invalidated via LSP command")
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2805,7 +2908,7 @@ impl CodeGraphBackend {
     ) -> Result<crate::handlers::MemoryListResponse> {
         // Get all current memories
         let all_memories = self
-            .memory_manager
+            .memory_manager()
             .get_all_current()
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2892,7 +2995,7 @@ impl CodeGraphBackend {
 
         // Get existing memory
         let existing = self
-            .memory_manager
+            .memory_manager()
             .get(&params.id)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -2946,14 +3049,14 @@ impl CodeGraphBackend {
 
         // Store updated memory
         let id = self
-            .memory_manager
+            .memory_manager()
             .put(memory)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
 
         // Get the updated memory for response
         let updated = self
-            .memory_manager
+            .memory_manager()
             .get(&id)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -3134,7 +3237,7 @@ impl CodeGraphBackend {
             .unwrap_or_default();
 
         let results = self
-            .memory_manager
+            .memory_manager()
             .search(&query, &config, &code_context)
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -3176,7 +3279,7 @@ impl CodeGraphBackend {
     /// Get memory store statistics.
     pub async fn handle_memory_stats(&self) -> Result<serde_json::Value> {
         let stats = self
-            .memory_manager
+            .memory_manager()
             .stats()
             .await
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -3266,7 +3369,7 @@ impl CodeGraphBackend {
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_request())?;
 
         let mut result = miner
-            .mine_repository(&self.memory_manager, &self.graph, &config)
+            .mine_repository(&self.memory_manager(), &self.graph, &config)
             .await
             .map_err(|e| {
                 tracing::error!("Git mining failed: {}", e);
@@ -3303,7 +3406,7 @@ impl CodeGraphBackend {
                             .ok();
 
                         if let Some(m) = memory {
-                            if let Ok(id) = self.memory_manager.put(m).await {
+                            if let Ok(id) = self.memory_manager().put(m).await {
                                 result.memory_ids.push(id);
                                 hotspots_created += 1;
                             }
@@ -3355,7 +3458,7 @@ impl CodeGraphBackend {
                             .ok();
 
                         if let Some(m) = memory {
-                            if let Ok(id) = self.memory_manager.put(m).await {
+                            if let Ok(id) = self.memory_manager().put(m).await {
                                 result.memory_ids.push(id);
                                 couplings_created += 1;
                             }
@@ -3423,7 +3526,7 @@ impl CodeGraphBackend {
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_request())?;
 
         let result = miner
-            .mine_file(&file_path, &self.memory_manager, &self.graph, &config)
+            .mine_file(&file_path, &self.memory_manager(), &self.graph, &config)
             .await
             .map_err(|e| {
                 tracing::error!("Git mining for file failed: {}", e);
@@ -3587,7 +3690,7 @@ impl CodeGraphBackend {
                 current_only: true,
                 ..Default::default()
             };
-            match self.memory_manager.search(&path_str, &config, &[]).await {
+            match self.memory_manager().search(&path_str, &config, &[]).await {
                 Ok(results) => {
                     let memory_budget = max_tokens * 15 / 100;
                     let mut mem_tokens = 0usize;
@@ -3823,7 +3926,7 @@ impl CodeGraphBackend {
                 current_only: true,
                 ..Default::default()
             };
-            if let Ok(results) = self.memory_manager.search(file, &config, &[]).await {
+            if let Ok(results) = self.memory_manager().search(file, &config, &[]).await {
                 for r in &results {
                     if mem_tokens >= memory_budget {
                         break;
@@ -3890,7 +3993,7 @@ impl CodeGraphBackend {
             current_only: false,
             ..Default::default()
         };
-        if let Ok(mem_results) = self.memory_manager.search(query, &config, &[]).await {
+        if let Ok(mem_results) = self.memory_manager().search(query, &config, &[]).await {
             for r in &mem_results {
                 if let crate::memory::MemorySource::GitHistory { ref commit_hash } = r.memory.source
                 {
@@ -4004,6 +4107,105 @@ mod tests {
     use codegraph::{NodeType, PropertyMap};
     use std::path::Path;
     use tempfile::TempDir;
+
+    mod workspace_paths {
+        use super::*;
+
+        fn params() -> InitializeParams {
+            InitializeParams::default()
+        }
+
+        fn uri(path: &str) -> Url {
+            Url::from_file_path(path).expect("test path must be absolute")
+        }
+
+        #[test]
+        fn prefers_workspace_folders() {
+            let mut p = params();
+            p.workspace_folders = Some(vec![WorkspaceFolder {
+                uri: uri("/tmp/from-folders"),
+                name: "w".into(),
+            }]);
+            #[allow(deprecated)]
+            {
+                p.root_uri = Some(uri("/tmp/from-root-uri"));
+            }
+
+            assert_eq!(
+                workspace_paths_from(&p),
+                vec![std::path::PathBuf::from("/tmp/from-folders")]
+            );
+        }
+
+        #[test]
+        fn falls_back_to_root_uri() {
+            // The case that was broken: a client sending only rootUri got a
+            // server whose memory subsystem never initialised.
+            let mut p = params();
+            #[allow(deprecated)]
+            {
+                p.root_uri = Some(uri("/tmp/from-root-uri"));
+            }
+
+            assert_eq!(
+                workspace_paths_from(&p),
+                vec![std::path::PathBuf::from("/tmp/from-root-uri")]
+            );
+        }
+
+        #[test]
+        fn falls_back_to_root_path_when_that_is_all_there_is() {
+            let mut p = params();
+            #[allow(deprecated)]
+            {
+                p.root_path = Some("/tmp/from-root-path".into());
+            }
+
+            assert_eq!(
+                workspace_paths_from(&p),
+                vec![std::path::PathBuf::from("/tmp/from-root-path")]
+            );
+        }
+
+        #[test]
+        fn empty_folder_list_is_treated_as_absent() {
+            // Some clients send [] together with a usable rootUri; taking the
+            // empty list at face value would strand them.
+            let mut p = params();
+            p.workspace_folders = Some(vec![]);
+            #[allow(deprecated)]
+            {
+                p.root_uri = Some(uri("/tmp/from-root-uri"));
+            }
+
+            assert_eq!(
+                workspace_paths_from(&p),
+                vec![std::path::PathBuf::from("/tmp/from-root-uri")]
+            );
+        }
+
+        #[test]
+        fn keeps_every_workspace_folder() {
+            let mut p = params();
+            p.workspace_folders = Some(vec![
+                WorkspaceFolder {
+                    uri: uri("/tmp/one"),
+                    name: "one".into(),
+                },
+                WorkspaceFolder {
+                    uri: uri("/tmp/two"),
+                    name: "two".into(),
+                },
+            ]);
+
+            assert_eq!(workspace_paths_from(&p).len(), 2);
+        }
+
+        #[test]
+        fn nothing_at_all_yields_no_paths() {
+            assert!(workspace_paths_from(&params()).is_empty());
+        }
+    }
 
     /// Helper to create a test backend with an empty graph
     fn create_test_backend() -> CodeGraphBackend {

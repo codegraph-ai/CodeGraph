@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **45 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **37 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
+CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **42 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **38 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
 
 ## Quick Start
 
@@ -27,13 +27,18 @@ The server indexes the current working directory automatically.
 
 ### VS Code Extension
 
-Install the VSIX:
+Install from the marketplace, or sideload the VSIX:
 
 ```bash
-code --install-extension codegraph-0.14.0.vsix
+code --install-extension codegraph-0.20.0.vsix
 ```
 
-The extension starts the server automatically and registers all tools as Language Model Tools for Copilot.
+One VSIX serves every platform.
+The analysis engine is not bundled: on first activation the extension offers to download the engine built for your platform, verifies it against the published checksum, and installs it into `~/.codegraph/bin`.
+The download is offered rather than performed automatically, because it is a native binary that runs with your permissions - decline it and run **CodeGraph: Download Analysis Engine** from the command palette whenever you are ready.
+
+Once an engine is present, the extension starts it automatically and registers all tools as Language Model Tools for Copilot.
+CodeGraph's Symbols and Memories views live in the CodeGraph activity-bar container, and inline CodeLens above each function reports callers, related tests and complexity (`codegraph.codeLens.enabled` / `codegraph.hover.enabled` turn those off).
 
 ---
 
@@ -45,7 +50,7 @@ The extension starts the server automatically and registers all tools as Languag
 |------|---------|-------------|
 | `--workspace <path>` | current dir | Directories to index (repeatable for multi-project) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
-| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast), `jina-code-v2` (768d, 6x slower), or `static` (model2vec, 256d — ~100× faster indexing, no ONNX, ~90% of BGE quality in hybrid search; the model ships bundled in the extension, so no setup is needed) |
+| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast), `jina-code-v2` (768d, 6x slower), or `static` (model2vec, 256d — ~100× faster indexing, no ONNX, ~90% of BGE quality in hybrid search; needs a local model directory, see `codegraph.staticModelPath` below) |
 | `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
 | `--max-files <n>` | 5000 | Maximum files to index |
 
@@ -56,12 +61,18 @@ The extension starts the server automatically and registers all tools as Languag
   "codegraph.indexOnStartup": true,
   "codegraph.indexPaths": ["/path/to/project-a", "/path/to/project-b"],
   "codegraph.excludePatterns": ["**/cmake-build-debug/**", "**/generated/**"],
-  "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing (model bundled, no path needed)
-  "codegraph.staticModelPath": "",                // optional: override the bundled model2vec dir
+  "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
+  "codegraph.staticModelPath": "",                // only to override the default model2vec model dir
   "codegraph.maxFileSizeKB": 1024,
+  "codegraph.codeLens.enabled": true,             // caller / test / complexity counts above functions
+  "codegraph.hover.enabled": true,                // the same stats on hover
   "codegraph.debug": false
 }
 ```
+
+The static (model2vec) model is not bundled with the extension.
+The engine looks for it in `~/.codegraph/static_models/jina-code-static-256`, which is where the `@astudioplus/codegraph-mcp` npm install puts it, so a model in that location needs no setting at all.
+Set `codegraph.staticModelPath` only to point at a model somewhere else - for instance one you distilled yourself with [`scripts/distill_static_model.py`](https://github.com/codegraph-ai/codegraph/blob/main/scripts/distill_static_model.py).
 
 Full-body embeddings are enabled by default. Function body text is captured at parse time with zero I/O overhead.
 
@@ -69,114 +80,34 @@ Built-in exclusions (always skipped): `node_modules`, `target`, `dist`, `build`,
 
 ---
 
-## Tools (34 community + 27 pro, 17 security)
+## Tools
 
-### Code Analysis (11)
+**42 community tools**, plus 27 more (17 of them security analyzers) in [CodeGraph Pro](https://codegraph.astudioplus.com/pro).
+All names are prefixed with `codegraph_` (e.g. `codegraph_get_ai_context`); tools that target a symbol accept `uri` + `line`, or a `nodeId` from `symbol_search` results.
 
-| Tool | What it does |
-|------|-------------|
-| `get_ai_context` | **Primary context tool.** Intent-aware (explain/modify/debug/test) with token budgeting. Returns source, related symbols, imports, siblings, debug hints. |
-| `get_edit_context` | Everything needed before editing: source + callers + tests + memories + git history |
-| `get_curated_context` | Cross-codebase context for a natural language query ("how does auth work?") |
-| `analyze_impact` | Blast radius prediction — what breaks if you modify, delete, or rename |
-| `analyze_complexity` | Cyclomatic complexity with breakdown (branches, loops, nesting, exceptions, early returns) |
-| `find_circular_deps` | Detect circular import/dependency chains across files |
-| `find_hot_paths` | Most-called functions ranked by transitive caller count |
-| `find_dead_imports` | Find unused imports — modules imported but never referenced |
-| `get_module_summary` | High-level summary of a directory: file count, functions, language breakdown, top complex functions |
-| `search_by_pattern` | Regex search across function bodies, signatures, names, and docstrings |
-| `search_by_error` | Find functions that throw, catch, or handle specific error types |
+| Category | Count | What's in it |
+|---|---|---|
+| Code analysis | 11 | AI/edit/curated context, impact, complexity, circular deps, hot paths, module summary |
+| Search | 8 | Symbol search (BM25 + semantic), by imports/signature/pattern/error, entry points, traversal |
+| Navigation | 3 | Callers, callees, detailed symbol |
+| Memory | 7 | Store, get, search, context, list, invalidate, stats |
+| Documentation | 7 | Markdown indexing, doc search + sources, design verification, architecture docs |
+| Indexing | 3 | Reindex workspace, index files, index directory |
+| PR analysis | 1 | One-call review context for a change |
+| Dead imports / ops structs | 2 | Unused imports, ops-struct callback implementors |
 
-### Code Navigation (13)
-
-| Tool | What it does |
-|------|-------------|
-| `symbol_search` | Find symbols by name or natural language (hybrid BM25 + semantic search) |
-| `get_callers` / `get_callees` | Who calls this? What does it call? (with transitive depth) |
-| `get_detailed_symbol` | Full symbol info: source, callers, callees, complexity |
-| `get_symbol_info` | Quick metadata: signature, visibility, kind |
-| `get_dependency_graph` | File/module import relationships with depth control |
-| `get_call_graph` | Function call chains (callers and callees) |
-| `find_by_imports` | Find files importing a module |
-| `find_by_signature` | Search by param count, return type, modifiers |
-| `find_entry_points` | Main functions, HTTP handlers, CLI commands, event handlers |
-| `find_implementors` | Find all functions registered as ops struct callbacks |
-| `find_related_tests` | Tests that exercise a given function |
-| `traverse_graph` | Custom graph traversal with edge/node type filters |
-
-### Indexing (3)
-
-| Tool | What it does |
-|------|-------------|
-| `reindex_workspace` | Full or incremental workspace reindex |
-| `index_files` | Add/update specific files without full reindex |
-| `index_directory` | Add directory to graph alongside existing data |
-
-### Memory (7)
-
-Persistent AI context across sessions — debugging insights, architectural decisions, known issues.
-
-| Tool | What it does |
-|------|-------------|
-| `memory_store` / `memory_get` / `memory_search` | Store, retrieve, search memories (BM25 + semantic) |
-| `memory_context` | Get memories relevant to a file/function |
-| `memory_list` / `memory_invalidate` / `memory_stats` | Browse, retire, monitor |
-
-All tool names are prefixed with `codegraph_` (e.g. `codegraph_get_ai_context`). Tools that target a specific symbol accept `uri` + `line` or `nodeId` from `symbol_search` results.
-
-### CodeGraph Pro
-
-Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/pro):
-
-| Tool | What it does |
-|------|-------------|
-| `scan_security` | Security vulnerability scan: 40+ dangerous function patterns, source-to-sink taint tracing, auth coverage for HTTP endpoints (7 languages/frameworks), architectural layer violations, weak crypto, hardcoded secrets |
-| `analyze_coupling` | Module coupling metrics and instability scores |
-| `find_unused_code` | Dead code detection with confidence scoring |
-| `find_duplicates` | Detect duplicate/near-duplicate functions |
-| `find_similar` / `cluster_symbols` / `compare_symbols` | Embedding-based code similarity |
-| `cross_project_search` | Search across all indexed projects |
-| `mine_git_history` / `mine_git_history_for_file` / `search_git_history` | Git history mining and semantic search |
-| `security_control_flow` | Map every execution path through a function — "can this return without hitting the auth check?" |
-| `security_trace_data_flow` | Follow a variable from birth to death — "does user input reach this SQL query?" |
-| `security_generate_sbom` | CycloneDX SBOM from 8 lockfile formats |
-| `security_audit_deps` | OSV vulnerability check on dependencies |
-| `security_check_unchecked_returns` / `_resource_leaks` / `_misconfig` / `_input_validation` / `_error_exposure` | 5 heuristic analyzers covering ~80% of CWE Top 25 |
-| `security_scan_iac` | Docker / Kubernetes / Terraform misconfiguration scan |
-| `security_check_licenses` | Lockfile license policy enforcement (copyleft detection) |
-| `security_check_secrets_entropy` | Shannon-entropy hardcoded-secret detection |
-| `security_detect_injection` | Focused SQL/XSS/cmd/path/deser/template injection detection (20 patterns) |
-| `security_check_search_path` | Untrusted search-path / DLL-hijacking detection (CWE-426/CWE-427) |
-| `security_check_crypto` | Cryptographic misuse: weak ciphers/hashes/PRNG/keys, static IVs, timing-leak comparisons (CWE-208/326-330/338/916, 35 patterns) |
-| `security_export_sarif` | Aggregate findings as SARIF 2.1.0 (GitHub Code Scanning, GitLab SAST) |
-
-**Cross-cutting features (all `security_check_*` tools):**
-- `include_tests` / `treat_as_production` — first-class skip for tests/samples/vendored
-- `check_compile_gates` — C/C++ findings inside `#ifdef X` are marked DEFENSIVE_GATED_OFF when X isn't defined by CMake/Cargo/Makefile
-- 25-marker suppression honoring (`# nosec`, `// NOLINT`, etc.) at line and function level
-- Telemetry blocks: `path_filter` + `compile_gate` for transparent triage
+→ **[Full tool reference](https://github.com/codegraph-ai/codegraph#tools)** — every tool with its description, and the pro/security surface.
 
 ---
 
 ## Languages
 
-31 languages parsed via tree-sitter — functions, classes, imports, call graph, complexity metrics, dependency graphs, symbol search, and impact analysis:
-
-| Category | Languages |
-|---|---|
-| **Systems** | C, C++, Rust, Zig, Objective-C |
-| **JVM** | Java, Kotlin, Scala, Groovy, Clojure |
-| **Web/Scripting** | TypeScript/JS, Python, Ruby, PHP, Perl, Lua, Elixir, Elm |
-| **Web/Style** | CSS |
-| **Mobile** | Swift, Dart |
-| **Functional** | Haskell, OCaml, Julia, Erlang, Elm, Clojure |
-| **Enterprise** | C#, COBOL, Fortran, Go |
-| **Blockchain** | Solidity |
-| **Shell/Config** | Bash, HCL/Terraform, TOML, YAML |
-| **Hardware** | Verilog/SystemVerilog, Tcl |
-| **Data Science** | R, Julia |
+**38 languages** parsed via tree-sitter — functions, classes, imports, call graph, complexity metrics, dependency graphs, symbol search, and impact analysis.
+Systems (C, C++, Rust, Zig, Objective-C), JVM (Java, Kotlin, Scala, Groovy, Clojure), web/scripting (TypeScript/JS, Python, Ruby, PHP, Perl, Lua, Elixir, Elm, CSS), mobile (Swift, Dart), functional (Haskell, OCaml, Julia, Erlang), enterprise (C#, COBOL, Fortran, Go), Solidity, shell/config (Bash, Dockerfile, HCL/Terraform, TOML, YAML), hardware (Verilog/SystemVerilog, Tcl) and R.
 
 HTTP handler detection: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java (Spring/JAX-RS), Go (stdlib/Gin/Echo/Fiber), C# (ASP.NET), Ruby (Rails), PHP (Laravel/Symfony).
+
+→ **[Full language table](https://github.com/codegraph-ai/codegraph#languages)**, including which languages need the `extra-languages` build.
 
 ---
 
@@ -192,7 +123,7 @@ MCP Client (Claude, Cursor, ...)        VS Code Extension
             ┌─────────────────────────────┐
             │       codegraph-server      │
             ├─────────────────────────────┤
-            │  37 tree-sitter parsers     │
+            │  38 tree-sitter parsers     │
             │  Semantic graph engine      │
             │  AI query engine (BM25)     │
             │  Memory layer (RocksDB)     │

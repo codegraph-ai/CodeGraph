@@ -1,8 +1,11 @@
 # Include only what the extension needs:
 #   package.json, README.md, CHANGELOG.md, LICENSE
 #   out/extension.js (compiled TS)
-#   bin/* (platform binaries)
 #   images/* (icons)
+
+# The engine is fetched at first use, not bundled - see src/engineDownload.ts.
+# Any binary left in bin/ from a local build must not reach the marketplace.
+bin/**
 
 # Exclude everything else
 **/.git/**

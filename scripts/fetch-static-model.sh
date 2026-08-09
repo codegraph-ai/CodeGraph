@@ -3,11 +3,15 @@
 # `model` GitHub release (decoupled from versioned releases — bumping the app
 # version never requires re-uploading the model).
 #
-# Used two ways:
-#   • Package time — place the model into the VS Code extension bundle:
-#       scripts/fetch-static-model.sh vscode/bin/jina-code-static-256
-#   • Manually — populate the server's default resolve path:
+# Populates the server's default resolve path so `--embedding-model static`
+# works without any further configuration:
 #       scripts/fetch-static-model.sh
+#
+# The model is no longer staged into the VS Code extension bundle: the VSIX
+# excludes bin/** (see vscode/.vscodeignore), so a copy placed there would be
+# dropped at package time. The IDE clients leave CODEGRAPH_STATIC_MODEL unset
+# unless the user names a directory, so the default path this script writes is
+# what they pick up - no per-client setting needed.
 #
 # Usage: scripts/fetch-static-model.sh [DEST_DIR] [MODEL_NAME]
 #   DEST_DIR    default ~/.codegraph/static_models/<MODEL_NAME>

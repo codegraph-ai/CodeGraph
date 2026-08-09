@@ -162,6 +162,84 @@ fn test_get_neighbors_both_directions() {
 }
 
 #[test]
+fn test_get_neighbors_by_edge_type_filters_other_relations() {
+    let mut graph = CodeGraph::in_memory().unwrap();
+
+    let target = graph
+        .add_node(NodeType::Function, PropertyMap::new())
+        .unwrap();
+    let caller = graph
+        .add_node(NodeType::Function, PropertyMap::new())
+        .unwrap();
+    let container = graph
+        .add_node(NodeType::CodeFile, PropertyMap::new())
+        .unwrap();
+    let callee = graph
+        .add_node(NodeType::Function, PropertyMap::new())
+        .unwrap();
+
+    graph
+        .add_edge(caller, target, EdgeType::Calls, PropertyMap::new())
+        .unwrap();
+    // The containing file is an incoming neighbour too - counting it is what
+    // inflated every function's caller count by one.
+    graph
+        .add_edge(container, target, EdgeType::Contains, PropertyMap::new())
+        .unwrap();
+    graph
+        .add_edge(target, callee, EdgeType::Calls, PropertyMap::new())
+        .unwrap();
+
+    let callers = graph
+        .get_neighbors_by_edge_type(target, Direction::Incoming, EdgeType::Calls)
+        .unwrap();
+    assert_eq!(callers, vec![caller]);
+
+    let callees = graph
+        .get_neighbors_by_edge_type(target, Direction::Outgoing, EdgeType::Calls)
+        .unwrap();
+    assert_eq!(callees, vec![callee]);
+
+    let both = graph
+        .get_neighbors_by_edge_type(target, Direction::Both, EdgeType::Calls)
+        .unwrap();
+    assert_eq!(both.len(), 2);
+    assert!(both.contains(&caller));
+    assert!(both.contains(&callee));
+
+    let contained = graph
+        .get_neighbors_by_edge_type(target, Direction::Incoming, EdgeType::Contains)
+        .unwrap();
+    assert_eq!(contained, vec![container]);
+}
+
+#[test]
+fn test_get_neighbors_by_edge_type_deduplicates_parallel_edges() {
+    let mut graph = CodeGraph::in_memory().unwrap();
+
+    let target = graph
+        .add_node(NodeType::Function, PropertyMap::new())
+        .unwrap();
+    let caller = graph
+        .add_node(NodeType::Function, PropertyMap::new())
+        .unwrap();
+
+    // A caller that calls the same function twice is one caller, matching
+    // get_neighbors.
+    graph
+        .add_edge(caller, target, EdgeType::Calls, PropertyMap::new())
+        .unwrap();
+    graph
+        .add_edge(caller, target, EdgeType::Calls, PropertyMap::new())
+        .unwrap();
+
+    let callers = graph
+        .get_neighbors_by_edge_type(target, Direction::Incoming, EdgeType::Calls)
+        .unwrap();
+    assert_eq!(callers, vec![caller]);
+}
+
+#[test]
 fn test_delete_node_cascades_to_edges() {
     let mut graph = CodeGraph::in_memory().unwrap();
 

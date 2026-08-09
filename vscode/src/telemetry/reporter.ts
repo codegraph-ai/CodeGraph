@@ -32,12 +32,16 @@ import {
     type CommandId,
     categorizeError,
     type ErrorCategory,
+    type FirstIndexCta,
     type GraphPanel,
     type IndexOutcome,
     type IndexTrigger,
     isCommandId,
     isToolName,
     type Language,
+    normalizeZeroFileReason,
+    type ZeroFileCta,
+    type ZeroFileReason,
     normalizeCrashCause,
     normalizeCrashPhase,
     normalizeExitSignal,
@@ -107,6 +111,13 @@ export interface Reporter {
     }): void;
     indexLanguageBreakdown(languageFileCounts: Map<Language, number>): void;
 
+    /** An index run produced zero files — records the diagnosed reason. */
+    funnelZeroFileIndex(props: { reason: ZeroFileReason; hadWorkspace: boolean }): void;
+    /** User's choice on the zero-file recovery prompt (or that it was dismissed). */
+    funnelZeroFileCta(props: { reason: ZeroFileReason; action: ZeroFileCta }): void;
+    /** User's choice on the one-time post-first-index prompt (or that it was dismissed). */
+    funnelFirstIndexCta(props: { action: FirstIndexCta; fileCount: number }): void;
+
     toolInvoke(toolName: string, argShape: string): void;
     toolResult(props: {
         toolName: string;
@@ -130,6 +141,8 @@ export interface Reporter {
 
     engagementTreeViewOpened(view: TreeView): void;
     engagementGraphPanelOpened(panel: GraphPanel): void;
+    /** User clicked an inline CodeGraph CodeLens (callers/tests/complexity). */
+    engagementCodeLensClicked(): void;
     engagementSettingsSnapshot(): void;
     /** One-time machine fingerprint (bucketed/enum only) to triage the graph_load crash cohort. */
     engagementMachineProfile(profile: { dataDirKind: string; machineKind: string; totalRamGb: number; antivirusKind: string }): void;
@@ -314,6 +327,33 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
             send('index.languageBreakdown', breakdown, false);
         },
 
+        funnelZeroFileIndex(props) {
+            // 100% capture (isError=true): this is the primary funnel leak we
+            // are trying to close, so we never want it sampled away.
+            send(
+                'funnel.zeroFileIndex',
+                {
+                    reason: normalizeZeroFileReason(props.reason),
+                    hadWorkspace: props.hadWorkspace,
+                },
+                true,
+            );
+        },
+        funnelZeroFileCta(props) {
+            send(
+                'funnel.zeroFileCta',
+                { reason: normalizeZeroFileReason(props.reason), action: props.action },
+                false,
+            );
+        },
+        funnelFirstIndexCta(props) {
+            send(
+                'funnel.firstIndexCta',
+                { action: props.action, fileCountBucket: fileCountBucket(props.fileCount) },
+                false,
+            );
+        },
+
         toolInvoke(toolName, argShape) {
             if (!sample()) return;
             send(
@@ -382,6 +422,9 @@ export function createReporter(ctx: vscode.ExtensionContext): Reporter {
         },
         engagementGraphPanelOpened(panel) {
             send('engagement.graphPanelOpened', { panelType: panel }, false);
+        },
+        engagementCodeLensClicked() {
+            send('engagement.codeLensClicked', {}, false);
         },
         engagementSettingsSnapshot() {
             const cfg = vscode.workspace.getConfiguration('codegraph');

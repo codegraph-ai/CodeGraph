@@ -229,6 +229,43 @@ export type TreeView = (typeof TREE_VIEWS)[number];
 export const GRAPH_PANELS = ['dependency', 'call', 'impact'] as const;
 export type GraphPanel = (typeof GRAPH_PANELS)[number];
 
+/**
+ * Why an index run produced zero files - the funnel dead-end that ~445 of
+ * ~2,540 active machines hit, of which only ~16% ever recovered. Bounded so
+ * we can measure which recovery hint to invest in without logging paths.
+ */
+export const ZERO_FILE_REASONS = [
+    'no_workspace', // no folder open at all
+    'no_supported_files', // folder open, but no files in a language we parse
+    'index_paths_empty', // codegraph.indexPaths points only at missing/empty dirs
+    'all_excluded', // matches exist but excludePatterns filtered every one
+    'unknown', // files present, count still 0 (server-side gap)
+] as const;
+export type ZeroFileReason = (typeof ZERO_FILE_REASONS)[number];
+const ZERO_FILE_REASON_SET = new Set<string>(ZERO_FILE_REASONS);
+export function normalizeZeroFileReason(s: string | undefined): ZeroFileReason {
+    if (!s) return 'unknown';
+    return (ZERO_FILE_REASON_SET.has(s) ? s : 'unknown') as ZeroFileReason;
+}
+
+/**
+ * Actions offered on the one-time post-first-index prompt that steers users
+ * toward the surfaces telemetry shows already convert best (tree views: 483
+ * machines; call graph: 116 - vs 238 that ever invoke an agent tool).
+ * `dismissed` covers closing the toast without choosing.
+ */
+export const FIRST_INDEX_CTAS = [
+    'explore_symbols',
+    'show_call_graph',
+    'open_walkthrough',
+    'dismissed',
+] as const;
+export type FirstIndexCta = (typeof FIRST_INDEX_CTAS)[number];
+
+/** Actions offered on the zero-file recovery prompt. */
+export const ZERO_FILE_CTAS = ['open_folder', 'configure_paths', 'learn_more', 'dismissed'] as const;
+export type ZeroFileCta = (typeof ZERO_FILE_CTAS)[number];
+
 /** Server-health reasons. */
 export const SERVER_RESTART_REASONS = ['crash', 'manual', 'setting_change'] as const;
 export type ServerRestartReason = (typeof SERVER_RESTART_REASONS)[number];
@@ -376,6 +413,8 @@ export const SETTINGS_SNAPSHOT_KEYS = {
         'memory.enabled',
         'memory.autoInvalidate',
         'memory.gitMining.enabled',
+        'codeLens.enabled',
+        'hover.enabled',
     ] as const,
     enum: ['embeddingModel', 'ai.contextStrategy'] as const,
     bucketedNumber: [

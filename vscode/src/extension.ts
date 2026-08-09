@@ -13,11 +13,14 @@ import {
 } from 'vscode-languageclient/node';
 import { registerCommands } from './commands';
 import { registerTreeDataProviders } from './views/treeProviders';
+import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
-import { getServerPath } from './server';
+import { getServerPath, engineSpawnEnv } from './server';
+import { engineVersion, managedEnginePath, offerEngineDownload, offerEngineUpdateIfStale } from './engineDownload';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
+import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from './funnel';
 
 let client: LanguageClient;
 let aiProvider: CodeGraphAIProvider;
@@ -265,9 +268,79 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
     }
 
+    // The one command registered before the engine is resolved, because
+    // declining the download below ends activation and nothing after it -
+    // commands, tree views, lenses - is ever contributed. Without this, a user
+    // who says "Not Now" and later changes their mind has no way back short of
+    // reloading the window and guessing that the prompt returns; the npm
+    // channel ships `codegraph-mcp-fetch-engine` for exactly that case.
+    //
+    // Reloading is what puts a late download to use, so the command offers it -
+    // but only when activation did stop early, since in a session that already
+    // has an engine running a reload prompt is noise.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('codegraph.downloadEngine', async () => {
+            const activationStopped = !client;
+            if (!(await offerEngineDownload(engineVersion()))) {
+                return;
+            }
+            if (!activationStopped) {
+                return;
+            }
+            const choice = await vscode.window.showInformationMessage(
+                'Reload the window to start the CodeGraph engine.',
+                'Reload Window',
+            );
+            if (choice === 'Reload Window') {
+                void vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
+        }),
+    );
+
     // Determine server binary path — may upgrade the edition label from
     // 'community' to 'pro' if the user has the pro binary on PATH.
-    const serverInfo = getServerPath(context);
+    //
+    // The published VSIX no longer bundles engines: shipping all four platform
+    // binaries meant a 118 MB download for the one a user can actually run.
+    // When none is found we offer to fetch this platform's engine, which is
+    // also where an npm- or JetBrains-installed engine gets picked up, since
+    // all three channels share ~/.codegraph/bin.
+    let serverInfo: ReturnType<typeof getServerPath>;
+    try {
+        serverInfo = getServerPath(context);
+    } catch {
+        const downloaded = await offerEngineDownload(engineVersion());
+        if (!downloaded) {
+            reporter.activationServerStartResult({
+                outcome: 'spawn_fail',
+                durationMs: 0,
+                serverBinaryFound: false,
+                errorHint: 'engine_not_installed',
+            });
+            return;
+        }
+        serverInfo = getServerPath(context);
+    }
+
+    // The managed engine is found by filename alone, so one installed by an
+    // earlier release would otherwise be reused forever. The extension and the
+    // engine ship in lockstep, so offer to bring it up to the engine release
+    // this build expects - only when it is the binary we actually resolved,
+    // since a pro, bundled or locally built engine is the user's to manage.
+    //
+    // Not awaited: the engine on disk still runs, and holding activation - and
+    // with it the language client, the tree views and the lenses - behind a
+    // 30 MB transfer on a slow network is a far worse trade than one release of
+    // drift. The lifecycle callbacks read `client` lazily for the same reason:
+    // by the time the user answers the prompt it has been created and started.
+    if (serverInfo.path === managedEnginePath()) {
+        void offerEngineUpdateIfStale(engineVersion(), context.globalState, {
+            isRunning: () => client?.isRunning() ?? false,
+            stop: () => client.stop(),
+            start: () => client.start(),
+        });
+    }
+
     setServerEdition(serverInfo.edition === 'pro' ? 'pro' : 'community');
 
     // Log server path for debugging
@@ -292,19 +365,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // space the way `shell:true` + cmd.exe did. stdio defaults to pipes, which
     // vscode-languageclient uses for the LSP transport (stderr → outputChannel).
     const serverOptions: ServerOptions = () => {
-        // When the static (model2vec) embedding model is selected, point the
-        // server at the model dir via CODEGRAPH_STATIC_MODEL — the server
-        // resolves the static path from this env, falling back to
-        // ~/.codegraph/static_models/jina-code-static-256.
         const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
         const cfg = vscode.workspace.getConfiguration('codegraph', wsFolder);
-        const spawnEnv = { ...process.env };
-        if (cfg.get<string>('embeddingModel') === 'static') {
-            // staticModelPath override, else the model bundled next to the binary.
-            const staticModelPath = cfg.get<string>('staticModelPath')
-                || path.join(context.extensionPath, 'bin', 'jina-code-static-256');
-            spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
-        }
+        const spawnEnv = engineSpawnEnv(cfg, process.env);
         const child = cp.spawn(serverModule, [], { cwd: context.extensionPath, env: spawnEnv });
         child.once('exit', (code, signal) => {
             lastExitCode = code;
@@ -494,7 +557,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Register Language Model Tools for autonomous AI agent access
     try {
-        toolManager = new CodeGraphToolManager(client, reporter);
+        toolManager = new CodeGraphToolManager(client, reporter, context);
         toolManager.registerTools();
         const lmAvailable = !!(vscode as any).lm;
         reporter.activationToolRegistration({
@@ -537,7 +600,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             command: 'codegraph.symbolSearch',
             arguments: [{ query: '*', limit: 1 }],
         });
-        if (!check?.results?.length) {
+        const alreadyIndexed = !!check?.results?.length;
+        // Drives the codegraphSymbols empty-state welcome (index CTA vs.
+        // "open a file") and any `codegraph.indexed`-gated UI.
+        void vscode.commands.executeCommand('setContext', 'codegraph.indexed', alreadyIndexed);
+        if (!alreadyIndexed) {
             const choice = await vscode.window.showInformationMessage(
                 'CodeGraph: Workspace not indexed. Index now for full code intelligence?',
                 'Index Workspace',
@@ -554,8 +621,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                                 command: 'codegraph.reindexWorkspace',
                                 arguments: [{}],
                             });
-                            reportIndexCompleted(reporter, startedAt, result);
-                            vscode.window.showInformationMessage(`Indexed ${result?.files_indexed ?? 0} files`);
+                            reportIndexTelemetry(reporter, startedAt, result);
+                            const fileCount = filesIndexed(result);
+                            // handleIndexOutcome syncs the codegraph.indexed
+                            // context key and shows zero-file recovery or the
+                            // one-time first-index steer. Confirm success here
+                            // only when it didn't show its own prompt.
+                            const action = await handleIndexOutcome(context, reporter, fileCount);
+                            if (action === 'none' && fileCount > 0) {
+                                vscode.window.showInformationMessage(
+                                    `CodeGraph: Indexed ${fileCount.toLocaleString()} file${fileCount === 1 ? '' : 's'}`,
+                                );
+                            }
                         } catch (err) {
                             reporter.indexCompleted({
                                 outcome: 'error',
@@ -602,6 +679,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Register commands, tree providers, etc.
     registerCommands(context, client, aiProvider, reporter);
     registerTreeDataProviders(context, client, reporter);
+    registerCodeLens(context, client, reporter);
 
     // Add debug command to verify tool registration
     context.subscriptions.push(
@@ -672,30 +750,3 @@ export async function deactivate(): Promise<void> {
     }
 }
 
-/**
- * Map the reindex-RPC response (which now ships `by_language` /
- * `parser_errors_by_language` / `duration_ms` from the server) into
- * the appropriate telemetry events. Two events fire per index:
- *   - `index.completed` with the aggregate numbers
- *   - `index.languageBreakdown` with the per-language file counts
- * The wall-clock duration is computed locally for cancel/error paths
- * but the server-side `duration_ms` is used when present (it excludes
- * network RTT and is more accurate for product-decision purposes).
- */
-function reportIndexCompleted(r: Reporter, localStartedAt: number, result: any): void {
-    const fileCount = typeof result?.files_indexed === 'number' ? result.files_indexed : 0;
-    const durationMs =
-        typeof result?.duration_ms === 'number'
-            ? Number(result.duration_ms)
-            : Date.now() - localStartedAt;
-    r.indexCompleted({ outcome: 'ok', durationMs, fileCount });
-
-    const byLanguage = result?.by_language;
-    if (byLanguage && typeof byLanguage === 'object') {
-        const map = new Map<any, number>();
-        for (const [lang, count] of Object.entries(byLanguage)) {
-            if (typeof count === 'number') map.set(lang as any, count);
-        }
-        if (map.size > 0) r.indexLanguageBreakdown(map as any);
-    }
-}

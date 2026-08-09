@@ -8,6 +8,29 @@ Cross-language code intelligence for AI agents — 42 tools, 38 languages, persi
 npm install -g @astudioplus/codegraph-mcp
 ```
 
+The analysis engine is not bundled in the package.
+Install downloads the engine built for your platform from its GitHub release -
+tagged with the *engine's* version, which an npm-only patch release does not
+move - and verifies it against the published `.sha256` before installing it
+(on Windows the ONNX Runtime sidecar comes with it).
+
+A failed download never fails the install, because the CLI, the hooks and the
+docs all still work - it prints a warning instead. Retry it with:
+
+```bash
+npx codegraph-mcp-fetch-engine          # --force re-downloads an engine that is already present
+```
+
+For air-gapped machines, or if you vendor the binary yourself, set
+`CODEGRAPH_SKIP_BINARY_FETCH=1` to skip the download and supply the engine one
+of two ways:
+
+- place it at `<package>/bin/codegraph-server-<platform>-<arch>` (`.exe` on
+  Windows) - the path `codegraph-mcp` launches by default; or
+- point `CODEGRAPH_SERVER_PATH` at the engine wherever it already lives. This
+  wins over the bundled path, and `codegraph-mcp` fails with a clear message
+  rather than falling back if nothing is there.
+
 ## Usage
 
 ### Claude Code
@@ -44,20 +67,36 @@ Pass flags after `--`:
 }
 ```
 
+Leave the transport out of `args`: `codegraph-mcp` already puts the engine in
+MCP (stdio) mode, so `--mcp`, `--stdio` and `--connect` are dropped from
+whatever the client passes rather than forwarded twice.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--workspace <path>` | current dir | Directories to index (repeatable) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
-| `--embedding-model <model>` | `bge-small` | `bge-small`, `jina-code-v2`, `granite-97m` (32K, multilingual), or `static` (model2vec, ~100× faster indexing, ~90% of BGE quality; needs a local model dir via `CODEGRAPH_STATIC_MODEL`) |
+| `--embedding-model <model>` | `bge-small` | `bge-small`, `jina-code-v2`, `granite-97m` (32K, multilingual), or `static` (model2vec, ~100× faster indexing, ~90% of BGE quality; needs a local model dir - this install downloads one to `~/.codegraph/static_models/jina-code-static-256`, or point `CODEGRAPH_STATIC_MODEL` elsewhere) |
 | `--max-files <n>` | 5000 | Maximum files to index |
-| `--profile <name>` | `all` | Scope tool surface: `core` (8), `graph` (16), `memory` (14), `security` (pro), `all` (42) |
+| `--profile <name>` | `all` | Scope tool surface: `core` (8), `graph` (17), `memory` (14), `security` (pro), `all` (42) |
 | `--graph-only` | off | Skip embeddings — graph + structural tools only. No ONNX model load, 10-50× faster indexing. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot: index, run a single tool, print result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
 
-Before loading the ONNX embedding model, the server checks available memory and runs graph-only if under ~1.5 GB.
-If embeddings are disabled even though the machine has plenty of free RAM, set `CODEGRAPH_SKIP_MEMORY_CHECK=1` (also accepts `true`/`yes`) to bypass the check.
-A reading of `0 MB available` is treated as a detection failure and the model loads anyway (common on macOS).
-Works in both MCP and one-shot `--run-tool` modes.
+### Troubleshooting: embeddings disabled / "Memory manager not initialized"
+
+Before loading the ONNX embedding model, the server checks available memory and
+runs graph-only if under ~1.5 GB, so an OOM-kill can't take down the process.
+If that check misfires, `index_markdown`, `search_docs`, `memory_*`, and
+semantic search are unavailable while graph-only tools keep working.
+
+- A reading of `0 MB available` is treated as a detection failure and the model
+  loads anyway.
+On macOS, reclaimable memory is parked in inactive/speculative/purgeable pages
+that some memory readers don't count as free, so a healthy Mac can report 0.
+- If embeddings stay disabled even though the machine has plenty of free RAM,
+  set `CODEGRAPH_SKIP_MEMORY_CHECK=1` (also accepts `true`/`yes`) to bypass the
+  check entirely.
+
+Both apply in MCP mode and one-shot `--run-tool` mode.
 
 ### Agent rules (recommended)
 

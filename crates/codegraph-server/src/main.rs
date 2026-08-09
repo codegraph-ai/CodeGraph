@@ -294,6 +294,10 @@ fn main() {
 async fn run() {
     install_crash_handlers();
     codegraph_server::crash_phase::mark("startup");
+    // Clean up after processes that were killed before they could clear their
+    // own marker, which is every engine a client force-kills. Runs after our
+    // own mark so this process's marker is never a candidate.
+    codegraph_server::crash_phase::sweep_orphans();
 
     let args = Args::parse();
 
@@ -481,8 +485,34 @@ async fn run() {
         let (service, socket) = LspService::new(CodeGraphBackend::new);
 
         codegraph_server::crash_phase::mark("serving");
-        Server::new(stdin, stdout, socket).serve(service).await;
+        // Race the serve loop against the exit signal: tower-lsp will not
+        // return from `serve()` on the `exit` notification alone.
+        let exited_on_request = tokio::select! {
+            () = Server::new(stdin, stdout, socket).serve(service) => {
+                tracing::info!("LSP stream closed");
+                false
+            }
+            () = codegraph_server::lsp_exit::wait_for_exit() => {
+                tracing::info!("Exiting after client shutdown");
+                true
+            }
+        };
         codegraph_server::crash_phase::clear();
+
+        if exited_on_request {
+            // Returning here would hang. `tokio::io::stdin()` reads on a
+            // blocking-pool thread that cannot be cancelled, and dropping the
+            // runtime waits for blocking tasks to finish - a read that only
+            // completes when the client closes the pipe, which is exactly the
+            // wait we are trying to avoid.
+            //
+            // Cleanup that matters has already run: the crash breadcrumb is
+            // cleared above, and the client has had its shutdown response plus
+            // the grace period. This path replaces a SIGKILL from the client,
+            // so it is strictly the gentler of the two.
+            tracing::info!("Exit complete");
+            std::process::exit(0);
+        }
     }
 }
 

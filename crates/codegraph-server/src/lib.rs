@@ -37,6 +37,7 @@ pub mod handlers;
 pub mod index;
 pub mod index_state;
 pub mod indexer;
+pub mod lsp_exit;
 pub mod lsp_pro_hooks;
 pub mod mcp;
 pub mod memory;

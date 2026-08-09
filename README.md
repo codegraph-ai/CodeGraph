@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **45 MCP tools**, a **VS Code extension**, and a **persistent memory layer**. Parses **37 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
+CodeGraph builds a semantic graph of your codebase — functions, classes, imports, call chains — and exposes it through **42 MCP tools**, a **VS Code extension**, a **JetBrains IDE plugin**, and a **persistent memory layer**. Parses **38 languages** via tree-sitter. AI agents get structured code understanding instead of grepping through files.
 
 ## Quick Start
 
@@ -30,10 +30,26 @@ The server indexes the current working directory automatically.
 Install the VSIX:
 
 ```bash
-code --install-extension codegraph-0.14.0.vsix
+code --install-extension codegraph-0.20.0.vsix
 ```
 
-The extension starts the server automatically and registers all tools as Language Model Tools for Copilot.
+One VSIX serves every platform.
+The analysis engine is not bundled: on first activation the extension offers to download the engine built for your platform, verifies it against the published checksum, and installs it into `~/.codegraph/bin` - the same location the JetBrains plugin uses, so one download serves both.
+The download is offered rather than performed automatically, because it is a native binary that runs with your permissions.
+Decline it and run **CodeGraph: Download Analysis Engine** from the command palette whenever you are ready.
+
+Once an engine is present, the extension starts it automatically and registers all tools as Language Model Tools for Copilot.
+
+### JetBrains IDEs
+
+A plugin for IntelliJ IDEA, PyCharm, GoLand, Android Studio and the rest of the
+family drives the same engine over LSP: Code Vision, Symbols and Memories tool
+windows, a graph panel, and one-click MCP registration for the AI Assistant.
+It resolves or downloads the engine the same way the VS Code extension does,
+sharing `~/.codegraph/bin`.
+
+→ **[jetbrains/README.md](jetbrains/README.md)** for surfaces, engine
+resolution order, and building from source.
 
 ### Rules for AI agents
 
@@ -89,16 +105,23 @@ one tool and exits without the MCP stdio handshake — ideal for scripting.
 Static (model2vec) embeddings replace the ONNX transformer with a token→vector
 lookup table: indexing is **~100× faster** (this repo's 5,873 symbols embed in
 ~1 s vs ~3.4 min with BGE) and there's **no ONNX runtime or 1.5 GB RAM gate**.
-Retrieval stays **hybrid (BM25 + semantic)**, so end-to-end quality is **~90% of
-BGE**. The VS Code extension ships the model bundled, so `static` works there
-with no setup. For the CLI/MCP server it needs a local model directory
-(`config.json` + `tokenizer.json` + `model.safetensors`):
+Retrieval stays **hybrid (BM25 + semantic)**, so end-to-end quality is **~90% of BGE**.
+The model is not bundled with any client — it needs a local model directory
+(`config.json` + `tokenizer.json` + `model.safetensors`) at
+`~/.codegraph/static_models/jina-code-static-256`, or wherever
+`CODEGRAPH_STATIC_MODEL` points:
 
-- Point at it with `CODEGRAPH_STATIC_MODEL=/path/to/model` (or the VS Code
-  `codegraph.staticModelPath` setting to override the bundled model). Default:
-  `~/.codegraph/static_models/jina-code-static-256`.
-- Distill one from any sentence-transformer (Apache-2.0 Jina-Code by default) in
-  ~30 s on CPU: `python scripts/distill_static_model.py`.
+- Installing `@astudioplus/codegraph-mcp` from npm downloads it into that
+  default location for you (best-effort; set `CODEGRAPH_SKIP_MODEL_FETCH=1` to
+  skip, and the install never fails over it).
+- Otherwise fetch the prebuilt one with `scripts/fetch-static-model.sh`, or
+  distill your own from any sentence-transformer (Apache-2.0 Jina-Code by
+  default) in ~30 s on CPU: `python scripts/distill_static_model.py`.
+- A model in the default location needs no IDE setting: both IDE clients leave
+  `CODEGRAPH_STATIC_MODEL` unset and let the engine resolve it. To use a model
+  kept somewhere else, set `codegraph.staticModelPath` in VS Code, or
+  *Settings → Tools → CodeGraph → Embeddings → Static model directory* in
+  JetBrains; each client then passes that path as `CODEGRAPH_STATIC_MODEL`.
 
 #### `CODEGRAPH_SKIP_MEMORY_CHECK` — force the embedding model past the RAM gate
 
@@ -117,29 +140,22 @@ It works in both MCP and one-shot `--run-tool` modes.
 
 #### `--profile` — narrow the MCP tool surface
 
-The full 32-tool surface is convenient but inflates the agent's prompt-context cost. A profile exposes only the slice you need (also settable via the `CODEGRAPH_TOOL_PROFILE` env var):
+The full 42-tool surface is convenient but inflates the agent's prompt-context cost. A profile exposes only the slice you need (also settable via the `CODEGRAPH_TOOL_PROFILE` env var):
 
 | Profile | Tools | Use when |
 |---------|-------|----------|
 | `all` *(default)* | every tool (community + pro) | normal sessions |
 | `core` | 8 — search + symbol info + AI context | chatty agent sessions where you only need lookups |
-| `graph` | 16 — callers/callees/deps/impact/traverse | refactoring + structural analysis |
-| `memory` | 7 — `codegraph_memory_*` only | note-taking / knowledge-base workflows |
+| `graph` | 17 — callers/callees/deps/impact/traverse/PR context | refactoring + structural analysis |
+| `memory` | 14 — `codegraph_memory_*` plus the docs tools | note-taking / knowledge-base workflows |
 | `security` | pro security tools only (empty on community) | pro security audits |
 
 ### VS Code settings
 
-```jsonc
-{
-  "codegraph.indexOnStartup": true,
-  "codegraph.indexPaths": ["/path/to/project-a", "/path/to/project-b"],
-  "codegraph.excludePatterns": ["**/cmake-build-debug/**", "**/generated/**"],
-  "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
-  "codegraph.staticModelPath": "",                // model2vec model dir when embeddingModel is "static"
-  "codegraph.maxFileSizeKB": 1024,
-  "codegraph.debug": false
-}
-```
+The `codegraph.*` settings are documented once, next to the extension that
+reads them:
+
+→ **[vscode/README.md — Configuration](vscode/README.md#configuration)**
 
 Full-body embeddings are enabled by default. Function body text is captured at parse time with zero I/O overhead.
 
@@ -151,9 +167,14 @@ Built-in exclusions (always skipped) cover ~47 directories across three categori
 
 Plus glob patterns for binary archives, native libraries, OS metadata, and **secret file extensions** (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.crt`, `*.gpg`, `*.kdbx`, SSH key conventions like `id_rsa`, etc.) — defense in depth against accidentally embedding credentials.
 
+Indexing produced zero files, or something else looks wrong? See
+**[docs/troubleshooting.md](docs/troubleshooting.md)**.
+
 ---
 
-## Tools (42 community + 27 pro, 17 security)
+## Tools
+
+42 community tools, plus 27 more (17 of them security analyzers) in CodeGraph Pro.
 
 ### Code Analysis (11)
 
@@ -339,7 +360,7 @@ Additional tools available in [CodeGraph Pro](https://codegraph.astudioplus.com/
 | **Functional** | Haskell, OCaml, Julia, Erlang, Elm, Clojure |
 | **Enterprise** | C#, COBOL, Fortran, Go |
 | **Blockchain** | Solidity |
-| **Shell/Config** | Bash, HCL/Terraform, TOML, YAML |
+| **Shell/Config** | Bash, Dockerfile, HCL/Terraform, TOML, YAML |
 | **Hardware** | Verilog/SystemVerilog, Tcl |
 | **Data Science** | R, Julia |
 
@@ -356,11 +377,11 @@ HTTP handler detection: Python (FastAPI/Flask/Django), TypeScript (NestJS), Java
 ## Architecture
 
 ```
-MCP Client (Claude, Cursor, ...)        VS Code Extension
-        |                                       |
-    MCP (stdio)                            LSP Protocol
-        |                                       |
-        └───────────┐               ┌───────────┘
+MCP Client (Claude, Cursor, ...)   VS Code Extension   JetBrains Plugin
+        |                                  |                  |
+    MCP (stdio)                       LSP Protocol       LSP Protocol
+        |                                  |                  |
+        └───────────┐               ┌──────┴──────────────────┘
                     ▼               ▼
             ┌─────────────────────────────┐
             │       codegraph-server      │

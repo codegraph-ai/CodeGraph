@@ -6,6 +6,9 @@ const path = require("path");
 const os = require("os");
 const fs = require("fs");
 
+/** Package version, reported on every event including pre-startup crashes. */
+const WRAPPER_VERSION = require("../package.json").version;
+
 // ── PostHog telemetry (opt-out via CODEGRAPH_TELEMETRY=off) ──────────
 
 const POSTHOG_KEY = "phc_pkWuLX7azFafdd7rqY4bfKhZ3aobCT9unTy9zSkXH3xB";
@@ -50,6 +53,10 @@ function sendTelemetry(eventData) {
         ...properties,
         serverEdition: "community",
         transport: "mcp",
+        // mcp.start carried the version and crashes did not - so a crash before
+        // startup, the case that most needs attributing to a release, was the
+        // one that could not be.
+        version: WRAPPER_VERSION,
         os: os.platform(),
         arch: os.arch(),
         nodeVersion: process.version,
@@ -57,6 +64,61 @@ function sendTelemetry(eventData) {
     });
   } catch {
     // Never block the server on telemetry failures
+  }
+}
+
+// ── Crash-loop protection ───────────────────────────────────────────
+//
+// The VS Code extension and the JetBrains plugin both stop restarting after
+// three crashes in a minute. This wrapper cannot do that in memory: an MCP
+// client respawns it as a brand new process each time, so the count has to
+// outlive the process. It lives in a small file keyed by the arguments, since
+// a loop is by definition the same invocation failing the same way.
+const LOOP_STATE = path.join(os.homedir(), ".codegraph", "mcp-failures.json");
+const LOOP_WINDOW_MS = 60_000;
+const LOOP_THRESHOLD = 3;
+
+function argsKey(argv) {
+  return require("crypto").createHash("sha256").update(argv.join("\u0000")).digest("hex").slice(0, 16);
+}
+
+/** Recent failures for this exact invocation, oldest first. */
+function readFailures(key) {
+  try {
+    const all = JSON.parse(fs.readFileSync(LOOP_STATE, "utf8"));
+    const now = Date.now();
+    return (all[key] || []).filter((t) => now - t < LOOP_WINDOW_MS);
+  } catch {
+    return [];
+  }
+}
+
+function recordFailure(key) {
+  try {
+    fs.mkdirSync(path.dirname(LOOP_STATE), { recursive: true });
+    let all = {};
+    try {
+      all = JSON.parse(fs.readFileSync(LOOP_STATE, "utf8"));
+    } catch {
+      // Missing or corrupt - start fresh rather than fail the exit path.
+    }
+    const now = Date.now();
+    const recent = (all[key] || []).filter((t) => now - t < LOOP_WINDOW_MS);
+    recent.push(now);
+    // Only ever track the current invocation: stale keys from configs the user
+    // has since fixed would otherwise accumulate forever.
+    fs.writeFileSync(LOOP_STATE, JSON.stringify({ [key]: recent }));
+    return recent.length;
+  } catch {
+    return 1;
+  }
+}
+
+function clearFailures() {
+  try {
+    fs.unlinkSync(LOOP_STATE);
+  } catch {
+    // Nothing recorded, or unwritable - neither is worth reporting.
   }
 }
 
@@ -103,8 +165,18 @@ function getBinaryName() {
 }
 
 function findBinary() {
+  // An explicit engine wins. The postinstall already tells users to set this
+  // when a download fails or the machine is air-gapped, and until now it did
+  // nothing - the advice pointed at a variable this function never read.
+  const override = process.env.CODEGRAPH_SERVER_PATH;
+  if (override) {
+    if (fs.existsSync(override)) return override;
+    console.error(`CODEGRAPH_SERVER_PATH is set but no file exists there: ${override}`);
+    process.exit(1);
+  }
+
   const binaryName = getBinaryName();
-  const binDir = __dirname;
+  const binDir = process.env.CODEGRAPH_BIN_DIR || __dirname;
   const binaryPath = path.join(binDir, binaryName);
 
   if (fs.existsSync(binaryPath)) {
@@ -135,9 +207,26 @@ const USE_ENGINE =
   ["1", "true", "on", "yes"].includes(
     (process.env.CODEGRAPH_ENGINE || "").toLowerCase()
   ) && os.platform() !== "win32";
+// Arguments the client passed through its MCP config, minus anything this
+// wrapper supplies itself.
+//
+// Every doc and example writes `--mcp`, so users naturally put it in their MCP
+// config too - and this wrapper already adds it. clap rejects the duplicate
+// with "the argument '--mcp' cannot be used multiple times" and exits 2 before
+// the engine emits any telemetry, so the client respawns with the same config
+// and fails identically, forever. That single collision produced 656k crash
+// events across ~134 machines in one month.
+//
+// Mode flags are dropped rather than passed through: this wrapper decides the
+// mode, so a client that names one is either agreeing with us (harmless) or
+// asking for a mode the wrapper cannot deliver (which would be a confusing
+// half-configured server).
+const WRAPPER_OWNED_FLAGS = new Set(["--mcp", "--connect", "--stdio"]);
+const clientArgs = process.argv.slice(2).filter((a) => !WRAPPER_OWNED_FLAGS.has(a));
+
 const args = USE_ENGINE
-  ? ["--connect", "--workspace", process.cwd(), ...process.argv.slice(2)]
-  : ["--mcp", ...process.argv.slice(2)];
+  ? ["--connect", "--workspace", process.cwd(), ...clientArgs]
+  : ["--mcp", ...clientArgs];
 
 // stdin/stdout are inherited (JSON-RPC channel — untouched).
 // stderr is piped so we can intercept TEL: lines for PostHog.
@@ -158,6 +247,10 @@ child.stderr.on("data", (chunk) => {
     if (line.startsWith("TEL: ")) {
       try {
         const data = JSON.parse(line.substring(5));
+        // The engine only reports mcp.start once it is past argument parsing
+        // and actually serving, so this is the signal that the configuration
+        // works and any recorded failures are history.
+        if (data && data.event === "mcp.start") clearFailures();
         sendTelemetry(data);
       } catch {
         // Malformed TEL line — ignore
@@ -186,11 +279,44 @@ child.on("exit", (code, signal) => {
     !intentionalShutdown &&
     (signal != null || (typeof code === "number" && code !== 0));
   if (abnormal) {
-    sendTelemetry({
-      event: "mcp.crash",
-      exitCode: typeof code === "number" ? code : -1,
-      exitSignal: signal || "none",
-    });
+    const failures = recordFailure(argsKey(args));
+    const looping = failures >= LOOP_THRESHOLD;
+
+    // Exit 2 is clap refusing the command line. It is deterministic, so the
+    // client will respawn into the identical failure - say so plainly, with
+    // the arguments, because the user cannot see them anywhere else.
+    if (code === 2) {
+      process.stderr.write(
+        `\ncodegraph-mcp: the engine rejected its arguments and exited 2.\n` +
+          `  arguments: ${args.join(" ")}\n` +
+          `  This is a configuration problem, not a crash. Check the "args" in\n` +
+          `  your MCP client config - the wrapper already supplies --mcp.\n`
+      );
+    }
+    if (looping) {
+      process.stderr.write(
+        `codegraph-mcp: failed ${failures} times in under a minute with the same\n` +
+          `  arguments. Not reporting further failures for this configuration.\n`
+      );
+    }
+
+    // Report the first failures, then one summary, then nothing. Without this
+    // a single misconfigured machine sends a crash event every few seconds for
+    // as long as its client keeps respawning - one sent 504,256.
+    if (!looping) {
+      sendTelemetry({
+        event: "mcp.crash",
+        exitCode: typeof code === "number" ? code : -1,
+        exitSignal: signal || "none",
+      });
+    } else if (failures === LOOP_THRESHOLD) {
+      sendTelemetry({
+        event: "mcp.crashloop",
+        exitCode: typeof code === "number" ? code : -1,
+        exitSignal: signal || "none",
+        failures,
+      });
+    }
     // Flush before exiting so the crash event isn't lost.
     flushAndExit(typeof code === "number" ? code : 1);
   } else if (signal) {

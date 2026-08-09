@@ -117,3 +117,115 @@ pub(crate) fn is_public(node: &Node) -> bool {
 pub(crate) fn is_test(node: &Node) -> bool {
     node.properties.get_bool("is_test").unwrap_or(false)
 }
+
+/// Whether a caller node looks like test code: the structural [`is_test`]
+/// marker, or a name/path heuristic for languages that don't record it. Shared
+/// by CodeLens per-symbol stats and PR-review coverage so the two classify
+/// callers identically and can't silently diverge.
+pub(crate) fn is_test_like(node: &Node) -> bool {
+    if is_test(node) {
+        return true;
+    }
+    if is_test_name(name(node)) {
+        return true;
+    }
+    is_test_path(node.properties.get_string("path").unwrap_or(""))
+}
+
+/// Name heuristic for test functions: `test_foo` or `foo_test`. Anchored to the
+/// ends of the name because a substring match would also claim `run_tests`,
+/// `setup_test_env` and other harness helpers, which are production code that
+/// happens to drive tests - and dropping those from the lens is a silent loss.
+fn is_test_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.starts_with("test_") || name.ends_with("_test")
+}
+
+/// Path heuristic for test files: a `tests` directory component, a `test_`
+/// prefix, or a file name following one of the suffix conventions the supported
+/// languages use. Rust and Python put the marker in front (`test_foo.py`); Go,
+/// JavaScript, Ruby and Java put it behind (`foo_test.go`, `foo.test.ts`,
+/// `foo_spec.rb`, `FooTest.java`), and recognising only the prefix classified
+/// every Go and Java test as a production caller.
+///
+/// Separators are normalised first because node paths are stored with the
+/// indexing host's native separator, so a Windows `tests\foo.rs` would
+/// otherwise never match.
+fn is_test_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    if path.starts_with("tests/")
+        || path.starts_with("test_")
+        || path.contains("/tests/")
+        || path.contains("/test_")
+    {
+        return true;
+    }
+
+    let file = path.rsplit('/').next().unwrap_or("");
+    // Anchored on the separator before the extension so `contest.rs` and
+    // `manifest.go` stay production code.
+    if ["_test.", ".test.", "_spec.", ".spec."]
+        .iter()
+        .any(|marker| file.contains(marker))
+    {
+        return true;
+    }
+    // Case-sensitive, and on the stem only: `Test`/`Tests` is the Java and C#
+    // convention, while a lowercase match would claim `latest.rs`.
+    let stem = file.split('.').next().unwrap_or("");
+    stem.ends_with("Test") || stem.ends_with("Tests")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_test_name, is_test_path};
+
+    #[test]
+    fn test_name_matches_at_word_boundaries() {
+        assert!(is_test_name("test_parses_empty_input"));
+        assert!(is_test_name("lower_bound_test"));
+        assert!(is_test_name("TEST_Uppercase"));
+    }
+
+    #[test]
+    fn test_name_rejects_harness_helpers() {
+        assert!(!is_test_name("run_tests"));
+        assert!(!is_test_name("setup_test_env"));
+        assert!(!is_test_name("latest_snapshot"));
+    }
+
+    #[test]
+    fn test_path_matches_windows_separators() {
+        assert!(is_test_path(r"C:\repo\tests\navigation.rs"));
+        assert!(is_test_path(r"C:\repo\src\test_helpers.rs"));
+        assert!(is_test_path(r"tests\navigation.rs"));
+    }
+
+    #[test]
+    fn test_path_matches_unix_separators() {
+        assert!(is_test_path("/repo/tests/navigation.rs"));
+        assert!(is_test_path("/repo/src/test_helpers.rs"));
+        assert!(is_test_path("tests/navigation.rs"));
+    }
+
+    #[test]
+    fn test_path_matches_suffix_conventions() {
+        // Go, JavaScript/TypeScript, Ruby and Java all put the marker last.
+        assert!(is_test_path("/repo/internal/parser_test.go"));
+        assert!(is_test_path("/repo/src/parser.test.ts"));
+        assert!(is_test_path("/repo/spec/models/user_spec.rb"));
+        assert!(is_test_path("/repo/src/parser.spec.js"));
+        assert!(is_test_path("/repo/src/main/java/com/x/ParserTest.java"));
+        assert!(is_test_path(r"C:\repo\src\ParserTests.cs"));
+    }
+
+    #[test]
+    fn test_path_rejects_production_paths() {
+        assert!(!is_test_path("/repo/src/latest/mod.rs"));
+        assert!(!is_test_path(r"C:\repo\src\contest.rs"));
+        // Ends in "test" only in lowercase, which is not a suffix convention.
+        assert!(!is_test_path("/repo/src/manifest.go"));
+        assert!(!is_test_path("/repo/src/latest.rs"));
+        assert!(!is_test_path("/repo/src/protest.java"));
+    }
+}

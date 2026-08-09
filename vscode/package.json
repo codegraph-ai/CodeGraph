@@ -2,7 +2,7 @@
     "name": "codegraph",
     "displayName": "CodeGraph",
     "description": "Cross-language code intelligence powered by graph analysis",
-    "version": "0.19.1",
+    "version": "0.20.0",
     "publisher": "aStudioPlus",
     "author": "Andrey Vasilevsky <anvanster@gmail.com>",
     "license": "Apache-2.0",
@@ -76,6 +76,11 @@
                 "category": "CodeGraph"
             },
             {
+                "command": "codegraph.openWalkthrough",
+                "title": "Open Getting Started Walkthrough",
+                "category": "CodeGraph"
+            },
+            {
                 "command": "codegraph.debugTools",
                 "title": "Debug Language Model Tools",
                 "category": "CodeGraph"
@@ -135,6 +140,11 @@
             {
                 "command": "codegraph.indexDirectory",
                 "title": "Index Directory",
+                "category": "CodeGraph"
+            },
+            {
+                "command": "codegraph.downloadEngine",
+                "title": "Download Analysis Engine",
                 "category": "CodeGraph"
             }
         ],
@@ -200,6 +210,18 @@
                     "default": false,
                     "scope": "resource",
                     "description": "Index workspace on startup. When false, use 'Index Directory' command to index specific folders on demand."
+                },
+                "codegraph.codeLens.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Show inline CodeLens above functions with caller count, related test count, and cyclomatic complexity. Click to open the call graph."
+                },
+                "codegraph.hover.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Show CodeGraph stats (callers, tests, complexity) when hovering a function declaration."
                 },
                 "codegraph.maxFileSizeKB": {
                     "type": "number",
@@ -282,7 +304,7 @@
                     "enumDescriptions": [
                         "BGE-Small-EN-v1.5 (384d) — fast, good quality with full-body embeddings. ~127MB download.",
                         "Jina Code V2 (768d) — 6x slower indexing, no quality advantage with full-body embeddings. ~642MB download.",
-                        "Static (model2vec, 256d) — ~100x faster indexing, no ONNX runtime or 1.5GB RAM gate, ~90% of BGE quality in hybrid search. Requires a local model dir (codegraph.staticModelPath or CODEGRAPH_STATIC_MODEL env)."
+                        "Static (model2vec, 256d) — ~100x faster indexing, no ONNX runtime or 1.5GB RAM gate, ~90% of BGE quality in hybrid search. Needs a local model dir: ~/.codegraph/static_models/jina-code-static-256 by default, or codegraph.staticModelPath."
                     ],
                     "description": "Embedding model for semantic search and code similarity"
                 },
@@ -290,7 +312,7 @@
                     "type": "string",
                     "default": "",
                     "scope": "resource",
-                    "description": "Directory of the model2vec static model (config.json + tokenizer.json + model.safetensors) used when embeddingModel is 'static'. Empty defaults to ~/.codegraph/static_models/jina-code-static-256. Distill one with scripts/distill_static_model.py."
+                    "description": "Directory of the model2vec static model (config.json + tokenizer.json + model.safetensors). Only set this to use a model outside the default location: left empty, the engine resolves ~/.codegraph/static_models/jina-code-static-256, which is where installing @astudioplus/codegraph-mcp from npm puts it. The model is not bundled with the extension - distill one with scripts/distill_static_model.py if you have neither."
                 },
                 "codegraph.fullBodyEmbedding": {
                     "type": "boolean",
@@ -1672,24 +1694,93 @@
                 }
             ]
         },
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "codegraph",
+                    "title": "CodeGraph",
+                    "icon": "media/codegraph-activitybar.svg"
+                }
+            ]
+        },
         "views": {
-            "explorer": [
+            "codegraph": [
                 {
                     "id": "codegraphSymbols",
-                    "name": "CodeGraph Symbols",
+                    "name": "Symbols",
                     "when": "codegraph.enabled"
                 },
                 {
                     "id": "codegraphMemories",
-                    "name": "CodeGraph Memories",
+                    "name": "Memories",
                     "when": "codegraph.enabled"
                 }
             ]
         },
         "viewsWelcome": [
             {
+                "view": "codegraphSymbols",
+                "when": "!codegraph.indexed",
+                "contents": "CodeGraph turns your codebase into a searchable graph - callers, dependencies, impact, and complexity.\n[Index Workspace](command:codegraph.reindex)\n[Open Walkthrough](command:codegraph.openWalkthrough)\nIndexing runs locally; nothing leaves your machine."
+            },
+            {
+                "view": "codegraphSymbols",
+                "when": "codegraph.indexed",
+                "contents": "No symbols to show here yet. Open a source file to browse its symbols, or [reindex the workspace](command:codegraph.reindex)."
+            },
+            {
                 "view": "codegraphMemories",
                 "contents": "No memories stored yet.\n[Store Memory](command:codegraph.storeMemory)\n[Mine Git History](command:codegraph.mineGitHistory)"
+            }
+        ],
+        "walkthroughs": [
+            {
+                "id": "codegraph.gettingStarted",
+                "title": "Get Started with CodeGraph",
+                "description": "Turn your codebase into a queryable graph - then explore it and hand it to your AI assistant.",
+                "steps": [
+                    {
+                        "id": "index",
+                        "title": "Index your workspace",
+                        "description": "Build a local graph of your code.\n[Index Workspace](command:codegraph.reindex)",
+                        "media": {
+                            "markdown": "media/walkthrough/index.md"
+                        },
+                        "completionEvents": [
+                            "onContext:codegraph.indexed"
+                        ]
+                    },
+                    {
+                        "id": "explore",
+                        "title": "Explore symbols",
+                        "description": "Browse and pivot through your code as a graph.\n[Explore Symbols](command:codegraphSymbols.focus)",
+                        "media": {
+                            "markdown": "media/walkthrough/explore.md"
+                        },
+                        "completionEvents": [
+                            "onCommand:codegraphSymbols.focus"
+                        ]
+                    },
+                    {
+                        "id": "callgraph",
+                        "title": "Visualize the call graph",
+                        "description": "See what calls what, several levels deep.\n[Show Call Graph](command:codegraph.showCallGraph)",
+                        "media": {
+                            "markdown": "media/walkthrough/callgraph.md"
+                        },
+                        "completionEvents": [
+                            "onCommand:codegraph.showCallGraph"
+                        ]
+                    },
+                    {
+                        "id": "ai",
+                        "title": "Power your AI assistant",
+                        "description": "Let your AI assistant query the graph directly.",
+                        "media": {
+                            "markdown": "media/walkthrough/ai.md"
+                        }
+                    }
+                ]
             }
         ]
     },

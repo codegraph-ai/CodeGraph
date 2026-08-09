@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { execSync } from 'child_process';
+import { managedEnginePath, platformBinaryName } from './engineDownload';
 
 export interface ServerInfo {
     path: string;
@@ -19,6 +20,7 @@ export interface ServerInfo {
  * 1. CodeGraph Pro binary (if installed)
  * 2. Community binary (packaged with extension)
  * 3. Development builds (cargo target dir)
+ * 4. The engine downloaded into ~/.codegraph/bin, shared with the other clients
  */
 export function getServerPath(context: vscode.ExtensionContext): ServerInfo {
     // Try pro binary first — check PATH and common locations
@@ -30,6 +32,35 @@ export function getServerPath(context: vscode.ExtensionContext): ServerInfo {
     // Fall back to community binary
     const communityBinary = findCommunityBinary(context);
     return { path: communityBinary, edition: 'community' };
+}
+
+/**
+ * Environment for the spawned engine process.
+ *
+ * CODEGRAPH_STATIC_MODEL is set only when the user names a directory.
+ *
+ * It used to default to <extensionPath>/bin/jina-code-static-256, which
+ * stopped existing when `bin/**` was excluded from the VSIX to drop the
+ * bundled engines - the model lived in that directory too. Overriding with a
+ * path that no longer ships is strictly worse than not overriding: unset, the
+ * engine resolves ~/.codegraph/static_models/jina-code-static-256, which is
+ * exactly where the npm postinstall puts it and is shared across every client.
+ *
+ * Lives here, next to the rest of "where the engine comes from", rather than
+ * in the `ServerOptions` closure it is called from: activate() cannot be
+ * driven from a unit test, so the rule would otherwise have no regression
+ * guard.
+ */
+export function engineSpawnEnv(
+    cfg: Pick<vscode.WorkspaceConfiguration, 'get'>,
+    baseEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+    const spawnEnv = { ...baseEnv };
+    const staticModelPath = cfg.get<string>('staticModelPath');
+    if (cfg.get<string>('embeddingModel') === 'static' && staticModelPath) {
+        spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
+    }
+    return spawnEnv;
 }
 
 function findProBinary(): string | null {
@@ -67,28 +98,20 @@ function findProBinary(): string | null {
 
 function findCommunityBinary(context: vscode.ExtensionContext): string {
     const platform = os.platform();
-    const arch = os.arch();
 
-    let binaryName: string;
-    switch (platform) {
-        case 'linux':
-            binaryName = 'codegraph-server-linux-x64';
-            break;
-        case 'darwin':
-            binaryName = arch === 'arm64'
-                ? 'codegraph-server-darwin-arm64'
-                : 'codegraph-server-darwin-x64';
-            break;
-        case 'win32':
-            binaryName = 'codegraph-server-win32-x64.exe';
-            break;
-        default:
-            throw new Error(`Unsupported platform: ${platform}`);
-    }
+    // One place decides which platform gets which asset - engineDownload.ts,
+    // which re-exports the rule the npm postinstall and this client share. A
+    // second copy here is how a platform ends up resolving a name nothing ever
+    // downloads, and it would silently defeat the update path, which compares a
+    // resolved path against `managedEnginePath()`.
+    const binaryName = platformBinaryName();
 
-    // Packaged binary (production)
-    const packagedPath = context.asAbsolutePath(path.join('bin', binaryName));
-    if (fs.existsSync(packagedPath)) {
+    // Packaged binary — only present in a VSIX built with binaries bundled.
+    // The published VSIX no longer carries one; see engineDownload.ts.
+    const packagedPath = binaryName
+        ? context.asAbsolutePath(path.join('bin', binaryName))
+        : null;
+    if (packagedPath && fs.existsSync(packagedPath)) {
         return packagedPath;
     }
 
@@ -126,8 +149,28 @@ function findCommunityBinary(context: vscode.ExtensionContext): string {
         }
     }
 
+    // Engine downloaded on demand, shared with the CLI and the JetBrains
+    // plugin so a user who installed via any channel is found by all of them.
+    //
+    // Last, and after the cargo paths on purpose. Those only exist in a source
+    // checkout, so ordinary installs never reach past this point anyway, while
+    // a contributor who has also downloaded an engine - through npm, the
+    // JetBrains plugin, or an earlier prompt - would otherwise silently run
+    // that one instead of the build they just made.
+    const managedPath = managedEnginePath();
+    if (managedPath && fs.existsSync(managedPath)) {
+        return managedPath;
+    }
+
+    // A platform with no published engine reaches here too, once the cargo
+    // paths have been tried: a contributor on such a machine builds their own,
+    // and saying "not found" while pointing at the build command serves both
+    // cases better than refusing outright.
     throw new Error(
-        `CodeGraph server binary not found. Expected at: ${packagedPath}\n` +
-        `For development, build with: cargo build --release -p codegraph-server`
+        binaryName
+            ? `CodeGraph server binary not found. Expected at: ${packagedPath}\n` +
+              `For development, build with: cargo build --release -p codegraph-server`
+            : `CodeGraph does not publish an engine for ${platform}-${os.arch()}.\n` +
+              `Build one with: cargo build --release -p codegraph-server`
     );
 }

@@ -1,6 +1,8 @@
 # CodeGraph Tool Calling Guide
 
-Reference for calling all 66 CodeGraph MCP tools (34 community + 32 pro, 22 security). Each tool is prefixed with `codegraph_` (e.g., `codegraph_symbol_search`).
+Reference for calling the CodeGraph MCP tools — how to shape arguments and read results.
+The [README's tool section](../README.md#tools) owns the inventory and the community/pro split; this guide does not repeat the counts.
+Each tool is prefixed with `codegraph_` (e.g., `codegraph_symbol_search`).
 
 > **Pro tool extras (apply to every `codegraph_security_*` tool):**
 > All security detectors accept three cross-cutting parameters and emit shared
