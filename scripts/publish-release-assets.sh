@@ -13,7 +13,9 @@
 #
 # This does not build anything. It uploads what ./scripts/package-*.sh already
 # expect to find in vscode/bin/, so it slots in after the existing
-# cross-platform build (see cross-platform-builds.md).
+# cross-platform build (see cross-platform-builds.md). The one exception is
+# linux-arm64, which has no build host of its own: ./scripts/build-linux-arm64.sh
+# builds it in a container and stages and stamps it into vscode/bin/ itself.
 #
 # Usage:
 #   ./scripts/publish-release-assets.sh              # stage + verify only

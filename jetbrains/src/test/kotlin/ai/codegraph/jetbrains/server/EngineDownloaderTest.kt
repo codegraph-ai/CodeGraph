@@ -84,6 +84,21 @@ class EngineDownloaderTest : BasePlatformTestCase() {
         assertTrue("the engine must be executable", path.toFile().canExecute())
     }
 
+    fun `test an arm64 linux ide installs the arm64 engine`() {
+        // The platform this channel gained. Both Linux assets are published, so
+        // a mapping that fell back to x64 would install cleanly here and only
+        // fail when the IDE tried to start the engine - which is why the whole
+        // download is exercised and not just the name it resolves to.
+        publish("0.20.1", "codegraph-server-linux-arm64", "arm64 engine".toByteArray())
+        publish("0.20.1", "codegraph-server-linux-x64", "x64 engine".toByteArray())
+
+        val path = downloader("Linux").download("0.20.1")
+
+        assertEquals("codegraph-server-linux-arm64", path.fileName.toString())
+        assertEquals("arm64 engine", Files.readString(path))
+        assertTrue("the engine must be executable", path.toFile().canExecute())
+    }
+
     fun `test windows also installs the runtime library the engine loads`() {
         publish("0.19.1", "codegraph-server-win32-x64.exe", "engine".toByteArray())
         publish("0.19.1", EngineDownloader.WINDOWS_SIDECAR, "onnx".toByteArray())

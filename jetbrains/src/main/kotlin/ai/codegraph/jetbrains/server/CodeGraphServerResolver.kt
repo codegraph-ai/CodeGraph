@@ -59,13 +59,13 @@ data class ResolverEnvironment(
 /**
  * Locates the `codegraph-server` engine binary.
  *
- * Resolution order mirrors `vscode/src/server.ts`, with one deliberate
- * difference: the JetBrains plugin does not bundle platform binaries. The VSIX
- * carries four of them (100-126 MB each) because VS Code can ship per-platform
- * artifacts; the JetBrains Marketplace cannot, so a bundled plugin would be a
- * ~120 MB download for every user regardless of platform. Instead the binary is
- * resolved from an existing install and, failing that, downloaded once into the
- * managed install directory (Phase 1).
+ * Resolution order mirrors `vscode/src/server.ts`. No client bundles platform
+ * binaries any more (each engine is 100-126 MB), and the case against it is
+ * strongest here: VS Code could at least ship one artifact per platform, while
+ * the JetBrains Marketplace serves a single artifact to everyone, so a bundled
+ * plugin would carry every published engine to every user. Instead the binary
+ * is resolved from an existing install and, failing that, downloaded once into
+ * the managed install directory (Phase 1).
  *
  * Order:
  *  1. Explicit user override (settings)

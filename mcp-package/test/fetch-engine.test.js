@@ -110,6 +110,39 @@ async function run() {
     }
   }
 
+  // --- an arm64 linux machine installs the arm64 engine ----------------
+  // The whole install, not just the name mapping: before linux-arm64 was
+  // published this threw, and the failure worth guarding against now is the
+  // quiet one - the x64 asset is served alongside, so a rule that fell back to
+  // it would install cleanly here and only fail when the user tried to run it.
+  {
+    const dir = scratch();
+    const release = await startRelease({
+      "codegraph-server-linux-arm64": { content: "arm64 engine" },
+      "codegraph-server-linux-x64": { content: "x64 engine" },
+    });
+    try {
+      const { binary, fetched } = await ensureEngine(VERSION, dir, {
+        platform: "linux",
+        arch: "arm64",
+        baseUrl: release.baseUrl,
+      });
+      check(
+        path.basename(binary) === "codegraph-server-linux-arm64",
+        "an arm64 linux install fetches the arm64 engine"
+      );
+      check(fs.readFileSync(binary, "utf8") === "arm64 engine", "and it is the arm64 build");
+      check(
+        fetched.length === 1 && !fs.existsSync(path.join(dir, "codegraph-server-linux-x64")),
+        "and nothing else, least of all the x64 build"
+      );
+      check(installedVersion(dir) === VERSION, "and the release it came from is recorded");
+    } finally {
+      release.server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   // --- a corrupted download installs nothing ---------------------------
   {
     const dir = scratch();

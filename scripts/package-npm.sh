@@ -102,8 +102,7 @@ fi
 # a rate limit part-way through leaves the release with some platforms attached
 # and others missing - and a one-platform probe would wave that through, giving
 # users on the missing platforms exactly the empty install this gate exists to
-# prevent. The list mirrors BINARIES + WINDOWS_SIDECAR there, which is the same
-# set bin/fetch-engine.js resolves against.
+# prevent.
 ENGINE_VERSION=$(node -e "console.log(require('$PKG_DIR/bin/fetch-engine').ENGINE_VERSION)")
 # Read from fetch-engine.js rather than repeating it here. A copy of this list
 # drifts silently: it stays green while probing a set that no longer matches
