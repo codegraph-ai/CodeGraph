@@ -64,9 +64,12 @@ class EngineDownloaderTest : BasePlatformTestCase() {
         ResolverEnvironment(homeDir = home, pathEntries = emptyList(), osName = os, osArch = arch)
 
     /**
-     * Windows and Linux are published for x64 only, so an arm64 environment
-     * there is an unsupported platform rather than a machine that downloads the
-     * x64 build.
+     * Defaults to arm64 because that is the machine these tests describe: macOS
+     * and Linux each publish their own arm64 engine, and Windows on ARM is
+     * served the x64 one it emulates. The Windows cases below pass `amd64`
+     * explicitly so they read as the platform they are testing rather than
+     * relying on that fallback. Which name each pair resolves to is
+     * `CodeGraphServerResolverTest`'s subject, not this file's.
      */
     private fun downloader(os: String, arch: String = "aarch64") =
         EngineDownloader(env(os, arch), baseUrl())

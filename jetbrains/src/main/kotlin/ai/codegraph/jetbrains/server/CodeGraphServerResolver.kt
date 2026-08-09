@@ -83,14 +83,18 @@ object CodeGraphServerResolver {
     /**
      * Binary name for this platform, or null when no engine is published for it.
      *
-     * Only macOS is built for both architectures. Windows on ARM runs the x64
-     * build under the OS's own emulation layer, so it is served the x64 asset;
-     * Linux has no such layer, and falling back to x64 there installs ~30 MB
-     * that cannot execute, which surfaces as an exec-format error at first use
-     * instead of as the unsupported platform it is.
+     * macOS and Linux are both built for x64 and arm64, and are answered by
+     * exact platform-arch match and nothing else: falling back to x64 on an
+     * arm64 machine installs ~120 MB that cannot execute, which surfaces as an
+     * exec-format error at first use instead of as the unsupported platform it
+     * is. Windows on ARM is the one exception - it runs the x64 build under the
+     * OS's own emulation layer, so refusing it would leave those users with no
+     * engine at all.
      *
      * Mirrors `platformBinaryName()` in `mcp-package/bin/fetch-engine.js`, which
-     * is the same rule for the JavaScript channels.
+     * is the same rule for the JavaScript channels. The plugin cannot import
+     * that list, so this mapping has to be edited in lockstep with it whenever a
+     * platform is added or dropped.
      */
     fun platformBinaryNameOrNull(env: ResolverEnvironment = ResolverEnvironment.fromSystem()): String? {
         val os = env.osName.lowercase()

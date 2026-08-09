@@ -116,13 +116,20 @@ const VERSION_MARKER = ".engine-version";
 /**
  * Every engine binary a release publishes.
  *
- * This is the single list. publish-release-assets.sh uploads exactly these and
- * package-npm.sh probes exactly these, both by reading this export rather than
- * repeating it - three hand-kept copies of the same list is how a release ends
- * up publishing a platform no client asks for, or asking for one it never
- * published. `onnxruntime.dll` is deliberately absent: it is a sidecar of the
- * Windows engine, not an engine, and requiredAssets() is what decides when it
- * is needed.
+ * This is the single list for everything that can reach it. publish-release-
+ * assets.sh uploads exactly these and package-npm.sh probes exactly these, both
+ * by reading this export rather than repeating it - hand-kept copies of the same
+ * list are how a release ends up publishing a platform no client asks for, or
+ * asking for one it never published.
+ *
+ * One copy cannot be removed: `CodeGraphServerResolver.platformBinaryNameOrNull`
+ * in the JetBrains plugin is Kotlin and cannot import this file, so it restates
+ * the same rule and has to be edited alongside this list. Its own test asserts
+ * the mapping; nothing can cross-check the two automatically.
+ *
+ * `onnxruntime.dll` is deliberately absent: it is a sidecar of the Windows
+ * engine, not an engine, and requiredAssets() is what decides when it is
+ * needed.
  */
 const PUBLISHED_BINARIES = [
   "codegraph-server-darwin-arm64",

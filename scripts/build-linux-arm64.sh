@@ -17,11 +17,14 @@
 #                 constraint - GLIBCXX_3.4.29 is, because ONNX forces GCC 11.
 #                 Measured, this binary runs on SLES 15 SP4, Ubuntu 22.04+,
 #                 Debian 12+, RHEL 9+ and Amazon Linux 2023, and does not run
-#                 on Ubuntu 20.04, Debian 11, RHEL 8 or Amazon Linux 2 - not
-#                 even on its own build host. That is identical to the x64
-#                 asset. SLES 15 SP4 works because SUSE ships an updated
-#                 libstdc++6 on an old glibc, which is the whole reason this
-#                 combination is worth pinning.
+#                 on stock Ubuntu 20.04, Debian 11, RHEL 8 or Amazon Linux 2 -
+#                 not even on its own build host as shipped. The container does
+#                 run it, and the check at the end of the recipe relies on
+#                 that, only because the toolchain PPA below upgrades the
+#                 container's libstdc++6 past GLIBCXX_3.4.29. That floor is
+#                 identical to the x64 asset. SLES 15 SP4 works because SUSE
+#                 ships an updated libstdc++6 on an old glibc, which is the
+#                 whole reason this combination is worth pinning.
 #
 #   gcc-11        is required, and is why the obvious choices do not work.
 #                 ONNX Runtime's prebuilt aarch64 static library needs GCC 11's
@@ -58,9 +61,42 @@ command -v docker >/dev/null || { echo "ERROR: docker is required." >&2; exit 1;
 VERSION="$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 [ -n "$VERSION" ] || { echo "ERROR: no version in Cargo.toml" >&2; exit 1; }
 
+# Which commit the asset claims is a floor like the other two, and is checked
+# like one. build.rs derives that stamp by shelling out to git from inside the
+# container, and every way that can fail - a worktree whose gitdir is not
+# mounted, git refusing a tree owned by another uid, no git at all - fails
+# silently to the literal string "unknown". A modified tree stamps "-dirty".
+# Neither is publishable, and stamp-binary.sh records only the version, so
+# nothing downstream would notice. So HEAD is captured here and the built
+# binary is made to agree with it.
+EXPECTED_GIT_SHORT=""
+CHECK_PROVENANCE=1
+if [ "${CODEGRAPH_ALLOW_DIRTY:-0}" = "1" ]; then
+  CHECK_PROVENANCE=0
+else
+  EXPECTED_GIT_SHORT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+  if [ -z "$EXPECTED_GIT_SHORT" ]; then
+    echo "ERROR: $REPO_ROOT is not a git checkout, so the engine cannot say what" >&2
+    echo "produced it. Build from a checkout, or set CODEGRAPH_ALLOW_DIRTY=1 for a" >&2
+    echo "throwaway build that must never be published." >&2
+    exit 1
+  fi
+  if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
+    echo "ERROR: the working tree is dirty, so this build would be stamped '-dirty'" >&2
+    echo "and would disagree with the assets built for the same release. Commit or" >&2
+    echo "stash first, or set CODEGRAPH_ALLOW_DIRTY=1 for a throwaway build." >&2
+    exit 1
+  fi
+fi
+
 echo "=== CodeGraph linux-arm64 engine ==="
 echo "  version: $VERSION"
 echo "  target:  $BUILD_DIR"
+if [ "$CHECK_PROVENANCE" -eq 1 ]; then
+  echo "  commit:  $EXPECTED_GIT_SHORT"
+else
+  echo "  commit:  unchecked (CODEGRAPH_ALLOW_DIRTY=1) - do not publish this build"
+fi
 echo
 
 mkdir -p "$BUILD_DIR"
@@ -72,6 +108,10 @@ docker run --rm -i --platform linux/arm64 \
   -v "$BUILD_DIR:/target" \
   -e MAX_GLIBC="$MAX_GLIBC" \
   -e MAX_GLIBCXX="$MAX_GLIBCXX" \
+  -e CHECK_PROVENANCE="$CHECK_PROVENANCE" \
+  -e EXPECTED_GIT_SHORT="$EXPECTED_GIT_SHORT" \
+  -e HOST_UID="$(id -u)" \
+  -e HOST_GID="$(id -g)" \
   ubuntu:20.04 bash -s <<'CONTAINER'
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -96,6 +136,24 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 . "$HOME/.cargo/env"
 
+# build.rs reads git provenance from here, and git refuses a tree owned by
+# another uid unless told the ownership is expected. Without this the stamp
+# degrades to "unknown" with nothing on stderr.
+git config --global --add safe.directory /src
+
+# The container is root and both mounts live in the developer's tree. On a
+# Linux host there is no uid remapping, so anything written here stays
+# root-owned and the host cannot rebuild or clean its own target/ afterwards.
+# Runs on every exit path, including a failed build, which is when a
+# half-written target/ is most annoying to be locked out of.
+restore_ownership() {
+  chown -R "$HOST_UID:$HOST_GID" /target 2>/dev/null || true
+  chown "$HOST_UID:$HOST_GID" /src/Cargo.lock 2>/dev/null || true
+  [ -d /src/.git ] && chown -R "$HOST_UID:$HOST_GID" /src/.git 2>/dev/null
+  return 0
+}
+trap restore_ownership EXIT
+
 cd /src
 export CARGO_TARGET_DIR=/target
 export CC=gcc-11 CXX=g++-11
@@ -108,11 +166,24 @@ BIN=/target/release/codegraph-server
 # The #15 regression guard. An immutable definition of this symbol lands in
 # .rodata, and on aarch64 it is also exported, so glibc's startup write to it
 # faults before main(). It must live in writable memory (B or D, never R).
-SHIM_CLASS=$(nm "$BIN" 2>/dev/null | awk '/__libc_single_threaded/ {print $2; exit}')
+#
+# The class is the field before the symbol name, not the second field: nm omits
+# the address column for undefined symbols, so a positional $2 reads the name
+# itself there. An absent symbol is an error, not a pass - main.rs defines it
+# unconditionally on Linux, so nothing found means nm could not tell us and the
+# guard did not run.
+NM_OUT=$(nm "$BIN" 2>&1) || { echo "ERROR: nm could not read $BIN, so the #15 guard cannot run:" >&2
+  printf '%s\n' "$NM_OUT" >&2; exit 1; }
+SHIM_CLASS=$(printf '%s\n' "$NM_OUT" | awk '$NF == "__libc_single_threaded" { print $(NF-1); exit }')
 echo "__libc_single_threaded section class: ${SHIM_CLASS:-<absent>}"
 case "$SHIM_CLASS" in
-  B|D|b|d|"") ;;
-  *) echo "ERROR: shim is '$SHIM_CLASS' (read-only) - this binary will SIGSEGV at startup." >&2; exit 1 ;;
+  B|D|b|d) ;;
+  "") echo "ERROR: __libc_single_threaded is absent from the symbol table, so the" >&2
+      echo "issue #15 startup guard could not be checked. Do not ship this binary." >&2; exit 1 ;;
+  U) echo "ERROR: __libc_single_threaded is undefined - the shim did not link in, so" >&2
+     echo "this binary requires glibc 2.32 and will not start on the supported floor." >&2; exit 1 ;;
+  *) echo "ERROR: shim is in section class '$SHIM_CLASS' (not writable) - this binary" >&2
+     echo "will SIGSEGV at startup." >&2; exit 1 ;;
 esac
 
 highest() { readelf -V "$BIN" 2>/dev/null | grep -o "$1[0-9.]*" | sed "s/$1//" | sort -V | tail -1; }
@@ -132,7 +203,32 @@ if [ -n "$GOT_GLIBCXX" ] && newer_than "$GOT_GLIBCXX" "$MAX_GLIBCXX"; then
 fi
 [ "$fail" -eq 0 ] || exit 1
 
-"$BIN" --version || { echo "ERROR: the binary does not run." >&2; exit 1; }
+# --info both proves the binary starts and is the only place the provenance
+# build.rs baked in is readable from outside.
+INFO=$("$BIN" --info) || { echo "ERROR: the binary does not run." >&2; exit 1; }
+printf '%s\n' "$INFO"
+
+if [ "$CHECK_PROVENANCE" = "1" ]; then
+  GOT_GIT=$(printf '%s\n' "$INFO" | sed -n '1s/.*(\(.*\)).*/\1/p')
+  case "$GOT_GIT" in
+    "")
+      echo "ERROR: the binary reports no commit at all." >&2; exit 1 ;;
+    unknown*)
+      echo "ERROR: the binary is stamped '$GOT_GIT' - git told build.rs nothing usable" >&2
+      echo "inside the container. If /src is a git worktree, its gitdir is not mounted." >&2
+      exit 1 ;;
+    *-dirty)
+      echo "ERROR: the binary is stamped '$GOT_GIT' - it was built from a modified tree" >&2
+      echo "and cannot be traced back to a released commit." >&2
+      exit 1 ;;
+  esac
+  if [ "$GOT_GIT" != "$EXPECTED_GIT_SHORT" ]; then
+    echo "ERROR: the binary claims commit $GOT_GIT, but the host is at" >&2
+    echo "$EXPECTED_GIT_SHORT. The release assets would disagree on their source." >&2
+    exit 1
+  fi
+  echo "provenance: $GOT_GIT, matching the host checkout"
+fi
 echo "BUILD OK"
 CONTAINER
 

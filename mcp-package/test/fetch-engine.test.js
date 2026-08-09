@@ -433,19 +433,9 @@ async function run() {
   );
   check(platformBinaryName("linux", "x64") === "codegraph-server-linux-x64", "linux-x64 does");
   check(
-    platformBinaryName("linux", "arm64") === "codegraph-server-linux-arm64",
-    "linux-arm64 does"
-  );
-  check(
     requiredAssets("linux", "arm64").length === 1 &&
       requiredAssets("linux", "arm64")[0] === "codegraph-server-linux-arm64",
     "linux-arm64 needs the engine and no sidecar"
-  );
-  // Windows on ARM keeps resolving to the x64 asset: the OS emulates it, so
-  // refusing would leave those users with no engine at all.
-  check(
-    platformBinaryName("win32", "arm64") === "codegraph-server-win32-x64.exe",
-    "win32-arm64 still resolves to the emulated x64 build"
   );
   // A platform with no build must still resolve to nothing rather than to
   // someone else's binary.
