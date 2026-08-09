@@ -94,7 +94,7 @@ export function registerCommands(
                 }
             };
             context.subscriptions.push(vscode.commands.registerCommand(commandId, wrapped));
-        } catch (error) {
+        } catch {
             console.warn(`Command ${commandId} already registered, skipping`);
         }
     };
@@ -240,7 +240,7 @@ export function registerCommands(
                         'CodeGraph: Use @codegraph in the chat to get code context. ' +
                         'Try: @codegraph explain this function'
                     );
-                } catch (error) {
+                } catch {
                     // Chat panel not available - show helpful message
                     vscode.window.showInformationMessage(
                         'CodeGraph provides AI context via:\n' +

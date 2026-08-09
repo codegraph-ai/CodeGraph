@@ -1,0 +1,68 @@
+// ESLint config for the VS Code extension, scoped to this package: the npm
+// package next door is plain CommonJS with its own conventions, so `root` stops
+// this from reaching it.
+//
+// The severities below are not a style opinion - each one is set to the level
+// at which the rule catches a real defect in THIS codebase, so that
+// `npm run lint` failing means something is actually wrong and is worth
+// blocking on. Rules that only fire on deliberate, already-idiomatic code are
+// turned off with the reason recorded rather than silenced case by case.
+{
+    "root": true,
+    "parser": "@typescript-eslint/parser",
+    "parserOptions": {
+        "ecmaVersion": 2022,
+        "sourceType": "module"
+    },
+    "plugins": ["@typescript-eslint"],
+    "extends": ["eslint:recommended", "plugin:@typescript-eslint/recommended"],
+    "env": {
+        "node": true,
+        "es2022": true
+    },
+    "ignorePatterns": ["out", "dist", "node_modules", "media", "webview"],
+    "rules": {
+        // The `_`-prefix convention this source already follows: a parameter
+        // named `_token` is one the VS Code API hands us and we deliberately do
+        // not read, and renaming it would lose which API slot it fills. An
+        // unprefixed unused binding is still an error, because that is the case
+        // where something was meant to be used and was not.
+        "@typescript-eslint/no-unused-vars": [
+            "error",
+            {
+                "argsIgnorePattern": "^_",
+                "varsIgnorePattern": "^_",
+                "caughtErrorsIgnorePattern": "^_"
+            }
+        ],
+        // `vscode-languageclient` declares its request types as namespaces
+        // (`namespace Foo { export const type = new RequestType(...) }`) and
+        // src/views/graphPanel.ts follows that idiom for its own requests. The
+        // rule is correct in general and wrong for the one pattern our
+        // dependency prescribes.
+        "@typescript-eslint/no-namespace": "off",
+        // Warn, not error: `any` here is concentrated in the boundary code that
+        // talks to the untyped language-server protocol payloads. Each site is
+        // a real typing debt worth seeing, but none of them is a defect that
+        // should stop a build, and typing them properly is a change to the
+        // protocol surface rather than a lint fix.
+        "@typescript-eslint/no-explicit-any": "warn"
+    },
+    "overrides": [
+        {
+            // Test doubles stand in for the `vscode` API, whose shape they must
+            // match exactly - including the parameters a given test never
+            // reads and the wide types the real API declares. Enforcing either
+            // rule here would push the mocks away from the API they imitate.
+            "files": ["**/*.test.ts"],
+            "rules": {
+                "@typescript-eslint/no-explicit-any": "off",
+                "@typescript-eslint/no-unsafe-function-type": "off",
+                "@typescript-eslint/no-unused-vars": [
+                    "error",
+                    { "args": "none", "varsIgnorePattern": "^_" }
+                ]
+            }
+        }
+    ]
+}

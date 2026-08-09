@@ -22,7 +22,7 @@ import * as vscode from 'vscode';
 // The canonical implementation lives with the npm package; esbuild follows the
 // path and inlines it into out/extension.js, so both JavaScript channels ship
 // the same code rather than two implementations that drift.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const fetchEngine = require('../../mcp-package/bin/fetch-engine.js');
 
 /** Where downloaded engines live, shared with the CLI and the JetBrains plugin. */

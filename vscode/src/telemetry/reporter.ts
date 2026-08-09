@@ -29,7 +29,6 @@ import { PostHog } from 'posthog-node';
 
 import {
     type ActivationOutcome,
-    type CommandId,
     categorizeError,
     type ErrorCategory,
     type FirstIndexCta,
@@ -51,7 +50,6 @@ import {
     normalizeAntivirusKind,
     type ServerRestartReason,
     SETTINGS_SNAPSHOT_KEYS,
-    type ToolName,
     type TreeView,
 } from './allowlists';
 import {
