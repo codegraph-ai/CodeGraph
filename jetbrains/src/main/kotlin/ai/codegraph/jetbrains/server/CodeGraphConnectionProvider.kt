@@ -43,9 +43,14 @@ class CodeGraphConnectionProvider(private val project: Project) : OSProcessStrea
             // Windows (issue #2); do not reintroduce a shell here.
             withWorkDirectory(project.basePath)
             withCharset(Charsets.UTF_8)
-            if (settings.embeddingModel == "static") {
-                withEnvironment("CODEGRAPH_STATIC_MODEL", staticModelDir(settings.staticModelPath).toString())
-            }
+            // Set only when the user names a directory. Unset, the engine
+            // resolves ~/.codegraph/static_models/jina-code-static-256 itself,
+            // which is where the npm postinstall puts it and is shared with
+            // every other client - so re-deriving that path here would just be
+            // a second copy of the same rule, free to drift.
+            settings.staticModelPath
+                .takeIf { it.isNotBlank() && settings.embeddingModel == "static" }
+                ?.let { withEnvironment("CODEGRAPH_STATIC_MODEL", it) }
         }
         setCommandLine(commandLine)
 
@@ -95,13 +100,6 @@ class CodeGraphConnectionProvider(private val project: Project) : OSProcessStrea
             .onFailure { LOG.warn("Could not create client resource dir $dir", it) }
         return dir
     }
-
-    private fun staticModelDir(override: String): Path =
-        if (override.isNotBlank()) {
-            Paths.get(override)
-        } else {
-            Paths.get(System.getProperty("user.home"), ".codegraph", "static_models", "jina-code-static-256")
-        }
 
     private companion object {
         val LOG = logger<CodeGraphConnectionProvider>()

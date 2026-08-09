@@ -365,18 +365,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // space the way `shell:true` + cmd.exe did. stdio defaults to pipes, which
     // vscode-languageclient uses for the LSP transport (stderr → outputChannel).
     const serverOptions: ServerOptions = () => {
-        // When the static (model2vec) embedding model is selected, point the
-        // server at the model dir via CODEGRAPH_STATIC_MODEL. The model is not
-        // bundled in the VSIX (see .vscodeignore), so codegraph.staticModelPath
-        // is effectively required; the bin/ fallback below only resolves for a
-        // locally built extension that staged one there.
+        // CODEGRAPH_STATIC_MODEL is set only when the user names a directory.
+        //
+        // It used to default to <extensionPath>/bin/jina-code-static-256, which
+        // stopped existing when `bin/**` was excluded from the VSIX to drop the
+        // bundled engines - the model lived in that directory too. Overriding
+        // with a path that no longer ships is strictly worse than not
+        // overriding: unset, the engine resolves
+        // ~/.codegraph/static_models/jina-code-static-256, which is exactly
+        // where the npm postinstall puts it and is shared across every client.
         const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
         const cfg = vscode.workspace.getConfiguration('codegraph', wsFolder);
         const spawnEnv = { ...process.env };
-        if (cfg.get<string>('embeddingModel') === 'static') {
-            // staticModelPath override, else the legacy locally-built bin/ dir.
-            const staticModelPath = cfg.get<string>('staticModelPath')
-                || path.join(context.extensionPath, 'bin', 'jina-code-static-256');
+        const staticModelPath = cfg.get<string>('staticModelPath');
+        if (cfg.get<string>('embeddingModel') === 'static' && staticModelPath) {
             spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
         }
         const child = cp.spawn(serverModule, [], { cwd: context.extensionPath, env: spawnEnv });
