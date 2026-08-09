@@ -34,6 +34,35 @@ export function getServerPath(context: vscode.ExtensionContext): ServerInfo {
     return { path: communityBinary, edition: 'community' };
 }
 
+/**
+ * Environment for the spawned engine process.
+ *
+ * CODEGRAPH_STATIC_MODEL is set only when the user names a directory.
+ *
+ * It used to default to <extensionPath>/bin/jina-code-static-256, which
+ * stopped existing when `bin/**` was excluded from the VSIX to drop the
+ * bundled engines - the model lived in that directory too. Overriding with a
+ * path that no longer ships is strictly worse than not overriding: unset, the
+ * engine resolves ~/.codegraph/static_models/jina-code-static-256, which is
+ * exactly where the npm postinstall puts it and is shared across every client.
+ *
+ * Lives here, next to the rest of "where the engine comes from", rather than
+ * in the `ServerOptions` closure it is called from: activate() cannot be
+ * driven from a unit test, so the rule would otherwise have no regression
+ * guard.
+ */
+export function engineSpawnEnv(
+    cfg: Pick<vscode.WorkspaceConfiguration, 'get'>,
+    baseEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+    const spawnEnv = { ...baseEnv };
+    const staticModelPath = cfg.get<string>('staticModelPath');
+    if (cfg.get<string>('embeddingModel') === 'static' && staticModelPath) {
+        spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
+    }
+    return spawnEnv;
+}
+
 function findProBinary(): string | null {
     const platform = os.platform();
     const binaryName = platform === 'win32' ? 'codegraph-pro.exe' : 'codegraph-pro';

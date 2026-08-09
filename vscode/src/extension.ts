@@ -16,7 +16,7 @@ import { registerTreeDataProviders } from './views/treeProviders';
 import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
-import { getServerPath } from './server';
+import { getServerPath, engineSpawnEnv } from './server';
 import { engineVersion, managedEnginePath, offerEngineDownload, offerEngineUpdateIfStale } from './engineDownload';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
@@ -365,22 +365,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // space the way `shell:true` + cmd.exe did. stdio defaults to pipes, which
     // vscode-languageclient uses for the LSP transport (stderr → outputChannel).
     const serverOptions: ServerOptions = () => {
-        // CODEGRAPH_STATIC_MODEL is set only when the user names a directory.
-        //
-        // It used to default to <extensionPath>/bin/jina-code-static-256, which
-        // stopped existing when `bin/**` was excluded from the VSIX to drop the
-        // bundled engines - the model lived in that directory too. Overriding
-        // with a path that no longer ships is strictly worse than not
-        // overriding: unset, the engine resolves
-        // ~/.codegraph/static_models/jina-code-static-256, which is exactly
-        // where the npm postinstall puts it and is shared across every client.
         const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
         const cfg = vscode.workspace.getConfiguration('codegraph', wsFolder);
-        const spawnEnv = { ...process.env };
-        const staticModelPath = cfg.get<string>('staticModelPath');
-        if (cfg.get<string>('embeddingModel') === 'static' && staticModelPath) {
-            spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
-        }
+        const spawnEnv = engineSpawnEnv(cfg, process.env);
         const child = cp.spawn(serverModule, [], { cwd: context.extensionPath, env: spawnEnv });
         child.once('exit', (code, signal) => {
             lastExitCode = code;
