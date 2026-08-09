@@ -301,7 +301,7 @@ object CodeGraphServerResolver {
      * held equal to Cargo.toml by `scripts/publish-release-assets.sh`, which
      * refuses to publish while they disagree.
      */
-    const val ENGINE_VERSION = "0.20.0"
+    const val ENGINE_VERSION = "0.20.1"
 
     private val ARM64_ARCHES = setOf("aarch64", "arm64")
     private val X64_ARCHES = setOf("x86_64", "amd64", "x64")

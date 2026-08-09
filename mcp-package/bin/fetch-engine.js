@@ -75,7 +75,7 @@ const RELEASE_BASE = "https://github.com/codegraph-ai/CodeGraph/releases/downloa
  * Kept equal to the engine version by `scripts/publish-release-assets.sh`, which
  * refuses to publish while any channel's pin disagrees with Cargo.toml.
  */
-const ENGINE_VERSION = "0.20.0";
+const ENGINE_VERSION = "0.20.1";
 
 /** Codes Windows and POSIX use for "something else has this file open". */
 const IN_USE_ERROR_CODES = new Set(["EPERM", "EACCES", "EBUSY", "ETXTBSY"]);
