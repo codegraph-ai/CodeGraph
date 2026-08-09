@@ -7,8 +7,9 @@
 #
 # The engine is not bundled: it is fetched from the GitHub release at install
 # time by bin/postinstall.js. Publish the release assets first with
-# ./scripts/publish-release-assets.sh, or installs of this version will fail to
-# find an engine.
+# ./scripts/publish-release-assets.sh - this script refuses to pack until every
+# asset for the pinned engine version is on the release, because an install
+# without them succeeds and then has nothing to run.
 #
 # Usage:
 #   ./scripts/package-npm.sh           # pack only
