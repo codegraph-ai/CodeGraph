@@ -117,10 +117,11 @@ The model is not bundled with any client — it needs a local model directory
 - Otherwise fetch the prebuilt one with `scripts/fetch-static-model.sh`, or
   distill your own from any sentence-transformer (Apache-2.0 Jina-Code by
   default) in ~30 s on CPU: `python scripts/distill_static_model.py`.
-- In VS Code set `codegraph.staticModelPath` to the model directory; in
-  JetBrains use *Settings → Tools → CodeGraph → Embeddings → Static model
-  directory*. Both IDE clients pass it to the server as
-  `CODEGRAPH_STATIC_MODEL`.
+- A model in the default location needs no IDE setting: both IDE clients leave
+  `CODEGRAPH_STATIC_MODEL` unset and let the engine resolve it. To use a model
+  kept somewhere else, set `codegraph.staticModelPath` in VS Code, or
+  *Settings → Tools → CodeGraph → Embeddings → Static model directory* in
+  JetBrains; each client then passes that path as `CODEGRAPH_STATIC_MODEL`.
 
 #### `CODEGRAPH_SKIP_MEMORY_CHECK` — force the embedding model past the RAM gate
 
@@ -151,19 +152,10 @@ The full 42-tool surface is convenient but inflates the agent's prompt-context c
 
 ### VS Code settings
 
-```jsonc
-{
-  "codegraph.indexOnStartup": true,
-  "codegraph.indexPaths": ["/path/to/project-a", "/path/to/project-b"],
-  "codegraph.excludePatterns": ["**/cmake-build-debug/**", "**/generated/**"],
-  "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
-  "codegraph.staticModelPath": "",                // required when embeddingModel is "static": the model2vec model dir
-  "codegraph.maxFileSizeKB": 1024,
-  "codegraph.codeLens.enabled": true,             // caller / test / complexity counts above functions
-  "codegraph.hover.enabled": true,                // the same stats on hover
-  "codegraph.debug": false
-}
-```
+The `codegraph.*` settings are documented once, next to the extension that
+reads them:
+
+→ **[vscode/README.md — Configuration](vscode/README.md#configuration)**
 
 Full-body embeddings are enabled by default. Function body text is captured at parse time with zero I/O overhead.
 

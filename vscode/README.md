@@ -62,7 +62,7 @@ CodeGraph's Symbols and Memories views live in the CodeGraph activity-bar contai
   "codegraph.indexPaths": ["/path/to/project-a", "/path/to/project-b"],
   "codegraph.excludePatterns": ["**/cmake-build-debug/**", "**/generated/**"],
   "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
-  "codegraph.staticModelPath": "",                // required when embeddingModel is "static": the model2vec model dir
+  "codegraph.staticModelPath": "",                // only to override the default model2vec model dir
   "codegraph.maxFileSizeKB": 1024,
   "codegraph.codeLens.enabled": true,             // caller / test / complexity counts above functions
   "codegraph.hover.enabled": true,                // the same stats on hover
@@ -71,7 +71,8 @@ CodeGraph's Symbols and Memories views live in the CodeGraph activity-bar contai
 ```
 
 The static (model2vec) model is not bundled with the extension.
-Distill one with [`scripts/distill_static_model.py`](https://github.com/codegraph-ai/codegraph/blob/main/scripts/distill_static_model.py), or reuse the copy the `@astudioplus/codegraph-mcp` npm install puts in `~/.codegraph/static_models/jina-code-static-256`, and point `codegraph.staticModelPath` at it.
+The engine looks for it in `~/.codegraph/static_models/jina-code-static-256`, which is where the `@astudioplus/codegraph-mcp` npm install puts it, so a model in that location needs no setting at all.
+Set `codegraph.staticModelPath` only to point at a model somewhere else - for instance one you distilled yourself with [`scripts/distill_static_model.py`](https://github.com/codegraph-ai/codegraph/blob/main/scripts/distill_static_model.py).
 
 Full-body embeddings are enabled by default. Function body text is captured at parse time with zero I/O overhead.
 

@@ -9,8 +9,9 @@
 #
 # The model is no longer staged into the VS Code extension bundle: the VSIX
 # excludes bin/** (see vscode/.vscodeignore), so a copy placed there would be
-# dropped at package time. IDE users point codegraph.staticModelPath at the
-# directory this script writes instead.
+# dropped at package time. The IDE clients leave CODEGRAPH_STATIC_MODEL unset
+# unless the user names a directory, so the default path this script writes is
+# what they pick up - no per-client setting needed.
 #
 # Usage: scripts/fetch-static-model.sh [DEST_DIR] [MODEL_NAME]
 #   DEST_DIR    default ~/.codegraph/static_models/<MODEL_NAME>
