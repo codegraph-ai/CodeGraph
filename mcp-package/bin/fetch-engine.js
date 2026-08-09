@@ -114,6 +114,25 @@ const ARCH_MAP = { arm64: "arm64", x64: "x64", x86_64: "x64" };
 const VERSION_MARKER = ".engine-version";
 
 /**
+ * Every engine binary a release publishes.
+ *
+ * This is the single list. publish-release-assets.sh uploads exactly these and
+ * package-npm.sh probes exactly these, both by reading this export rather than
+ * repeating it - three hand-kept copies of the same list is how a release ends
+ * up publishing a platform no client asks for, or asking for one it never
+ * published. `onnxruntime.dll` is deliberately absent: it is a sidecar of the
+ * Windows engine, not an engine, and requiredAssets() is what decides when it
+ * is needed.
+ */
+const PUBLISHED_BINARIES = [
+  "codegraph-server-darwin-arm64",
+  "codegraph-server-darwin-x64",
+  "codegraph-server-linux-arm64",
+  "codegraph-server-linux-x64",
+  "codegraph-server-win32-x64.exe",
+];
+
+/**
  * Asset name for the running platform, matching the names
  * publish-release-assets.sh uploads. Returns null when unsupported, so callers
  * can degrade instead of throwing during an install.
@@ -122,16 +141,16 @@ function platformBinaryName(platform = os.platform(), arch = os.arch()) {
   const p = PLATFORM_MAP[platform];
   const a = ARCH_MAP[arch];
   if (!p || !a) return null;
-  // macOS is the only platform published for both architectures.
-  if (p === "darwin") return `codegraph-server-darwin-${a}`;
   // Windows on ARM runs x64 executables under the OS's own emulation layer, so
   // the x64 asset is the correct answer there and refusing it would leave those
-  // users with no engine at all.
+  // users with no engine at all. Linux and macOS have no such layer, so they
+  // are answered by exact platform-arch match and nothing else: handing an x64
+  // build to an arm64 machine installs ~120 MB that cannot execute, which
+  // surfaces as an exec-format error at first use rather than as the
+  // unsupported platform it is.
   if (p === "win32") return "codegraph-server-win32-x64.exe";
-  // Linux has no such layer. Handing the x64 build to an arm64 machine installs
-  // ~30 MB that cannot execute, which surfaces as an exec-format error at first
-  // use rather than as the unsupported platform it is.
-  return a === "x64" ? "codegraph-server-linux-x64" : null;
+  const name = `codegraph-server-${p}-${a}`;
+  return PUBLISHED_BINARIES.includes(name) ? name : null;
 }
 
 /** Numeric release components, or null when [version] is not one. */
@@ -415,6 +434,7 @@ async function ensureEngine(version, targetDir, options = {}) {
 module.exports = {
   RELEASE_BASE,
   ENGINE_VERSION,
+  PUBLISHED_BINARIES,
   WINDOWS_SIDECAR,
   VERSION_MARKER,
   EngineInUseError,

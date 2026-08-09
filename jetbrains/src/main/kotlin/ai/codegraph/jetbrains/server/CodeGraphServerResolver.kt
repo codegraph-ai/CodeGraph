@@ -104,7 +104,11 @@ object CodeGraphServerResolver {
                 else -> null
             }
             os.contains("win") -> if (isX64 || isArm64) "codegraph-server-win32-x64.exe" else null
-            os.contains("linux") -> if (isX64) "codegraph-server-linux-x64" else null
+            os.contains("linux") -> when {
+                isArm64 -> "codegraph-server-linux-arm64"
+                isX64 -> "codegraph-server-linux-x64"
+                else -> null
+            }
             else -> null
         }
     }

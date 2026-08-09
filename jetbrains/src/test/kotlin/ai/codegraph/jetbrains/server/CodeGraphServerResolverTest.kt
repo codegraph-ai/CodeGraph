@@ -160,18 +160,19 @@ class CodeGraphServerResolverTest : BasePlatformTestCase() {
         }
     }
 
-    fun `test arm64 linux has no published engine but arm64 windows emulates x64`() {
-        // Handing the x64 asset to an arm64 Linux machine installs something
-        // that cannot execute, which shows up as an exec-format error rather
-        // than as the missing build it is. Windows on ARM is the exception: it
-        // runs x64 binaries under the OS's own emulation, so refusing there
-        // would leave those users with no engine for no reason.
+    fun `test arm64 linux gets its own engine and arm64 windows emulates x64`() {
+        // Linux arm64 has its own published build, so it must resolve to that
+        // and never to the x64 asset: handing x64 to an arm64 machine installs
+        // something that cannot execute, which shows up as an exec-format error
+        // rather than as the wrong build it is. Windows on ARM is the
+        // exception - it runs x64 under the OS's own emulation, so refusing
+        // there would leave those users with no engine for no reason.
         fun nameFor(os: String, arch: String) = CodeGraphServerResolver.platformBinaryNameOrNull(
             ResolverEnvironment(fakeHome, emptyList(), os, arch),
         )
 
-        assertNull(nameFor("Linux", "aarch64"))
-        assertNull(nameFor("Linux", "arm64"))
+        assertEquals("codegraph-server-linux-arm64", nameFor("Linux", "aarch64"))
+        assertEquals("codegraph-server-linux-arm64", nameFor("Linux", "arm64"))
         assertEquals("codegraph-server-win32-x64.exe", nameFor("Windows 11", "aarch64"))
         assertEquals("codegraph-server-win32-x64.exe", nameFor("Windows 11", "arm64"))
         assertEquals("codegraph-server-linux-x64", nameFor("Linux", "x86_64"))

@@ -105,13 +105,25 @@ fi
 # prevent. The list mirrors BINARIES + WINDOWS_SIDECAR there, which is the same
 # set bin/fetch-engine.js resolves against.
 ENGINE_VERSION=$(node -e "console.log(require('$PKG_DIR/bin/fetch-engine').ENGINE_VERSION)")
-ENGINE_ASSETS=(
-  "codegraph-server-darwin-arm64"
-  "codegraph-server-darwin-x64"
-  "codegraph-server-linux-x64"
-  "codegraph-server-win32-x64.exe"
-  "onnxruntime.dll"
-)
+# Read from fetch-engine.js rather than repeating it here. A copy of this list
+# drifts silently: it stays green while probing a set that no longer matches
+# what the clients resolve, which is the exact failure this gate exists to
+# catch. The Windows sidecar is appended because it is a required asset without
+# being an engine, so it is not in PUBLISHED_BINARIES.
+# A `while read` loop rather than `mapfile`: this script's shebang is
+# /bin/bash, which on macOS is bash 3.2, and mapfile arrived in bash 4.
+ENGINE_ASSETS=()
+while IFS= read -r asset; do
+  [ -n "$asset" ] && ENGINE_ASSETS+=("$asset")
+done < <(node -e "
+  const f = require('$PKG_DIR/bin/fetch-engine');
+  for (const a of f.PUBLISHED_BINARIES) console.log(a);
+  console.log(f.WINDOWS_SIDECAR);
+")
+if [ "${#ENGINE_ASSETS[@]}" -lt 2 ]; then
+  echo "ERROR: could not read the published asset list from bin/fetch-engine.js" >&2
+  exit 1
+fi
 RELEASE_BASE="https://github.com/codegraph-ai/CodeGraph/releases/download/v${ENGINE_VERSION}"
 
 echo ""

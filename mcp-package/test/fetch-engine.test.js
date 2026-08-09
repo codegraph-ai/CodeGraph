@@ -27,6 +27,7 @@ const {
   ensureEngine,
   requiredAssets,
   platformBinaryName,
+  PUBLISHED_BINARIES,
   redirectTarget,
   installedVersion,
   compareVersions,
@@ -412,8 +413,12 @@ async function run() {
   // --- only published platform/arch pairs resolve to an asset ----------
   // An x64 asset handed to an arm64 Linux machine downloads and chmods cleanly
   // and then fails to exec, which is far harder to read than "not published".
-  // Windows on ARM is the exception: it emulates x64, so the x64 build runs.
-  check(platformBinaryName("linux", "arm64") === null, "linux-arm64 has no published engine");
+  // Linux arm64 now has its own build, so it must resolve to that one and never
+  // to the x64 asset. Windows on ARM stays the exception: it emulates x64.
+  check(
+    platformBinaryName("linux", "arm64") === "codegraph-server-linux-arm64",
+    "linux-arm64 resolves to its own engine, not the x64 one"
+  );
   check(
     platformBinaryName("win32", "arm64") === "codegraph-server-win32-x64.exe",
     "win32-arm64 uses the x64 engine, which Windows emulates"
@@ -427,7 +432,40 @@ async function run() {
     "darwin-arm64 does"
   );
   check(platformBinaryName("linux", "x64") === "codegraph-server-linux-x64", "linux-x64 does");
-  check(requiredAssets("linux", "arm64").length === 0, "an unpublished pair needs no assets");
+  check(
+    platformBinaryName("linux", "arm64") === "codegraph-server-linux-arm64",
+    "linux-arm64 does"
+  );
+  check(
+    requiredAssets("linux", "arm64").length === 1 &&
+      requiredAssets("linux", "arm64")[0] === "codegraph-server-linux-arm64",
+    "linux-arm64 needs the engine and no sidecar"
+  );
+  // Windows on ARM keeps resolving to the x64 asset: the OS emulates it, so
+  // refusing would leave those users with no engine at all.
+  check(
+    platformBinaryName("win32", "arm64") === "codegraph-server-win32-x64.exe",
+    "win32-arm64 still resolves to the emulated x64 build"
+  );
+  // A platform with no build must still resolve to nothing rather than to
+  // someone else's binary.
+  check(platformBinaryName("linux", "riscv64") === null, "an unbuilt arch resolves to nothing");
+  check(requiredAssets("linux", "riscv64").length === 0, "an unpublished pair needs no assets");
+  // Every name the mapping can return has to be a name the release publishes,
+  // or an install fetches a 404.
+  for (const [p, a] of [
+    ["darwin", "arm64"],
+    ["darwin", "x64"],
+    ["linux", "arm64"],
+    ["linux", "x64"],
+    ["win32", "x64"],
+  ]) {
+    const name = platformBinaryName(p, a);
+    check(
+      PUBLISHED_BINARIES.includes(name),
+      `${p}-${a} resolves to a published asset (${name})`
+    );
+  }
 
   console.log("");
   console.log(`${failures} failure(s)`);

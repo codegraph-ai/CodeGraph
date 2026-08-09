@@ -39,12 +39,25 @@ if [ -z "$VERSION" ]; then
 fi
 TAG="v${VERSION}"
 
-BINARIES=(
-  "codegraph-server-darwin-arm64"
-  "codegraph-server-darwin-x64"
-  "codegraph-server-linux-x64"
-  "codegraph-server-win32-x64.exe"
-)
+# Read the platform list from bin/fetch-engine.js instead of repeating it. That
+# module is what every client resolves against, so a copy here can publish a set
+# the clients never ask for, or omit one they do - and the failure only shows up
+# as an empty install on the platform nobody tested. A `while read` loop rather
+# than `mapfile`, which needs bash 4 and is absent from macOS's bash 3.2.
+FETCH_ENGINE="$REPO_ROOT/mcp-package/bin/fetch-engine.js"
+BINARIES=()
+while IFS= read -r asset; do
+  [ -n "$asset" ] && BINARIES+=("$asset")
+done < <(node -e "
+  for (const a of require('$FETCH_ENGINE').PUBLISHED_BINARIES) console.log(a);
+" 2>/dev/null)
+
+if [ "${#BINARIES[@]}" -eq 0 ]; then
+  echo "ERROR: could not read PUBLISHED_BINARIES from $FETCH_ENGINE." >&2
+  echo "That list is what the clients fetch by, so publishing without it would" >&2
+  echo "guess at the platform set." >&2
+  exit 1
+fi
 
 # The Windows engine loads this at runtime. Shipping the exe without it gives
 # users a download that succeeds and then fails at startup, which is a worse
