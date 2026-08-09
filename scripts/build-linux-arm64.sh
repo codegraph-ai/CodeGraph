@@ -43,6 +43,11 @@
 # Usage:
 #   ./scripts/build-linux-arm64.sh            # build + verify + stage
 #   ./scripts/build-linux-arm64.sh --no-stage # build + verify only
+#
+#   CODEGRAPH_ALLOW_DIRTY=1 ./scripts/build-linux-arm64.sh
+#       Build from whatever is in the tree, skipping the commit check below.
+#       Implies --no-stage: a binary nobody can trace must not reach the
+#       staging directory, where it would look exactly like a release build.
 
 set -euo pipefail
 
@@ -74,7 +79,9 @@ CHECK_PROVENANCE=1
 if [ "${CODEGRAPH_ALLOW_DIRTY:-0}" = "1" ]; then
   CHECK_PROVENANCE=0
 else
-  EXPECTED_GIT_SHORT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+  # An explicit length rather than `--short`, whose default the host user's
+  # core.abbrev can change while the container's git has no such setting.
+  EXPECTED_GIT_SHORT="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || true)"
   if [ -z "$EXPECTED_GIT_SHORT" ]; then
     echo "ERROR: $REPO_ROOT is not a git checkout, so the engine cannot say what" >&2
     echo "produced it. Build from a checkout, or set CODEGRAPH_ALLOW_DIRTY=1 for a" >&2
@@ -222,7 +229,16 @@ if [ "$CHECK_PROVENANCE" = "1" ]; then
       echo "and cannot be traced back to a released commit." >&2
       exit 1 ;;
   esac
-  if [ "$GOT_GIT" != "$EXPECTED_GIT_SHORT" ]; then
+  if [ "${#GOT_GIT}" -lt 7 ]; then
+    echo "ERROR: the binary's stamp '$GOT_GIT' is too short to name a commit." >&2
+    exit 1
+  fi
+  # By prefix: the container's git and the host's git abbreviate independently,
+  # so the same commit can legitimately come back at two different lengths.
+  same_commit=0
+  case "$EXPECTED_GIT_SHORT" in "$GOT_GIT"*) same_commit=1 ;; esac
+  case "$GOT_GIT" in "$EXPECTED_GIT_SHORT"*) same_commit=1 ;; esac
+  if [ "$same_commit" -eq 0 ]; then
     echo "ERROR: the binary claims commit $GOT_GIT, but the host is at" >&2
     echo "$EXPECTED_GIT_SHORT. The release assets would disagree on their source." >&2
     exit 1
@@ -235,9 +251,15 @@ CONTAINER
 BUILT="$BUILD_DIR/release/codegraph-server"
 [ -f "$BUILT" ] || { echo "ERROR: no binary at $BUILT" >&2; exit 1; }
 
-if [ "${1:-}" = "--no-stage" ]; then
+if [ "${1:-}" = "--no-stage" ] || [ "$CHECK_PROVENANCE" -eq 0 ]; then
   echo
   echo "Built (not staged): $BUILT"
+  if [ "$CHECK_PROVENANCE" -eq 0 ]; then
+    echo
+    echo "Not staged: CODEGRAPH_ALLOW_DIRTY=1 skipped the commit check, and an"
+    echo "unverified binary in $STAGE_DIR would be indistinguishable"
+    echo "from a release build. Commit the tree and re-run to stage."
+  fi
   exit 0
 fi
 
@@ -249,5 +271,8 @@ echo "Staged: $STAGE_DIR/$ASSET"
 
 # Provenance is recorded where it is known. publish-release-assets.sh treats an
 # unstamped binary in the staging directory as stale, because vscode/bin/ is not
-# cleaned between releases.
-"$REPO_ROOT/scripts/stamp-binary.sh" "$ASSET" "$VERSION"
+# cleaned between releases, and refuses a set of assets whose commits disagree.
+# The commit is passed rather than read back from the binary: an x86_64 host
+# cannot execute what it just cross-built, and the container already proved this
+# binary agrees with this checkout.
+"$REPO_ROOT/scripts/stamp-binary.sh" "$ASSET" "$VERSION" "$EXPECTED_GIT_SHORT"
