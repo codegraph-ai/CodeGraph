@@ -12,15 +12,18 @@
 //! - **LSP** (default): Standard Language Server Protocol for IDE integration
 //! - **MCP** (`--mcp` flag): Model Context Protocol for AI client integration
 
-// glibc 2.31 compat (test builds): the production shim lives in main.rs
-// for the binary target. `cargo test --lib` builds a separate test
-// executable that doesn't include main.rs, so ONNX Runtime's reference
-// to `__libc_single_threaded` (added in glibc 2.32) goes unresolved
-// when linking tests on SLES 15-SP4. This duplicate is gated on
-// `cfg(test)` so the binary target never sees two definitions.
+// glibc 2.31 compat (test builds): the production shim lives in main.rs for
+// the binary target. `cargo test --lib` builds a separate test executable that
+// doesn't include main.rs, so ONNX Runtime's reference to
+// `__libc_single_threaded` (added in glibc 2.32) goes unresolved when linking
+// tests on SLES 15-SP4. This definition is gated on `cfg(test)` so the binary
+// target never sees two of them; see `glibc_compat` for why the storage has to
+// be writable.
 #[cfg(all(target_os = "linux", test))]
 #[no_mangle]
-pub static __libc_single_threaded: u8 = 0;
+#[allow(non_upper_case_globals)]
+pub static __libc_single_threaded: glibc_compat::SingleThreaded =
+    glibc_compat::SingleThreaded::ZERO;
 
 pub mod ai_query;
 pub mod backend;
@@ -33,6 +36,7 @@ pub mod domain;
 pub mod embed_queue;
 pub mod error;
 pub mod git_mining;
+pub mod glibc_compat;
 pub mod handlers;
 pub mod index;
 pub mod index_state;

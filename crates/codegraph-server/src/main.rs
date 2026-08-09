@@ -13,12 +13,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// glibc 2.31 compat: __libc_single_threaded was added in glibc 2.32 but ONNX
-// Runtime references it. Provide a fallback for SLES 15 SP4 and similar.
-// On newer glibc the real symbol shadows this at runtime.
+// glibc 2.31 compat: ONNX Runtime references `__libc_single_threaded`, which
+// glibc only defines from 2.32 on, so a build for SLES 15 SP4 and similar
+// needs a definition to link against. The storage has to be writable - glibc
+// writes the flag at startup - which is what `SingleThreaded` provides; see
+// `codegraph_server::glibc_compat` for the full story (issue #15).
 #[cfg(target_os = "linux")]
 #[no_mangle]
-pub static __libc_single_threaded: u8 = 0;
+#[allow(non_upper_case_globals)]
+pub static __libc_single_threaded: codegraph_server::glibc_compat::SingleThreaded =
+    codegraph_server::glibc_compat::SingleThreaded::ZERO;
 
 #[derive(Parser)]
 #[command(name = "codegraph-server")]

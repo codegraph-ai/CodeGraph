@@ -30,7 +30,7 @@ The server indexes the current working directory automatically.
 Install from the marketplace, or sideload the VSIX:
 
 ```bash
-code --install-extension codegraph-0.20.0.vsix
+code --install-extension codegraph-0.20.1.vsix
 ```
 
 One VSIX serves every platform.
