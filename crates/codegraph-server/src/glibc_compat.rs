@@ -34,6 +34,13 @@ pub struct SingleThreaded(UnsafeCell<u8>);
 
 impl SingleThreaded {
     /// The initial value of the flag: "not single threaded".
+    ///
+    /// `declare_interior_mutable_const` warns because copying a const with
+    /// interior mutability normally gives each use its own hidden cell. That
+    /// is precisely the intent here: this const exists only to initialise the
+    /// `#[no_mangle] static` in each target, so there is exactly one cell per
+    /// target and nothing ever reads it through the const.
+    #[allow(clippy::declare_interior_mutable_const)]
     pub const ZERO: Self = Self(UnsafeCell::new(0));
 }
 
