@@ -48,6 +48,6 @@
   },
   "scripts": {
     "postinstall": "node bin/postinstall.js",
-    "test": "node test/fetch-engine.test.js"
+    "test": "node test/fetch-engine.test.js && node test/wrapper-args.test.js"
   }
 }
