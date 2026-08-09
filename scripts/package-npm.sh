@@ -5,7 +5,6 @@
 # Package the npm MCP server distribution.
 # Run from the repo root after all platform binaries are built.
 #
-# Usage:
 # The engine is not bundled: it is fetched from the GitHub release at install
 # time by bin/postinstall.js. Publish the release assets first with
 # ./scripts/publish-release-assets.sh, or installs of this version will fail to
@@ -60,9 +59,27 @@ echo ""
 echo "package.json version: $PKG_VERSION"
 echo "server.json version:  $SERVER_VERSION"
 
+# A mismatch here is fatal rather than a warning. The two files are published to
+# two different registries under one version, and a warning scrolls past in the
+# npm pack output - leaving npmjs.com and the MCP Registry disagreeing about what
+# this release is, which cannot be corrected by republishing the same version.
 if [ "$PKG_VERSION" != "$SERVER_VERSION" ]; then
-  echo "WARNING: version mismatch between package.json and server.json"
+  echo "ERROR: version mismatch between package.json ($PKG_VERSION) and server.json ($SERVER_VERSION)" >&2
+  exit 1
 fi
+
+# The npm package contains no engine; every install fetches one from the release
+# tagged with this version. Publishing before those assets exist produces a
+# package that installs cleanly and then has nothing to run.
+ENGINE_VERSION=$(node -e "console.log(require('$PKG_DIR/bin/fetch-engine').ENGINE_VERSION)")
+echo "engine version:       $ENGINE_VERSION (fetched at install time)"
+if ! curl -fsSL -o /dev/null \
+  "https://github.com/codegraph-ai/CodeGraph/releases/download/v${ENGINE_VERSION}/codegraph-server-linux-x64.sha256"; then
+  echo "ERROR: no published engine assets for v${ENGINE_VERSION}" >&2
+  echo "  Run ./scripts/publish-release-assets.sh first, or installs will find no engine." >&2
+  exit 1
+fi
+echo "  ✓ engine assets are published for v${ENGINE_VERSION}"
 
 # Step 4: Pack
 echo ""
