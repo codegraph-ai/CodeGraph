@@ -48,7 +48,15 @@ echo ""
 # Publish the release assets first with ./scripts/publish-release-assets.sh, or
 # installs of this version will have no engine to fetch.
 echo "Packaging (platform-independent; the engine is fetched at first use)..."
-npx @vscode/vsce package 2>&1 | grep -E "DONE|ERROR"
+# Only the DONE/ERROR lines are interesting on success, but a failure has to
+# show everything: filtering vsce through grep alone both hid the reason and,
+# under `set -o pipefail`, turned "no line matched" into a bare exit 1.
+if ! vsce_log="$(npx @vscode/vsce package 2>&1)"; then
+  printf '%s\n' "$vsce_log" >&2
+  echo "ERROR: vsce package failed." >&2
+  exit 1
+fi
+printf '%s\n' "$vsce_log" | grep -E "DONE|ERROR" || true
 
 echo ""
 echo "VSIX packages:"

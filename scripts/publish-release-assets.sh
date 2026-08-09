@@ -30,7 +30,13 @@ REPO="codegraph-ai/CodeGraph"
 
 # The engine's own version is the one that matters here - these are engine
 # binaries, and every client asks for them by the engine version it pins.
-VERSION="$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+VERSION="$(grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/' || true)"
+if [ -z "$VERSION" ]; then
+  echo "ERROR: no 'version = \"...\"' line in $REPO_ROOT/Cargo.toml." >&2
+  echo "Every asset and every client pin is keyed on it, so nothing can be" >&2
+  echo "published without it." >&2
+  exit 1
+fi
 TAG="v${VERSION}"
 
 BINARIES=(
@@ -67,7 +73,7 @@ pin_mismatch=0
 for entry in "${PIN_SOURCES[@]}"; do
   file="${entry%%|*}"
   label="${entry##*|}"
-  pin="$(grep -m1 'ENGINE_VERSION = "' "$REPO_ROOT/$file" | sed 's/.*"\(.*\)".*/\1/')"
+  pin="$(grep -m1 'ENGINE_VERSION = "' "$REPO_ROOT/$file" | sed 's/.*"\(.*\)".*/\1/' || true)"
   if [ "$pin" = "$VERSION" ]; then
     printf '  ✓ %-14s pins engine %s\n' "$label" "$pin"
   else
@@ -127,7 +133,7 @@ for bin in "${BINARIES[@]}" "$WINDOWS_SIDECAR"; do
   if [ -f "$MANIFEST" ] && grep -qxF "$VERSION  $bin" "$MANIFEST"; then
     printf '  ✓ %-36s %s  (%s)\n' "$bin" "$size" "$VERSION"
   else
-    recorded="$(grep -F "  $bin" "$MANIFEST" 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+    recorded="$(grep -F "  $bin" "$MANIFEST" 2>/dev/null | awk '{print $1}' | tr '\n' ' ' || true)"
     printf '  ✗ %-36s %s  NOT STAMPED %s\n' "$bin" "$size" "${recorded:+(manifest says: $recorded)}"
     stale=1
   fi

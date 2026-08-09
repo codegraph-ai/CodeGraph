@@ -25,7 +25,17 @@ const os = require("os");
 const path = require("path");
 
 const WRAPPER = path.join(__dirname, "..", "bin", "codegraph-mcp.js");
-const LOOP_STATE = path.join(os.homedir(), ".codegraph", "mcp-failures.json");
+
+// The crash-loop counter lives under the home directory, and these tests both
+// read and delete it. They get a home of their own: a real one holds a real
+// user's state, and may not even be writable, which would fail the breaker
+// assertion for a reason that has nothing to do with the breaker.
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cg-home-"));
+const LOOP_STATE = path.join(HOME, ".codegraph", "mcp-failures.json");
+
+function cleanup() {
+  fs.rmSync(HOME, { recursive: true, force: true });
+}
 
 let failures = 0;
 function check(ok, message) {
@@ -58,9 +68,19 @@ function runWrapper(clientArgs, exitCode) {
   stubEngine(dir, exitCode);
   try {
     const result = spawnSync(process.execPath, [WRAPPER, ...clientArgs], {
-      // CODEGRAPH_SERVER_PATH is how the wrapper is pointed at a specific
-      // engine; falling back to the bundled path would find the real one.
-      env: { ...process.env, CODEGRAPH_BIN_DIR: dir, CODEGRAPH_SKIP_MODEL_FETCH: "1" },
+      // CODEGRAPH_BIN_DIR is how the wrapper is pointed at a specific engine
+      // directory; falling back to the bundled path would find the real one.
+      // Telemetry is off because these runs fabricate crashes on purpose, and
+      // reporting them would be indistinguishable from the field crash loop
+      // this test exists to prevent.
+      env: {
+        ...process.env,
+        HOME,
+        USERPROFILE: HOME,
+        CODEGRAPH_BIN_DIR: dir,
+        CODEGRAPH_SKIP_MODEL_FETCH: "1",
+        CODEGRAPH_TELEMETRY: "off",
+      },
       encoding: "utf8",
       timeout: 20000,
       input: "",
@@ -86,6 +106,7 @@ if (probe.argv === null) {
     "SKIP wrapper argument tests - the stub engine was not used " +
       "(findBinary() ignored CODEGRAPH_BIN_DIR)."
   );
+  cleanup();
   process.exit(0);
 }
 
@@ -136,12 +157,9 @@ if (probe.argv === null) {
     if (/Not reporting further failures/.test(stderr)) sawBreaker = true;
   }
   check(sawBreaker, "the breaker engages within three identical failures");
-  try {
-    fs.unlinkSync(LOOP_STATE);
-  } catch {
-    /* cleanup */
-  }
 }
+
+cleanup();
 
 console.log("");
 console.log(`${failures} failure(s)`);

@@ -39,13 +39,19 @@ for stale in "$BIN_DIR"/codegraph-server-* "$BIN_DIR/onnxruntime.dll"; do
   fi
 done
 
-# The fetch path is what every install now depends on, so it is checked here
-# rather than discovered by the first user to install the package.
+# The fetch path is what every install now depends on, and the wrapper's
+# argument contract is what the crash loop came down to, so both are checked
+# here rather than discovered by the first user to install the package. The
+# package's own `npm test` is the single list of what must pass, so a test added
+# there is not silently skipped by this gate.
 echo ""
-echo "Checking the engine fetch..."
-( cd "$PKG_DIR" && node test/fetch-engine.test.js >/dev/null ) \
-  && echo "  ✓ fetch-engine tests pass" \
-  || { echo "  ✗ fetch-engine tests FAILED — not packaging"; exit 1; }
+echo "Checking the engine fetch and the wrapper arguments..."
+if ! test_log="$( cd "$PKG_DIR" && npm test 2>&1 )"; then
+  printf '%s\n' "$test_log" >&2
+  echo "  ✗ package tests FAILED - not packaging" >&2
+  exit 1
+fi
+echo "  ✓ package tests pass"
 
 # Step 3: Verify version consistency
 PKG_VERSION=$(node -e "console.log(require('$PKG_DIR/package.json').version)")

@@ -19,7 +19,6 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.util.UUID
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 /**
  * Sends the same events as the VS Code client, so both editors land in one
@@ -158,17 +157,19 @@ class TelemetryReporter(private val project: Project) : Disposable {
      * Closed with the project. The thread is a daemon, so a leaked executor
      * never keeps the IDE alive - but this is a project service, and one idle
      * thread per project opened in a session is still one too many.
+     *
+     * Nothing is waited on: project disposal runs on the EDT, and an in-flight
+     * POST to an unreachable endpoint would hold the UI for as long as the
+     * socket timeouts allow. A dropped telemetry event costs nothing.
      */
     override fun dispose() {
-        sender.shutdown()
-        runCatching { sender.awaitTermination(SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS) }
+        sender.shutdownNow()
     }
 
     companion object {
         private val LOG = logger<TelemetryReporter>()
         private const val PLUGIN_ID = "ai.codegraph.jetbrains"
         private const val TIMEOUT_MS = 5_000
-        private const val SHUTDOWN_WAIT_SECONDS = 2L
 
         fun getInstance(project: Project): TelemetryReporter = project.service()
     }
