@@ -53,11 +53,26 @@ fi
 echo "  ✓ package tests pass"
 
 # Step 3: Verify version consistency
+#
+# server.json carries the release version twice: once at the top level, and once
+# inside the npm entry of `packages`, which is the field the MCP Registry
+# resolves the tarball from. Nothing synchronises the three numbers - they are
+# hand-edited - so all of them are compared, not just the top-level one. A
+# release that bumped package.json and server.json but missed the nested version
+# would register a new server entry pointing at the previous tarball, and the
+# Registry would accept it because that older tarball exists and carries the
+# right mcpName.
 PKG_VERSION=$(node -e "console.log(require('$PKG_DIR/package.json').version)")
 SERVER_VERSION=$(node -e "console.log(require('$PKG_DIR/server.json').version)")
+SERVER_NPM_VERSION=$(node -e "
+  const npm = (require('$PKG_DIR/server.json').packages || [])
+    .find((p) => p.registryType === 'npm');
+  console.log(npm ? npm.version : '<no npm package entry>');
+")
 echo ""
-echo "package.json version: $PKG_VERSION"
-echo "server.json version:  $SERVER_VERSION"
+echo "package.json version:      $PKG_VERSION"
+echo "server.json version:       $SERVER_VERSION"
+echo "server.json npm package:   $SERVER_NPM_VERSION"
 
 # A mismatch here is fatal rather than a warning. The two files are published to
 # two different registries under one version, and a warning scrolls past in the
@@ -67,19 +82,61 @@ if [ "$PKG_VERSION" != "$SERVER_VERSION" ]; then
   echo "ERROR: version mismatch between package.json ($PKG_VERSION) and server.json ($SERVER_VERSION)" >&2
   exit 1
 fi
-
-# The npm package contains no engine; every install fetches one from the release
-# tagged with this version. Publishing before those assets exist produces a
-# package that installs cleanly and then has nothing to run.
-ENGINE_VERSION=$(node -e "console.log(require('$PKG_DIR/bin/fetch-engine').ENGINE_VERSION)")
-echo "engine version:       $ENGINE_VERSION (fetched at install time)"
-if ! curl -fsSL -o /dev/null \
-  "https://github.com/codegraph-ai/CodeGraph/releases/download/v${ENGINE_VERSION}/codegraph-server-linux-x64.sha256"; then
-  echo "ERROR: no published engine assets for v${ENGINE_VERSION}" >&2
-  echo "  Run ./scripts/publish-release-assets.sh first, or installs will find no engine." >&2
+if [ "$PKG_VERSION" != "$SERVER_NPM_VERSION" ]; then
+  echo "ERROR: version mismatch between package.json ($PKG_VERSION) and the npm entry in server.json ($SERVER_NPM_VERSION)" >&2
+  echo "  The MCP Registry resolves the tarball from packages[].version, so this would" >&2
+  echo "  publish a $PKG_VERSION server entry pointing at the $SERVER_NPM_VERSION tarball." >&2
   exit 1
 fi
-echo "  ✓ engine assets are published for v${ENGINE_VERSION}"
+
+# The npm package contains no engine; every install fetches one from the release
+# tagged with the engine version pinned in bin/fetch-engine.js, which is
+# deliberately not this package's version (see the ENGINE_VERSION comment there:
+# a client-only patch release must not start asking for a tag nobody published).
+# Publishing before those assets exist produces a package that installs cleanly
+# and then has nothing to run.
+#
+# Every asset is probed, not just one. publish-release-assets.sh uploads the
+# whole staging directory in a single `gh release upload`, so a network drop or
+# a rate limit part-way through leaves the release with some platforms attached
+# and others missing - and a one-platform probe would wave that through, giving
+# users on the missing platforms exactly the empty install this gate exists to
+# prevent. The list mirrors BINARIES + WINDOWS_SIDECAR there, which is the same
+# set bin/fetch-engine.js resolves against.
+ENGINE_VERSION=$(node -e "console.log(require('$PKG_DIR/bin/fetch-engine').ENGINE_VERSION)")
+ENGINE_ASSETS=(
+  "codegraph-server-darwin-arm64"
+  "codegraph-server-darwin-x64"
+  "codegraph-server-linux-x64"
+  "codegraph-server-win32-x64.exe"
+  "onnxruntime.dll"
+)
+RELEASE_BASE="https://github.com/codegraph-ai/CodeGraph/releases/download/v${ENGINE_VERSION}"
+
+echo ""
+echo "engine version:            $ENGINE_VERSION (fetched at install time)"
+echo "Checking published engine assets for v${ENGINE_VERSION}..."
+missing_assets=0
+for asset in "${ENGINE_ASSETS[@]}"; do
+  # A binary and its checksum are separate assets and the client needs both, so
+  # both are probed. The binaries are requested one byte at a time - presence is
+  # the question here, and downloading ~120 MB to answer it is not worth it.
+  if ! curl -fsSL -o /dev/null -r 0-0 "$RELEASE_BASE/$asset" \
+    || ! curl -fsSL -o /dev/null "$RELEASE_BASE/$asset.sha256"; then
+    printf '  ✗ %s\n' "$asset"
+    missing_assets=1
+  else
+    printf '  ✓ %s\n' "$asset"
+  fi
+done
+
+if [ "$missing_assets" -ne 0 ]; then
+  echo "ERROR: the release v${ENGINE_VERSION} is missing engine assets (binary or .sha256)." >&2
+  echo "  Run ./scripts/publish-release-assets.sh --publish first, or installs on those" >&2
+  echo "  platforms will find no engine." >&2
+  exit 1
+fi
+echo "  ✓ every engine asset is published for v${ENGINE_VERSION}"
 
 # Step 4: Pack
 echo ""
