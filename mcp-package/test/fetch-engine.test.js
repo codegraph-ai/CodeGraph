@@ -474,6 +474,34 @@ async function run() {
   // someone else's binary.
   check(platformBinaryName("linux", "riscv64") === null, "an unbuilt arch resolves to nothing");
   check(requiredAssets("linux", "riscv64").length === 0, "an unpublished pair needs no assets");
+
+  // --- unsupported installs report the requested platform and arch -----
+  {
+    const dir = scratch();
+    const targetDir = path.join(dir, "engine");
+    const { server, baseUrl } = await startRelease({});
+    try {
+      for (const [options, target] of [
+        [{ platform: "freebsd", arch: "x64" }, "freebsd-x64"],
+        [{ platform: "linux", arch: "riscv64" }, "linux-riscv64"],
+        [{ platform: "win32", arch: "arm" }, "win32-arm"],
+        [{ platform: "freebsd" }, `freebsd-${os.arch()}`],
+        [{ arch: "riscv64" }, `${os.platform()}-riscv64`],
+      ]) {
+        let threw = null;
+        await ensureEngine(VERSION, targetDir, { ...options, baseUrl }).catch((e) => (threw = e));
+        check(
+          threw !== null && threw.message === `no CodeGraph engine is published for ${target}`,
+          `an unsupported install reports ${target}`
+        );
+        check(!fs.existsSync(targetDir), `${target} is rejected before creating the install directory`);
+      }
+    } finally {
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   // Every name the mapping can return has to be a name the release publishes,
   // or an install fetches a 404.
   for (const [p, a] of [
