@@ -33,33 +33,45 @@ echo ""
 
 # ------------------------------------------------------------------ auth
 #
-# Both registries are authenticated here, before the tests, the asset probe and
-# the pack - not at the point of use. Every one of those has to pass anyway, and
-# discovering an expired credential after them means doing them again. The last
+# The credentials are checked here, before the tests, the asset probe and the
+# pack - not at the point of use. Every one of those has to pass anyway, and
+# discovering an unusable credential after them means doing them again. The last
 # release failed exactly there: `npm publish` ran after several minutes of work
 # and `mcp-publisher` after that, so a stale token surfaced at the end.
 #
+# What is checked here is deliberately not what is minted here. The npm session
+# is long-lived, so logging in now is the whole fix for that half. The MCP
+# Registry's token lives 300 seconds - less than the rest of this script takes -
+# so it is minted at the publish step instead, and what is checked now is the
+# GitHub token it will be minted from, which is the credential that goes stale.
+#
 # Only for --publish. Packing needs no credentials, and this script also runs as
 # a plain build step, where prompting for a login would hang it.
+MCP_TOKEN=""
 if [ "${1:-}" = "--publish" ]; then
   echo "Checking publish credentials..."
 
   # npm's own session. Left interactive on purpose: the account has 2FA, so this
   # needs a human and a TTY, and that is better spent now than after the pack.
-  if npm whoami >/dev/null 2>&1; then
-    echo "  ✓ npm authenticated as $(npm whoami)"
+  if npm_user="$(npm whoami 2>/dev/null)"; then
+    echo "  ✓ npm authenticated as $npm_user"
   else
     echo "  npm: not logged in - starting login (2FA expected)"
     npm login || { echo "  ✗ npm login failed - not packaging" >&2; exit 1; }
-    echo "  ✓ npm authenticated as $(npm whoami)"
+    npm_user="$(npm whoami 2>/dev/null || echo '<unknown>')"
+    echo "  ✓ npm authenticated as $npm_user"
   fi
 
   # The MCP Registry decides which namespaces a token may publish to by calling
-  # GET /user/memberships/orgs, which requires the read:org scope. Its own device
-  # flow mints a token without it, GitHub answers 403, and the registry treats
-  # that as "no admin orgs" rather than an error - so publishing silently
-  # degrades to io.github.<user>/* and then 403s on io.github.codegraph-ai/*
-  # with a message about organization membership that is not the actual cause.
+  # GET /user/memberships/orgs and granting io.github.<org>/* for every org the
+  # account owns; GitHub gates that call behind read:org. A token without the
+  # scope does not fail to log in - GitHub answers 403, the registry reads that
+  # as "owns no organisations", and it issues a perfectly valid token scoped to
+  # io.github.<user>/* alone. The 403 then arrives at the publish, carrying a
+  # message about organisation membership that is not the actual cause.
+  #
+  # A successful login therefore cannot tell the two cases apart, so the
+  # precondition is checked against GitHub directly instead of inferred from one.
   #
   # `gh auth token` already carries read:org. It also carries repo and workflow,
   # which is broader than the registry needs; a PAT limited to read:org can be
@@ -69,20 +81,84 @@ if [ "${1:-}" = "--publish" ]; then
     if [ -z "$MCP_TOKEN" ] && command -v gh >/dev/null 2>&1; then
       MCP_TOKEN="$(gh auth token 2>/dev/null || true)"
     fi
-    if [ -n "$MCP_TOKEN" ]; then
-      if mcp-publisher login github -token "$MCP_TOKEN" >/dev/null 2>&1; then
-        echo "  ✓ mcp-publisher authenticated"
-      else
-        echo "  ✗ mcp-publisher login failed - not packaging" >&2
-        echo "    Check that the token has read:org and that the account is an" >&2
-        echo "    owner of the codegraph-ai organisation." >&2
-        exit 1
-      fi
-    else
-      echo "  ✗ no GitHub token for mcp-publisher - not packaging" >&2
+    if [ -z "$MCP_TOKEN" ]; then
+      echo "  ✗ no GitHub token for the MCP Registry - not packaging" >&2
       echo "    Run 'gh auth login', or set CODEGRAPH_MCP_TOKEN to a PAT with read:org." >&2
       exit 1
     fi
+
+    gh_body="$(mktemp)"
+    trap 'rm -f "$gh_body"' EXIT
+    gh_api() {
+      curl -sS -o "$gh_body" -w '%{http_code}' \
+        -H "Authorization: Bearer $MCP_TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/$1" 2>/dev/null || echo 000
+    }
+    # GitHub's error bodies carry no trailing newline, which would otherwise run
+    # the hint that follows onto the last line of the JSON.
+    gh_body_err() { printf '%s\n' "$(sed 's/^/    /' "$gh_body")" >&2; }
+
+    gh_status="$(gh_api user)"
+    if [ "$gh_status" != "200" ]; then
+      echo "  ✗ GitHub rejected the token (HTTP $gh_status) - not packaging" >&2
+      gh_body_err
+      echo "    Run 'gh auth login', or set CODEGRAPH_MCP_TOKEN to a live PAT with read:org." >&2
+      exit 1
+    fi
+    gh_login="$(node -e "
+      console.log(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).login);
+    " "$gh_body")"
+
+    # Read the namespace from server.json rather than naming it here: that file is
+    # what the publish is authorised against, so renaming the server must not be
+    # able to leave this check passing against the namespace it used to use.
+    MCP_NAMESPACE="$(node -e "console.log(require('$PKG_DIR/server.json').name.split('/')[0])")"
+    case "$MCP_NAMESPACE" in
+      io.github.*) mcp_owner="${MCP_NAMESPACE#io.github.}" ;;
+      *) mcp_owner="" ;;
+    esac
+
+    if [ -z "$mcp_owner" ]; then
+      echo "  ⚠ $MCP_NAMESPACE is not an io.github.* namespace - ownership not checked"
+    elif [ "$(printf '%s' "$mcp_owner" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$gh_login" | tr 'A-Z' 'a-z')" ]; then
+      echo "  ✓ $MCP_NAMESPACE is the token's own user namespace ($gh_login)"
+    else
+      gh_status="$(gh_api 'user/memberships/orgs?per_page=100')"
+      if [ "$gh_status" = "403" ]; then
+        echo "  ✗ the GitHub token cannot read organisation membership - not packaging" >&2
+        echo "    GitHub answered 403 for GET /user/memberships/orgs, which needs read:org." >&2
+        echo "    Without it the Registry sees no organisations and refuses $MCP_NAMESPACE." >&2
+        echo "    Use 'gh auth token', or set CODEGRAPH_MCP_TOKEN to a PAT with read:org." >&2
+        exit 1
+      fi
+      if [ "$gh_status" != "200" ]; then
+        echo "  ✗ could not read organisation membership from GitHub (HTTP $gh_status)" >&2
+        gh_body_err
+        exit 1
+      fi
+      # The Registry grants io.github.<org>/* to owners only, which this endpoint
+      # reports as role "admin". An active plain membership is refused at the
+      # publish just as a missing one is, so both are refused here.
+      membership="$(node -e "
+        const want = process.argv[2].toLowerCase();
+        const orgs = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+        const m = (Array.isArray(orgs) ? orgs : []).find(
+          (o) => ((o.organization || {}).login || '').toLowerCase() === want);
+        console.log(m ? m.role + '/' + m.state : 'none/none');
+      " "$gh_body" "$mcp_owner")"
+      if [ "$membership" != "admin/active" ]; then
+        echo "  ✗ $gh_login does not own the $mcp_owner organisation - not packaging" >&2
+        echo "    GET /user/memberships/orgs reports role/state: $membership" >&2
+        echo "    The Registry grants $MCP_NAMESPACE to owners (role admin) only." >&2
+        exit 1
+      fi
+      echo "  ✓ $gh_login owns $mcp_owner - $MCP_NAMESPACE is publishable"
+    fi
+
+    rm -f "$gh_body"
+    trap - EXIT
   else
     echo "  ⚠ mcp-publisher not on PATH - the MCP Registry step will be skipped"
   fi
@@ -230,6 +306,19 @@ if [ "${1:-}" = "--publish" ]; then
   echo ""
   echo "Updating MCP Registry..."
   if command -v mcp-publisher &>/dev/null; then
+    # The Registry's token is minted here, not in the preflight above: it lives
+    # 300 seconds, and the tests, the asset probe, the pack and an interactive
+    # npm 2FA prompt all happen in between. The preflight established that this
+    # GitHub token can reach the namespace, so this is expected to succeed - it
+    # is checked anyway, because the npm publish above is already irreversible.
+    if ! login_log="$(mcp-publisher login github -token "${MCP_TOKEN:-}" 2>&1)"; then
+      printf '%s\n' "$login_log" >&2
+      echo "✗ mcp-publisher login failed - npmjs.com has $PKG_VERSION but the MCP" >&2
+      echo "  Registry does not. Nothing else is needed; re-run just that step:" >&2
+      echo "  cd mcp-package && mcp-publisher login github -token \"\$(gh auth token)\" \\" >&2
+      echo "    && mcp-publisher publish --server-json server.json" >&2
+      exit 1
+    fi
     mcp-publisher publish --server-json server.json
     echo "✓ MCP Registry updated"
   else
