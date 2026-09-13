@@ -14,6 +14,12 @@
 # Usage:
 #   ./scripts/package-npm.sh           # pack only
 #   ./scripts/package-npm.sh --publish # also publish to npmjs.com
+#
+# --publish checks both registries' credentials before doing any work, so it
+# needs a terminal: an expired npm session is renewed with an interactive
+# `npm login` (the account has 2FA). The MCP Registry is reached with the token
+# from `gh auth token`, which must carry read:org; set CODEGRAPH_MCP_TOKEN to
+# use a PAT limited to that scope instead. Packing alone needs no credentials.
 
 set -euo pipefail
 
@@ -122,7 +128,7 @@ if [ "${1:-}" = "--publish" ]; then
 
     if [ -z "$mcp_owner" ]; then
       echo "  ⚠ $MCP_NAMESPACE is not an io.github.* namespace - ownership not checked"
-    elif [ "$(printf '%s' "$mcp_owner" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$gh_login" | tr 'A-Z' 'a-z')" ]; then
+    elif [ "$(printf '%s' "$mcp_owner" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$gh_login" | tr '[:upper:]' '[:lower:]')" ]; then
       echo "  ✓ $MCP_NAMESPACE is the token's own user namespace ($gh_login)"
     else
       gh_status="$(gh_api 'user/memberships/orgs?per_page=100')"
