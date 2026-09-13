@@ -31,6 +31,64 @@ BIN_DIR="$PKG_DIR/bin"
 echo "=== CodeGraph npm package builder ==="
 echo ""
 
+# ------------------------------------------------------------------ auth
+#
+# Both registries are authenticated here, before the tests, the asset probe and
+# the pack - not at the point of use. Every one of those has to pass anyway, and
+# discovering an expired credential after them means doing them again. The last
+# release failed exactly there: `npm publish` ran after several minutes of work
+# and `mcp-publisher` after that, so a stale token surfaced at the end.
+#
+# Only for --publish. Packing needs no credentials, and this script also runs as
+# a plain build step, where prompting for a login would hang it.
+if [ "${1:-}" = "--publish" ]; then
+  echo "Checking publish credentials..."
+
+  # npm's own session. Left interactive on purpose: the account has 2FA, so this
+  # needs a human and a TTY, and that is better spent now than after the pack.
+  if npm whoami >/dev/null 2>&1; then
+    echo "  ✓ npm authenticated as $(npm whoami)"
+  else
+    echo "  npm: not logged in - starting login (2FA expected)"
+    npm login || { echo "  ✗ npm login failed - not packaging" >&2; exit 1; }
+    echo "  ✓ npm authenticated as $(npm whoami)"
+  fi
+
+  # The MCP Registry decides which namespaces a token may publish to by calling
+  # GET /user/memberships/orgs, which requires the read:org scope. Its own device
+  # flow mints a token without it, GitHub answers 403, and the registry treats
+  # that as "no admin orgs" rather than an error - so publishing silently
+  # degrades to io.github.<user>/* and then 403s on io.github.codegraph-ai/*
+  # with a message about organization membership that is not the actual cause.
+  #
+  # `gh auth token` already carries read:org. It also carries repo and workflow,
+  # which is broader than the registry needs; a PAT limited to read:org can be
+  # substituted by setting CODEGRAPH_MCP_TOKEN.
+  if command -v mcp-publisher >/dev/null 2>&1; then
+    MCP_TOKEN="${CODEGRAPH_MCP_TOKEN:-}"
+    if [ -z "$MCP_TOKEN" ] && command -v gh >/dev/null 2>&1; then
+      MCP_TOKEN="$(gh auth token 2>/dev/null || true)"
+    fi
+    if [ -n "$MCP_TOKEN" ]; then
+      if mcp-publisher login github -token "$MCP_TOKEN" >/dev/null 2>&1; then
+        echo "  ✓ mcp-publisher authenticated"
+      else
+        echo "  ✗ mcp-publisher login failed - not packaging" >&2
+        echo "    Check that the token has read:org and that the account is an" >&2
+        echo "    owner of the codegraph-ai organisation." >&2
+        exit 1
+      fi
+    else
+      echo "  ✗ no GitHub token for mcp-publisher - not packaging" >&2
+      echo "    Run 'gh auth login', or set CODEGRAPH_MCP_TOKEN to a PAT with read:org." >&2
+      exit 1
+    fi
+  else
+    echo "  ⚠ mcp-publisher not on PATH - the MCP Registry step will be skipped"
+  fi
+  echo ""
+fi
+
 echo "Removing any bundled binaries (the engine is fetched at install time)..."
 for stale in "$BIN_DIR"/codegraph-server-* "$BIN_DIR/onnxruntime.dll"; do
   if [ -e "$stale" ]; then
