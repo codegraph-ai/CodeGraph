@@ -81,6 +81,59 @@ whatever the client passes rather than forwarded twice.
 | `--graph-only` | off | Skip embeddings — graph + structural tools only. No ONNX model load, 10-50× faster indexing. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot: index, run a single tool, print result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
 
+### Workspace filters and live updates
+
+Directory indexing and the MCP file watcher use the same filters: built-in
+excluded directories, `--exclude`, workspace `.codegraphignore` glob patterns,
+and root/nested `.gitignore` rules. Git ignore negation and directory rules are
+respected; a negation cannot re-include a file beneath an excluded directory.
+Global Git ignore files and `.git/info/exclude` are not read. Hidden paths,
+file-size and directory-depth limits also apply to watcher events. The watcher
+honors `--max-files` when adding new files while allowing edits to indexed files.
+
+Keep project-specific rules in the repository's `.gitignore` or
+`.codegraphignore`, so every agent uses the same rules. For example, a Git
+ignore entry `/cache/` prevents generated source files in that directory from
+entering the graph through either initial indexing or subsequent file events.
+Changes to either ignore file refresh the watcher's rules. Run
+`codegraph_reindex_workspace` with `force: true` to remove previously indexed
+files that now match an ignore rule, or index files that became unignored.
+Explicit `codegraph_index_files` requests remain available for manual indexing.
+
+### Optional: one shared engine for multiple agents (Unix)
+
+Set `CODEGRAPH_ENGINE=1` for the `codegraph-mcp` command in each client's MCP
+registration. Each client then launches a thin stdio relay; one local engine
+owns a backend and watcher per workspace, shared across concurrent sessions.
+The first relay starts the engine automatically. An explicit `--workspace` is
+preserved; otherwise the relay uses its working directory.
+
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "codegraph-mcp",
+      "args": ["--graph-only", "--profile", "graph"],
+      "env": { "CODEGRAPH_ENGINE": "1" }
+    }
+  }
+}
+```
+
+Auto-start forwards `--graph-only`, `--profile`, `--exclude`, `--max-files` and
+embedding settings. Engine settings are shared by all clients on that socket:
+the first starter determines them, and later connections do not reconfigure a
+running engine. Use consistent settings, restart the engine after changing
+them, or use distinct `--socket <path>` values for different configurations.
+For centrally managed settings, start the native `codegraph-server --serve`
+process explicitly with the desired flags, then connect clients to its socket.
+
+The default socket is `~/.codegraph/cg-engine.sock`. The engine exits after
+30 minutes without clients (`CODEGRAPH_ENGINE_IDLE_SECS` overrides this).
+`--graph-only` skips model and memory-manager initialization in both modes.
+Without it, the engine shares one embedding model across its workspaces when
+memory permits. Windows retains the regular per-session stdio mode.
+
 ### Troubleshooting: embeddings disabled / "Memory manager not initialized"
 
 Before loading the ONNX embedding model, the server checks available memory and

@@ -9,6 +9,7 @@
 
 use crate::index_state::IndexState;
 use crate::parser_registry::ParserRegistry;
+use crate::path_filter::WorkspaceFilter;
 use crate::watcher::GraphUpdater;
 use codegraph::CodeGraph;
 use std::path::{Path, PathBuf};
@@ -323,6 +324,21 @@ pub struct IndexResult {
     pub parser_errors_by_language: std::collections::HashMap<String, usize>,
 }
 
+type DirectoryIndexFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = (
+                    usize,
+                    usize,
+                    usize,
+                    std::collections::HashMap<String, usize>,
+                    std::collections::HashMap<String, usize>,
+                ),
+            > + Send
+            + 'a,
+    >,
+>;
+
 /// Shared indexer for walking directories, hashing files, and parsing them
 /// into a [`CodeGraph`].
 pub struct Indexer {
@@ -368,14 +384,8 @@ impl Indexer {
         let mut result = IndexResult::default();
 
         for folder in folders {
-            // Bounty 2026-05-03 — extend exclude_patterns from this
-            // folder's `.codegraphignore` if present. Per-folder so each
-            // workspace can have its own rules; doesn't pollute other
-            // folders' configs.
-            let mut folder_config = config.clone();
-            folder_config.extend_from_codegraphignore(folder);
             let (total, parsed, skipped, by_lang, parser_errors) = self
-                .index_directory(graph, folder, &folder_config, 0, counter.clone())
+                .index_directory(graph, folder, config, 0, counter.clone())
                 .await;
             result.total_files += total;
             result.files_parsed += parsed;
@@ -429,20 +439,23 @@ impl Indexer {
         config: &'a IndexConfig,
         depth: u32,
         counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = (
-                        usize,
-                        usize,
-                        usize,
-                        std::collections::HashMap<String, usize>,
-                        std::collections::HashMap<String, usize>,
-                    ),
-                > + Send
-                + 'a,
-        >,
-    > {
+    ) -> DirectoryIndexFuture<'a> {
+        Box::pin(async move {
+            let mut filter = WorkspaceFilter::new(dir, config);
+            self.index_directory_filtered(graph, dir, config, depth, counter, &mut filter)
+                .await
+        })
+    }
+
+    fn index_directory_filtered<'a>(
+        &'a self,
+        graph: &'a Arc<RwLock<CodeGraph>>,
+        dir: &'a Path,
+        config: &'a IndexConfig,
+        depth: u32,
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+        filter: &'a mut WorkspaceFilter,
+    ) -> DirectoryIndexFuture<'a> {
         Box::pin(async move {
             use std::sync::atomic::Ordering;
 
@@ -462,7 +475,6 @@ impl Indexer {
                 return (0, 0, 0, empty_by_lang, empty_errors);
             }
 
-            let exclude_set = config.build_exclude_set();
             let supported_extensions = self.parsers.supported_extensions();
 
             tracing::debug!("Scanning directory: {:?}", dir);
@@ -492,35 +504,20 @@ impl Indexer {
 
                 let path = entry.path();
 
-                // Skip hidden files and directories
-                if let Some(name) = path.file_name() {
-                    if name.to_string_lossy().starts_with('.') {
-                        continue;
-                    }
+                if !filter.allows(&path, path.is_dir()) {
+                    continue;
                 }
 
                 if path.is_dir() {
-                    let dir_name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-
-                    // Skip hardcoded exclude directories
-                    if config.exclude_dirs.iter().any(|e| e == &dir_name) {
-                        continue;
-                    }
-
-                    // Skip directories matching user-configured exclude globs
-                    let path_str = path.to_string_lossy();
-                    if exclude_set.is_match(path_str.as_ref())
-                        || exclude_set.is_match(dir_name.as_str())
-                    {
-                        tracing::info!("Skipping {:?}: matched exclude pattern", path);
-                        continue;
-                    }
-
                     let (t, p, s, child_by_lang, child_errors) = self
-                        .index_directory(graph, &path, config, depth + 1, counter.clone())
+                        .index_directory_filtered(
+                            graph,
+                            &path,
+                            config,
+                            depth + 1,
+                            counter.clone(),
+                            filter,
+                        )
                         .await;
                     total += t;
                     parsed += p;
@@ -532,25 +529,6 @@ impl Indexer {
                         *parser_errors.entry(lang).or_insert(0) += count;
                     }
                 } else if path.is_file() {
-                    // Skip files matching exclude globs
-                    let path_str = path.to_string_lossy();
-                    if exclude_set.is_match(path_str.as_ref()) {
-                        continue;
-                    }
-
-                    // Skip files that exceed the configurable size limit
-                    if let Ok(metadata) = std::fs::metadata(&path) {
-                        if metadata.len() > config.max_file_size_bytes {
-                            tracing::info!(
-                                "Skipping {:?}: file size {} exceeds limit of {}",
-                                path,
-                                metadata.len(),
-                                config.max_file_size_bytes
-                            );
-                            continue;
-                        }
-                    }
-
                     // Check if file has a supported extension
                     if let Some(ext) = path.extension() {
                         let ext_str = ext.to_string_lossy();

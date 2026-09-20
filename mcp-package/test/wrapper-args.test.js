@@ -63,7 +63,7 @@ function stubEngine(dir, exitCode) {
   return file;
 }
 
-function runWrapper(clientArgs, exitCode) {
+function runWrapper(clientArgs, exitCode, engineMode = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-wrapper-"));
   stubEngine(dir, exitCode);
   try {
@@ -80,6 +80,7 @@ function runWrapper(clientArgs, exitCode) {
         CODEGRAPH_BIN_DIR: dir,
         CODEGRAPH_SKIP_MODEL_FETCH: "1",
         CODEGRAPH_TELEMETRY: "off",
+        CODEGRAPH_ENGINE: engineMode ? "1" : "0",
       },
       encoding: "utf8",
       timeout: 20000,
@@ -129,6 +130,19 @@ if (probe.argv === null) {
 {
   const { argv } = runWrapper([], 0);
   check(argv[0] === "--mcp", "wrapper supplies --mcp when the client omits it");
+}
+
+// --- shared mode must not override an explicit workspace with cwd ----
+if (os.platform() !== "win32") {
+  for (const workspaceArgs of [["--workspace", "/tmp/explicit"], ["--workspace=/tmp/explicit"], ["-w", "/tmp/explicit"], ["-w/tmp/explicit"]]) {
+    const clientArgs = [...workspaceArgs, "--graph-only", "--profile", "graph", "--exclude", "cache"];
+    const { argv } = runWrapper(clientArgs, 0, true);
+    check(JSON.stringify(argv) === JSON.stringify(["--connect", ...clientArgs]),
+      `engine mode preserves the explicit workspace and resource flags (${workspaceArgs[0]})`);
+  }
+  const { argv } = runWrapper(["--graph-only"], 0, true);
+  check(JSON.stringify(argv) === JSON.stringify(["--connect", "--workspace", process.cwd(), "--graph-only"]),
+    "engine mode defaults to cwd only when no workspace is supplied");
 }
 
 // --- exit 2 is explained rather than reported as a crash -------------

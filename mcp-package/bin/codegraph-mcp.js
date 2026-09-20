@@ -223,9 +223,13 @@ const USE_ENGINE =
 // half-configured server).
 const WRAPPER_OWNED_FLAGS = new Set(["--mcp", "--connect", "--stdio"]);
 const clientArgs = process.argv.slice(2).filter((a) => !WRAPPER_OWNED_FLAGS.has(a));
+const hasWorkspace = clientArgs.some(
+  (arg) => arg === "--workspace" || arg.startsWith("--workspace=") ||
+    (arg.startsWith("-w") && !arg.startsWith("--"))
+);
 
 const args = USE_ENGINE
-  ? ["--connect", "--workspace", process.cwd(), ...clientArgs]
+  ? ["--connect", ...(hasWorkspace ? [] : ["--workspace", process.cwd()]), ...clientArgs]
   : ["--mcp", ...clientArgs];
 
 // stdin/stdout are inherited (JSON-RPC channel — untouched).

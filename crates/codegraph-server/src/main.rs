@@ -125,6 +125,30 @@ struct Args {
     socket: Option<PathBuf>,
 }
 
+impl Args {
+    fn engine_args(&self) -> Vec<std::ffi::OsString> {
+        let mut args = vec![
+            "--embedding-model".into(),
+            self.embedding_model.clone().into(),
+            "--max-files".into(),
+            self.max_files.to_string().into(),
+        ];
+        for directory in &self.exclude {
+            args.extend(["--exclude".into(), directory.into()]);
+        }
+        if self.graph_only {
+            args.push("--graph-only".into());
+        }
+        if let Some(profile) = &self.profile {
+            args.extend(["--profile".into(), profile.into()]);
+        }
+        if self.full_body_embedding {
+            args.push("--full-body-embedding".into());
+        }
+        args
+    }
+}
+
 /// Default engine socket path (`~/.codegraph/cg-engine.sock`).
 fn default_socket_path() -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -336,7 +360,7 @@ async fn run() {
                 std::env::current_dir().expect("Failed to get current directory")
             });
         if let Err(e) =
-            codegraph_server::mcp::engine::connect(&sock, workspace, &args.embedding_model).await
+            codegraph_server::mcp::engine::connect(&sock, workspace, &args.engine_args()).await
         {
             eprintln!("connect failed: {e}");
             std::process::exit(1);
@@ -422,6 +446,14 @@ async fn run() {
             exclude_dirs: args.exclude.clone(),
             max_files: args.max_files,
             full_body_embedding: args.full_body_embedding,
+            graph_only: args.graph_only,
+            tool_profile: codegraph_server::mcp::tools::ToolProfile::from_str_or_all(
+                &args
+                    .profile
+                    .clone()
+                    .or_else(|| std::env::var("CODEGRAPH_TOOL_PROFILE").ok())
+                    .unwrap_or_default(),
+            ),
             seeds: args.workspace.clone(),
         };
         if let Err(e) = codegraph_server::mcp::engine::serve(cfg).await {
@@ -517,6 +549,44 @@ async fn run() {
             tracing::info!("Exit complete");
             std::process::exit(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_args_tests {
+    use super::*;
+
+    #[test]
+    fn auto_spawn_preserves_resource_settings() {
+        let client = Args::try_parse_from([
+            "codegraph-server",
+            "--connect",
+            "--graph-only",
+            "--profile",
+            "graph",
+            "--exclude",
+            "cache",
+            "--exclude",
+            "generated",
+            "--max-files",
+            "12",
+            "--embedding-model",
+            "static",
+        ])
+        .unwrap();
+        let mut command = vec![
+            std::ffi::OsString::from("codegraph-server"),
+            "--serve".into(),
+        ];
+        command.extend(client.engine_args());
+        let engine = Args::try_parse_from(command).unwrap();
+        assert!(engine.serve);
+        assert!(engine.graph_only);
+        assert_eq!(engine.profile.as_deref(), Some("graph"));
+        assert_eq!(engine.exclude, ["cache", "generated"]);
+        assert_eq!(engine.max_files, 12);
+        assert_eq!(engine.embedding_model, "static");
+        assert_eq!(engine.full_body_embedding, client.full_body_embedding);
     }
 }
 

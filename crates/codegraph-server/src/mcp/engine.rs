@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use codegraph_memory::EmbeddingBackend;
 
 use super::server::McpServer;
+use super::tools::ToolProfile;
 
 /// Configuration for a running engine.
 pub struct EngineConfig {
@@ -29,6 +30,8 @@ pub struct EngineConfig {
     pub exclude_dirs: Vec<String>,
     pub max_files: usize,
     pub full_body_embedding: bool,
+    pub graph_only: bool,
+    pub tool_profile: ToolProfile,
     /// Workspaces to pre-load at startup (optional; others load on attach).
     pub seeds: Vec<PathBuf>,
 }
@@ -71,11 +74,11 @@ mod imp {
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, OnceCell};
 
     use codegraph_memory::VectorEngine;
 
-    type Registry = Arc<Mutex<HashMap<PathBuf, Arc<McpServer>>>>;
+    type Registry = Arc<Mutex<HashMap<PathBuf, Arc<OnceCell<Arc<McpServer>>>>>>;
 
     struct Engine {
         cfg: EngineConfig,
@@ -96,10 +99,18 @@ mod imp {
         let ws = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.clone());
-        if let Some(s) = engine.registry.lock().await.get(&ws).cloned() {
-            return s;
-        }
+        let slot = {
+            let mut registry = engine.registry.lock().await;
+            Arc::clone(
+                registry
+                    .entry(ws.clone())
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        Arc::clone(slot.get_or_init(|| load_workspace(engine, ws)).await)
+    }
 
+    async fn load_workspace(engine: &Engine, ws: PathBuf) -> Arc<McpServer> {
         tracing::info!("Engine: loading workspace {}", ws.display());
         let mut server = McpServer::new(
             vec![ws.clone()],
@@ -107,17 +118,14 @@ mod imp {
             engine.cfg.max_files,
             engine.cfg.embedding_model.clone(),
             engine.cfg.full_body_embedding,
-        );
+        )
+        .with_graph_only(engine.cfg.graph_only || engine.shared_engine.is_none())
+        .with_tool_profile(engine.cfg.tool_profile);
         if let Some(shared) = &engine.shared_engine {
             server.set_shared_engine(Arc::clone(shared)).await;
         }
         server.ensure_indexed().await;
-        let server = Arc::new(server);
-
-        let mut reg = engine.registry.lock().await;
-        // Another connection may have loaded it while we built — prefer theirs.
-        reg.entry(ws).or_insert_with(|| Arc::clone(&server));
-        server
+        Arc::new(server)
     }
 
     /// First line of a connection: an attach frame selects the workspace.
@@ -207,6 +215,24 @@ mod imp {
     }
 
     pub async fn serve(cfg: EngineConfig) -> Result<(), String> {
+        // Hold the lock for the engine lifetime. Probing a socket alone races
+        // while another auto-spawned engine is still loading its first graph.
+        if let Some(parent) = cfg.socket_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("socket directory: {e}"))?;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(cfg.socket_path.with_extension("lock"))
+            .map_err(|e| format!("engine lock: {e}"))?;
+        if let Err(error) = fs2::FileExt::try_lock_exclusive(&lock) {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(());
+            }
+            return Err(format!("engine lock: {error}"));
+        }
         // Don't start a second engine over a live one (handles auto-spawn races).
         if engine_is_live(&cfg.socket_path).await {
             tracing::info!("Engine: another instance is already live — exiting");
@@ -216,7 +242,9 @@ mod imp {
         // One model for the whole engine. Gate on free memory the same way the
         // per-workspace path does, so a constrained box runs graph-only instead
         // of OOM-crashing on the model load.
-        let shared_engine = {
+        let shared_engine = if cfg.graph_only {
+            None
+        } else {
             let mut sys = sysinfo::System::new();
             sys.refresh_memory();
             let avail = sys.available_memory();
@@ -310,7 +338,7 @@ mod imp {
 
     /// Spawn a detached engine for `socket_path` using this binary, so the engine
     /// outlives the shim. Best-effort; the caller retries the connect.
-    fn spawn_engine(socket_path: &std::path::Path, embedding_model: &str) {
+    fn spawn_engine(socket_path: &std::path::Path, engine_args: &[std::ffi::OsString]) {
         let exe = match std::env::current_exe() {
             Ok(e) => e,
             Err(e) => {
@@ -322,8 +350,7 @@ mod imp {
         cmd.arg("--serve")
             .arg("--socket")
             .arg(socket_path)
-            .arg("--embedding-model")
-            .arg(embedding_model)
+            .args(engine_args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -339,7 +366,7 @@ mod imp {
     pub async fn connect(
         socket_path: &std::path::Path,
         workspace: PathBuf,
-        embedding_model: &str,
+        engine_args: &[std::ffi::OsString],
     ) -> Result<(), String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -347,7 +374,7 @@ mod imp {
         let stream = match UnixStream::connect(socket_path).await {
             Ok(s) => s,
             Err(_) => {
-                spawn_engine(socket_path, embedding_model);
+                spawn_engine(socket_path, engine_args);
                 let mut connected = None;
                 for _ in 0..60 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -404,6 +431,49 @@ mod imp {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn concurrent_attaches_share_one_graph_only_backend() {
+            let temporary = tempfile::tempdir().unwrap();
+            let workspace = temporary.path().to_path_buf();
+            std::fs::write(workspace.join("source.rs"), "pub fn shared_symbol() {}\n").unwrap();
+            let engine = Arc::new(Engine {
+                cfg: EngineConfig {
+                    socket_path: workspace.join("engine.sock"),
+                    embedding_model: EmbeddingBackend::parse("bge-small"),
+                    exclude_dirs: vec![],
+                    max_files: 10,
+                    full_body_embedding: true,
+                    graph_only: true,
+                    tool_profile: ToolProfile::Core,
+                    seeds: vec![],
+                },
+                registry: Arc::new(Mutex::new(HashMap::new())),
+                shared_engine: None,
+                active: AtomicUsize::new(0),
+                idle_since: AtomicU64::new(0),
+            });
+            let barrier = Arc::new(tokio::sync::Barrier::new(3));
+            let [first, second] = [0, 1].map(|_| {
+                let engine = Arc::clone(&engine);
+                let barrier = Arc::clone(&barrier);
+                let workspace = workspace.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    get_or_load(&engine, workspace).await
+                })
+            });
+            barrier.wait().await;
+            let (first, second) = tokio::join!(first, second);
+            let (first, second) = (first.unwrap(), second.unwrap());
+            assert!(Arc::ptr_eq(&first, &second));
+            assert_eq!(engine.registry.lock().await.len(), 1);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -418,7 +488,7 @@ pub async fn serve(_cfg: EngineConfig) -> Result<(), String> {
 pub async fn connect(
     _socket_path: &std::path::Path,
     _workspace: PathBuf,
-    _embedding_model: &str,
+    _engine_args: &[std::ffi::OsString],
 ) -> Result<(), String> {
     Err("the socket engine is not yet supported on this platform".to_string())
 }

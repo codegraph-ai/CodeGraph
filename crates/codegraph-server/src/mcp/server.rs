@@ -937,9 +937,11 @@ impl McpBackend {
         let config = self.index_config();
 
         // Initialize memory manager for each workspace folder
-        for folder in &self.workspace_folders {
-            if let Err(e) = self.memory_manager.initialize(folder).await {
-                tracing::warn!("Failed to initialize memory manager: {:?}", e);
+        if !self.graph_only {
+            for folder in &self.workspace_folders {
+                if let Err(e) = self.memory_manager.initialize(folder).await {
+                    tracing::warn!("Failed to initialize memory manager: {:?}", e);
+                }
             }
         }
 
@@ -1325,9 +1327,11 @@ impl McpServer {
                 "version": crate::metadata::VERSION,
             }));
 
-            for folder in &self.backend.workspace_folders {
-                if let Err(e) = self.backend.memory_manager.initialize(folder).await {
-                    tracing::warn!("Failed to initialize memory manager: {:?}", e);
+            if !self.backend.graph_only {
+                for folder in &self.backend.workspace_folders {
+                    if let Err(e) = self.backend.memory_manager.initialize(folder).await {
+                        tracing::warn!("Failed to initialize memory manager: {:?}", e);
+                    }
                 }
             }
             // Build text/caller/callee indexes from the loaded graph (cheap — no
@@ -1372,6 +1376,7 @@ impl McpServer {
                 Arc::clone(&self.backend.parsers),
                 Arc::clone(&self.backend.query_engine),
                 &self.backend.workspace_folders,
+                self.backend.index_config(),
             ) {
                 Ok(watcher) => {
                     self._file_watcher = Some(watcher);

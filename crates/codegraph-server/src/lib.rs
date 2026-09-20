@@ -47,6 +47,7 @@ pub mod mcp;
 pub mod memory;
 pub mod metadata;
 pub mod parser_registry;
+mod path_filter;
 pub mod runtime_deps;
 pub mod telemetry;
 pub mod watcher;
