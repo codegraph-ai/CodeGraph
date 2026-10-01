@@ -1390,13 +1390,16 @@ impl McpServer {
                         // session, which is the cold-start cost attaching to a
                         // daemon exists to avoid. The daemon owns the set, so
                         // the daemon is what should rebuild it.
-                        VectorLoad::Mismatched => tracing::warn!(
-                            "Watcher daemon's vectors were built from different embed text - \
-                             semantic search and similarity tools are unavailable this session. \
-                             Restart the daemon (after an upgrade), or start it with the same \
-                             --full-body-embedding / --split-identifiers / --embedding-model \
-                             flags as this session."
-                        ),
+                        VectorLoad::Mismatched => {
+                            self.backend.query_engine.set_daemon_vectors_mismatched();
+                            tracing::warn!(
+                                "Watcher daemon's vectors were built from different embed text - \
+                                 semantic search and similarity tools are unavailable this session. \
+                                 Restart the daemon (after an upgrade), or start it with the same \
+                                 --full-body-embedding / --split-identifiers / --embedding-model \
+                                 flags as this session."
+                            )
+                        }
                         // The daemon owns this workspace and simply has not
                         // finished its first embed run. Re-embedding here would
                         // duplicate, in every attached session, exactly the

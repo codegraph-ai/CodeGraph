@@ -50,7 +50,18 @@ pub struct QueryEngine {
     /// Prepend split-identifier words to the embed text (helps static
     /// embedders; off by default to leave the transformer path unchanged).
     split_identifiers: std::sync::atomic::AtomicBool,
+    /// Set when the watcher daemon this session attached to holds vectors
+    /// built with different embed settings. No embed run will follow, so the
+    /// search status must not say embeddings are building.
+    daemon_vectors_mismatched: std::sync::atomic::AtomicBool,
 }
+
+/// Search status when the attached watcher daemon's vectors were built with
+/// different embed settings than this session's.
+const DAEMON_VECTORS_MISMATCHED_STATUS: &str = "The --watch daemon's stored vectors were built \
+    with different embedding settings, so semantic matching is unavailable this session - results \
+    are from name/text search only. Restart the daemon with the same --full-body-embedding / \
+    --split-identifiers / --embedding-model flags as this session.";
 
 /// Max characters of function body for full-body embedding.
 /// ~512 tokens ≈ first 40-50 lines of code.
@@ -397,7 +408,16 @@ impl QueryEngine {
             // cannot recover the words on its own. needs_word_split() keeps it
             // off for snake_case, where it does not help.
             split_identifiers: std::sync::atomic::AtomicBool::new(true),
+            daemon_vectors_mismatched: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Record that the attached watcher daemon's vectors were built with
+    /// different embed settings, so they will not load and nothing in this
+    /// session will build replacements.
+    pub fn set_daemon_vectors_mismatched(&self) {
+        self.daemon_vectors_mismatched
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Enable or disable full-body embedding mode.
@@ -1405,7 +1425,12 @@ impl QueryEngine {
 
         let query_time_ms = start.elapsed().as_millis() as u64;
 
-        let embedding_status = if !self.are_embeddings_ready() {
+        let embedding_status = if self
+            .daemon_vectors_mismatched
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            Some(DAEMON_VECTORS_MISMATCHED_STATUS.to_string())
+        } else if !self.are_embeddings_ready() {
             Some("Embeddings are building in the background. Semantic matching is temporarily unavailable — results are from name/text search only.".to_string())
         } else {
             None
@@ -3064,6 +3089,27 @@ mod tests {
 
         assert_eq!(results.results.len(), 1);
         assert_eq!(results.results[0].symbol.name, "validateEmail");
+    }
+
+    #[tokio::test]
+    async fn symbol_search_status_names_mismatched_daemon_vectors_not_a_build() {
+        let (engine, _) = create_test_engine().await;
+        let building = engine
+            .symbol_search("test", &SearchOptions::new())
+            .await
+            .embedding_status
+            .expect("no vectors yet");
+        assert!(building.contains("building"));
+
+        engine.set_daemon_vectors_mismatched();
+        let status = engine
+            .symbol_search("test", &SearchOptions::new())
+            .await
+            .embedding_status
+            .expect("mismatched daemon vectors leave semantic search unavailable");
+        assert!(!status.contains("building"), "{status}");
+        assert!(status.contains("different embedding settings"), "{status}");
+        assert!(status.contains("Restart the daemon"), "{status}");
     }
 
     #[tokio::test]
