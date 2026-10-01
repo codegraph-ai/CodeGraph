@@ -59,11 +59,10 @@ struct Args {
     #[arg(long, default_value = "bge-small")]
     embedding_model: String,
 
-    /// Embed full function body instead of just name+signature (captured at parse time, minimal overhead)
-    /// Takes an optional value, so the default can be overridden:
-    /// `--full-body-embedding=false` turns it off. With a bare
-    /// `default_value` this parsed as a flag that rejected a value and was
-    /// always true, which made the option impossible to disable.
+    /// Embed full function body instead of just name+signature (captured at parse time, minimal overhead).
+    /// Takes an optional value: `--full-body-embedding=false` turns it off.
+    // With a bare `default_value` this parsed as a flag that rejected a value
+    // and was always true, which made the option impossible to disable.
     #[arg(
         long,
         num_args = 0..=1,
@@ -78,12 +77,12 @@ struct Args {
     ///
     /// Names already separated by `_` or `-` are left alone: they tokenise into
     /// the same words, where this measured as a wash to a small loss. A leading
-    /// or trailing delimiter separates nothing, so `_handleClick` is split. Disable to embed raw names, as releases up to 0.20.1 did.
-    /// Takes an optional value so the default can actually be turned off:
+    /// or trailing delimiter separates nothing, so `_handleClick` is split.
+    /// Disable to embed raw names, as releases up to 0.20.1 did.
     /// `--split-identifiers` and `--split-identifiers=true` enable it,
-    /// `--split-identifiers=false` disables it. A bare `default_value` on a
-    /// `bool` parses as a flag that is always true - see
-    /// `--full-body-embedding`, which cannot be disabled for that reason.
+    /// `--split-identifiers=false` disables it.
+    // Takes an optional value for the same reason as `--full-body-embedding`:
+    // a bare `default_value` on a `bool` parses as an always-true flag.
     #[arg(
         long,
         num_args = 0..=1,
