@@ -15,6 +15,155 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+/// Whether one directory entry is excluded from the graph.
+///
+/// This is the single statement of the rule. The indexer applies it to every
+/// entry as it walks, and [`WorkspaceFilter`] applies it to every component of
+/// a path the file watcher reports. The watcher used to carry its own shorter
+/// list instead, so `--exclude`, `.codegraphignore` and most of the default
+/// exclusions kept generated files out of the initial index and then let every
+/// later write to them straight back in (issue #23).
+pub(crate) fn is_excluded_entry(
+    config: &IndexConfig,
+    exclude_set: &globset::GlobSet,
+    path: &Path,
+    is_dir: bool,
+) -> bool {
+    let Some(name) = path.file_name() else {
+        return true;
+    };
+    let name = name.to_string_lossy();
+    if name.starts_with('.') {
+        return true;
+    }
+    if exclude_set.is_match(path) {
+        return true;
+    }
+    is_dir
+        && (config.exclude_dirs.iter().any(|d| d == name.as_ref())
+            || exclude_set.is_match(name.as_ref()))
+}
+
+/// Decides whether the file watcher may admit a path, by the same rule the
+/// indexer used to build the graph.
+///
+/// The indexer only reaches a file after every directory above it has passed,
+/// because it recurses. A watcher event arrives as one bare path with no such
+/// history, so the rule is applied to each ancestor in turn - otherwise a file
+/// under an excluded directory would be judged only by its own name.
+///
+/// Built per workspace root because `.codegraphignore` is read per root, as
+/// the indexer does. It is read once, when the watcher starts: editing
+/// `.codegraphignore` takes effect on the next start, like `--exclude`.
+pub(crate) struct WorkspaceFilter {
+    /// `(root as given, root canonicalised, config, exclude globs)`.
+    roots: Vec<(PathBuf, PathBuf, IndexConfig, globset::GlobSet)>,
+}
+
+impl WorkspaceFilter {
+    pub(crate) fn new(roots: &[PathBuf], base: &IndexConfig) -> Self {
+        let roots = roots
+            .iter()
+            .map(|root| {
+                let mut config = base.clone();
+                config.extend_from_codegraphignore(root);
+                let exclude_set = config.build_exclude_set();
+                let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+                (root.clone(), canonical, config, exclude_set)
+            })
+            .collect();
+        Self { roots }
+    }
+
+    /// Whether `path`, a file, belongs in the graph.
+    ///
+    /// Deleted files cannot be stat'd, so the size limit is only applied to a
+    /// file that still exists; every other check depends on the path alone.
+    /// That keeps a delete for a file the index never held from being admitted
+    /// on a technicality, and a delete for one it did hold from being refused.
+    pub(crate) fn admits(&self, path: &Path) -> bool {
+        let Some((root, relative, config, exclude_set)) = self.locate(path) else {
+            return false;
+        };
+
+        let components: Vec<_> = relative.components().collect();
+        // Directories above the file, matching the walk's depth accounting.
+        if components.len().saturating_sub(1) > config.max_depth as usize {
+            return false;
+        }
+
+        let mut current = root;
+        for (index, component) in components.iter().enumerate() {
+            current.push(component);
+            let is_dir = index + 1 < components.len();
+            if is_excluded_entry(config, exclude_set, &current, is_dir) {
+                return false;
+            }
+        }
+
+        match std::fs::metadata(path) {
+            Ok(metadata) => metadata.len() <= config.max_file_size_bytes,
+            Err(_) => true,
+        }
+    }
+
+    /// `path` spelled the way the indexer stored it.
+    ///
+    /// The indexer records each file under the workspace root as it was given,
+    /// while FSEvents reports the resolved location. On a workspace reached
+    /// through a symlink the two never match, so every lookup by event path
+    /// missed: an edit re-parsed the file without removing its old symbols, a
+    /// delete removed nothing, and the graph only ever grew. Translating at
+    /// intake gives every later step one spelling.
+    pub(crate) fn indexed_form(&self, path: &Path) -> PathBuf {
+        match self.locate(path) {
+            Some((root, relative, _, _)) => root.join(relative),
+            None => path.to_path_buf(),
+        }
+    }
+
+    /// The workspace root `path` falls under, in the form it was given, and
+    /// `path` relative to it.
+    ///
+    /// Roots and event paths do not reliably share a spelling. A workspace
+    /// opened as `/var/folders/...` or through any symlinked directory is
+    /// reported by FSEvents at its resolved location, `/private/var/folders/...`,
+    /// so a plain prefix test rejected every event and the watcher admitted
+    /// nothing at all. Both sides are compared resolved and as given.
+    ///
+    /// The event path is resolved through its parent directory, which still
+    /// exists when the file itself was just deleted. The most specific root
+    /// wins when workspace folders nest.
+    fn locate(&self, path: &Path) -> Option<(PathBuf, PathBuf, &IndexConfig, &globset::GlobSet)> {
+        let resolved = path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .zip(path.file_name())
+            .map(|(parent, name)| parent.join(name));
+
+        let mut best: Option<(usize, PathBuf, PathBuf, &IndexConfig, &globset::GlobSet)> = None;
+        for (given, canonical, config, exclude_set) in &self.roots {
+            for (candidate, root) in [(Some(path), given), (resolved.as_deref(), canonical)] {
+                let Some(candidate) = candidate else { continue };
+                let Ok(relative) = candidate.strip_prefix(root) else {
+                    continue;
+                };
+                let depth = root.components().count();
+                if best.as_ref().is_none_or(|(d, ..)| depth > *d) {
+                    best = Some((
+                        depth,
+                        given.clone(),
+                        relative.to_path_buf(),
+                        config,
+                        exclude_set,
+                    ));
+                }
+            }
+        }
+        best.map(|(_, root, relative, config, exclude_set)| (root, relative, config, exclude_set))
+    }
+}
+
 /// Configuration for a single indexing run.
 #[derive(Debug, Clone)]
 pub struct IndexConfig {
@@ -492,33 +641,12 @@ impl Indexer {
 
                 let path = entry.path();
 
-                // Skip hidden files and directories
-                if let Some(name) = path.file_name() {
-                    if name.to_string_lossy().starts_with('.') {
-                        continue;
-                    }
+                let is_dir = path.is_dir();
+                if is_excluded_entry(config, &exclude_set, &path, is_dir) {
+                    continue;
                 }
 
-                if path.is_dir() {
-                    let dir_name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-
-                    // Skip hardcoded exclude directories
-                    if config.exclude_dirs.iter().any(|e| e == &dir_name) {
-                        continue;
-                    }
-
-                    // Skip directories matching user-configured exclude globs
-                    let path_str = path.to_string_lossy();
-                    if exclude_set.is_match(path_str.as_ref())
-                        || exclude_set.is_match(dir_name.as_str())
-                    {
-                        tracing::info!("Skipping {:?}: matched exclude pattern", path);
-                        continue;
-                    }
-
+                if is_dir {
                     let (t, p, s, child_by_lang, child_errors) = self
                         .index_directory(graph, &path, config, depth + 1, counter.clone())
                         .await;
@@ -532,12 +660,6 @@ impl Indexer {
                         *parser_errors.entry(lang).or_insert(0) += count;
                     }
                 } else if path.is_file() {
-                    // Skip files matching exclude globs
-                    let path_str = path.to_string_lossy();
-                    if exclude_set.is_match(path_str.as_ref()) {
-                        continue;
-                    }
-
                     // Skip files that exceed the configurable size limit
                     if let Ok(metadata) = std::fs::metadata(&path) {
                         if metadata.len() > config.max_file_size_bytes {
@@ -660,6 +782,102 @@ mod tests {
             !config.exclude_patterns.is_empty(),
             "default IndexConfig must populate exclude_patterns"
         );
+    }
+
+    fn filter_config(exclude_dirs: &[&str], max_depth: u32) -> IndexConfig {
+        IndexConfig {
+            exclude_dirs: exclude_dirs.iter().map(|d| d.to_string()).collect(),
+            exclude_patterns: vec![],
+            max_file_size_bytes: 1024 * 1024,
+            max_depth,
+            max_files: 1000,
+        }
+    }
+
+    #[test]
+    fn workspace_filter_excludes_what_the_indexer_excludes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src/cache")).unwrap();
+        let filter =
+            WorkspaceFilter::new(std::slice::from_ref(&root), &filter_config(&["cache"], 20));
+
+        assert!(filter.admits(&root.join("src/lib.rs")));
+        // An excluded directory excludes everything beneath it, however deep -
+        // a watcher event names only the file, so every ancestor is checked.
+        assert!(!filter.admits(&root.join("src/cache/gen.rs")));
+        assert!(!filter.admits(&root.join("cache/deep/er/gen.rs")));
+        // Hidden entries, at any level, as the indexer's walk skips them.
+        assert!(!filter.admits(&root.join(".hidden.rs")));
+        assert!(!filter.admits(&root.join("src/.git/x.rs")));
+        // Outside every workspace root.
+        assert!(!filter.admits(Path::new("/somewhere/else/lib.rs")));
+    }
+
+    #[test]
+    fn workspace_filter_reads_codegraphignore_per_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::write(root.join(".codegraphignore"), "**/generated/**\n").unwrap();
+        let filter = WorkspaceFilter::new(std::slice::from_ref(&root), &filter_config(&[], 20));
+
+        assert!(!filter.admits(&root.join("src/generated/out.rs")));
+        assert!(filter.admits(&root.join("src/handwritten.rs")));
+    }
+
+    #[test]
+    fn workspace_filter_enforces_max_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let filter = WorkspaceFilter::new(std::slice::from_ref(&root), &filter_config(&[], 1));
+
+        assert!(filter.admits(&root.join("a/file.rs")));
+        assert!(!filter.admits(&root.join("a/b/file.rs")));
+    }
+
+    /// A workspace reached through a symlink is reported by the OS at its
+    /// resolved location. An explicit symlink is used rather than relying on
+    /// macOS's `/var` -> `/private/var`, which Linux CI would not exercise.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_filter_matches_events_at_the_resolved_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("src/cache")).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let filter =
+            WorkspaceFilter::new(std::slice::from_ref(&link), &filter_config(&["cache"], 20));
+        let resolved = real.canonicalize().unwrap();
+
+        // Admitted and excluded by the same rule whichever spelling arrives.
+        assert!(filter.admits(&resolved.join("src/lib.rs")));
+        assert!(!filter.admits(&resolved.join("src/cache/gen.rs")));
+
+        // Translated back to the spelling the indexer stored, so lookups by
+        // path find the file's existing nodes instead of duplicating them.
+        assert_eq!(
+            filter.indexed_form(&resolved.join("src/lib.rs")),
+            link.join("src/lib.rs")
+        );
+        assert_eq!(
+            filter.indexed_form(&link.join("src/lib.rs")),
+            link.join("src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn workspace_filter_prefers_the_most_specific_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path().to_path_buf();
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        // Only the inner root excludes `vendor`.
+        std::fs::write(inner.join(".codegraphignore"), "**/vendor/**\n").unwrap();
+        let filter = WorkspaceFilter::new(&[outer.clone(), inner.clone()], &filter_config(&[], 20));
+
+        assert!(!filter.admits(&inner.join("vendor/x.rs")));
     }
 
     #[test]

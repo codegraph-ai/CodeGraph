@@ -812,6 +812,24 @@ impl QueryEngine {
     /// Re-embed only symbols from a specific file path.
     /// Called on did_save to incrementally update embeddings without rebuilding all.
     pub async fn update_file_vectors(&self, file_path: &str) {
+        self.update_files_vectors(&[file_path.to_string()]).await;
+    }
+
+    /// Re-embed the symbols of several files in one pass over the graph.
+    ///
+    /// Calling [`Self::update_file_vectors`] once per file walks every node once
+    /// per file, so a burst of N changed files cost N full graph scans - one of
+    /// the per-event costs behind issue #23. This walks the graph once and
+    /// embeds everything that matched in one batch.
+    pub async fn update_files_vectors(&self, file_paths: &[String]) {
+        if file_paths.is_empty() {
+            return;
+        }
+        let label = match file_paths {
+            [only] => only.clone(),
+            many => format!("{} files", many.len()),
+        };
+        let file_path = label.as_str();
         let engine = match self.vector_engine.read().await.clone() {
             Some(e) => e,
             None => {
@@ -841,8 +859,13 @@ impl QueryEngine {
                 continue;
             }
 
+            // Matched by suffix in either direction, as before: stored paths and
+            // event paths are not guaranteed to agree on being absolute.
             let path = node_props::path(node);
-            if !path.ends_with(file_path) && !file_path.ends_with(path) {
+            if !file_paths
+                .iter()
+                .any(|fp| path.ends_with(fp.as_str()) || fp.ends_with(path))
+            {
                 continue;
             }
 

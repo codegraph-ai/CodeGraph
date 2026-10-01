@@ -936,10 +936,17 @@ impl McpBackend {
     pub async fn index_workspace(&self) -> (usize, usize) {
         let config = self.index_config();
 
-        // Initialize memory manager for each workspace folder
-        for folder in &self.workspace_folders {
-            if let Err(e) = self.memory_manager.initialize(folder).await {
-                tracing::warn!("Failed to initialize memory manager: {:?}", e);
+        // Initialising the memory manager loads the embedding model, which is
+        // exactly what --graph-only promises not to do - the comment on the
+        // graph-only branch below already said so, and it was not true, because
+        // this ran first (issue #23). Memory tools are unavailable in graph-only
+        // mode as a result, which is the same state the RAM gate already leaves
+        // them in on a low-memory machine.
+        if !self.graph_only {
+            for folder in &self.workspace_folders {
+                if let Err(e) = self.memory_manager.initialize(folder).await {
+                    tracing::warn!("Failed to initialize memory manager: {:?}", e);
+                }
             }
         }
 
@@ -1325,9 +1332,12 @@ impl McpServer {
                 "version": crate::metadata::VERSION,
             }));
 
-            for folder in &self.backend.workspace_folders {
-                if let Err(e) = self.backend.memory_manager.initialize(folder).await {
-                    tracing::warn!("Failed to initialize memory manager: {:?}", e);
+            // Same rule as index_workspace: no model load under --graph-only.
+            if !self.backend.graph_only {
+                for folder in &self.backend.workspace_folders {
+                    if let Err(e) = self.backend.memory_manager.initialize(folder).await {
+                        tracing::warn!("Failed to initialize memory manager: {:?}", e);
+                    }
                 }
             }
             // Build text/caller/callee indexes from the loaded graph (cheap — no
@@ -1372,6 +1382,9 @@ impl McpServer {
                 Arc::clone(&self.backend.parsers),
                 Arc::clone(&self.backend.query_engine),
                 &self.backend.workspace_folders,
+                // The config the initial index was built with, so the watcher
+                // excludes exactly what the index excluded.
+                &self.backend.index_config(),
             ) {
                 Ok(watcher) => {
                     self._file_watcher = Some(watcher);

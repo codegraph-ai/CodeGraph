@@ -29,6 +29,11 @@ pub struct EngineConfig {
     pub exclude_dirs: Vec<String>,
     pub max_files: usize,
     pub full_body_embedding: bool,
+    /// Build graphs only and never load the embedding model. An auto-spawned
+    /// engine used to drop this along with every other resource setting but the
+    /// model name, so a client that asked for graph-only still caused a model
+    /// load in the engine it started (issue #23).
+    pub graph_only: bool,
     /// Workspaces to pre-load at startup (optional; others load on attach).
     pub seeds: Vec<PathBuf>,
 }
@@ -75,7 +80,10 @@ mod imp {
 
     use codegraph_memory::VectorEngine;
 
-    type Registry = Arc<Mutex<HashMap<PathBuf, Arc<McpServer>>>>;
+    /// One slot per workspace. The slot is created under the lock; the load
+    /// runs inside it, outside the lock, and every concurrent attach for the
+    /// same workspace awaits that one load.
+    type Registry = Arc<Mutex<HashMap<PathBuf, Arc<tokio::sync::OnceCell<Arc<McpServer>>>>>>;
 
     struct Engine {
         cfg: EngineConfig,
@@ -90,34 +98,42 @@ mod imp {
     }
 
     /// Load (or fetch from the registry) the backend for `workspace`, reusing the
-    /// shared model. Builds outside the registry lock so a slow first index of
-    /// one workspace doesn't block attaches to others.
+    /// shared model.
+    ///
+    /// This used to check the registry, release the lock, build, then insert -
+    /// so two attaches to a cold workspace both built a full backend, each
+    /// indexing the workspace and starting its own file watcher. Worse, the
+    /// loser kept the registry's entry but returned its own backend, so that
+    /// connection was served for its whole life by a second, unregistered copy
+    /// (issue #23). A per-workspace `OnceCell` makes the second attach wait for
+    /// the first load instead, while a slow first index of one workspace still
+    /// does not block attaches to others.
     async fn get_or_load(engine: &Arc<Engine>, workspace: PathBuf) -> Arc<McpServer> {
         let ws = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.clone());
-        if let Some(s) = engine.registry.lock().await.get(&ws).cloned() {
-            return s;
-        }
+        let slot = {
+            let mut registry = engine.registry.lock().await;
+            Arc::clone(registry.entry(ws.clone()).or_default())
+        };
+        Arc::clone(slot.get_or_init(|| load_workspace(engine, ws)).await)
+    }
 
+    async fn load_workspace(engine: &Arc<Engine>, ws: PathBuf) -> Arc<McpServer> {
         tracing::info!("Engine: loading workspace {}", ws.display());
         let mut server = McpServer::new(
-            vec![ws.clone()],
+            vec![ws],
             engine.cfg.exclude_dirs.clone(),
             engine.cfg.max_files,
             engine.cfg.embedding_model.clone(),
             engine.cfg.full_body_embedding,
-        );
+        )
+        .with_graph_only(engine.cfg.graph_only);
         if let Some(shared) = &engine.shared_engine {
             server.set_shared_engine(Arc::clone(shared)).await;
         }
         server.ensure_indexed().await;
-        let server = Arc::new(server);
-
-        let mut reg = engine.registry.lock().await;
-        // Another connection may have loaded it while we built — prefer theirs.
-        reg.entry(ws).or_insert_with(|| Arc::clone(&server));
-        server
+        Arc::new(server)
     }
 
     /// First line of a connection: an attach frame selects the workspace.
@@ -199,6 +215,47 @@ mod imp {
         }
     }
 
+    enum EngineLock {
+        /// This process is the engine for the socket. Released by the OS when
+        /// the process exits, crashes included.
+        Held(std::fs::File),
+        /// Another live process already is.
+        Contended,
+        /// The lock file could not be opened or locked.
+        Unavailable,
+    }
+
+    /// Take the exclusive lock, kept beside the socket, that marks this process
+    /// as the engine for `socket_path`.
+    fn acquire_engine_lock(socket_path: &std::path::Path) -> EngineLock {
+        let mut lock_path = socket_path.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        if let Some(parent) = lock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Engine: cannot open {}: {e}", lock_path.display());
+                return EngineLock::Unavailable;
+            }
+        };
+        match file.try_lock() {
+            Ok(()) => EngineLock::Held(file),
+            Err(std::fs::TryLockError::WouldBlock) => EngineLock::Contended,
+            Err(std::fs::TryLockError::Error(e)) => {
+                tracing::warn!("Engine: cannot lock {}: {e}", lock_path.display());
+                EngineLock::Unavailable
+            }
+        }
+    }
+
     /// True if a live engine is already listening on the socket (probe by
     /// connecting). Distinguishes a stale socket file from a running engine so we
     /// neither steal a live socket nor refuse to start over a dead one.
@@ -207,7 +264,25 @@ mod imp {
     }
 
     pub async fn serve(cfg: EngineConfig) -> Result<(), String> {
-        // Don't start a second engine over a live one (handles auto-spawn races).
+        // Held for the life of the engine. The socket probe alone did not stop
+        // two auto-spawned engines: both probed before either had bound, both
+        // loaded a model and their seed workspaces - which can take minutes -
+        // and the second then removed the first one's live socket file to bind
+        // its own, leaving the first running, holding a model, and unreachable
+        // until its idle timeout (issue #23). Taking an exclusive lock first
+        // makes the loser exit before it loads anything.
+        let _engine_lock = match acquire_engine_lock(&cfg.socket_path) {
+            EngineLock::Held(lock) => Some(lock),
+            EngineLock::Contended => {
+                tracing::info!("Engine: another instance owns this socket — exiting");
+                return Ok(());
+            }
+            // Could not lock at all: fall back to the socket probe below
+            // rather than refuse to start.
+            EngineLock::Unavailable => None,
+        };
+
+        // Still checked: an engine started by an older build holds no lock.
         if engine_is_live(&cfg.socket_path).await {
             tracing::info!("Engine: another instance is already live — exiting");
             return Ok(());
@@ -216,7 +291,10 @@ mod imp {
         // One model for the whole engine. Gate on free memory the same way the
         // per-workspace path does, so a constrained box runs graph-only instead
         // of OOM-crashing on the model load.
-        let shared_engine = {
+        let shared_engine = if cfg.graph_only {
+            tracing::info!("Engine: graph-only — not loading an embedding model");
+            None
+        } else {
             let mut sys = sysinfo::System::new();
             sys.refresh_memory();
             let avail = sys.available_memory();
@@ -310,7 +388,7 @@ mod imp {
 
     /// Spawn a detached engine for `socket_path` using this binary, so the engine
     /// outlives the shim. Best-effort; the caller retries the connect.
-    fn spawn_engine(socket_path: &std::path::Path, embedding_model: &str) {
+    fn spawn_engine(socket_path: &std::path::Path, engine_args: &[std::ffi::OsString]) {
         let exe = match std::env::current_exe() {
             Ok(e) => e,
             Err(e) => {
@@ -322,8 +400,7 @@ mod imp {
         cmd.arg("--serve")
             .arg("--socket")
             .arg(socket_path)
-            .arg("--embedding-model")
-            .arg(embedding_model)
+            .args(engine_args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -336,10 +413,13 @@ mod imp {
         }
     }
 
+    /// `engine_args` are the engine-level settings an auto-spawned engine should
+    /// start with. They only take effect when this call is the one that starts
+    /// the engine: one already running keeps the settings it was started with.
     pub async fn connect(
         socket_path: &std::path::Path,
         workspace: PathBuf,
-        embedding_model: &str,
+        engine_args: &[std::ffi::OsString],
     ) -> Result<(), String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -347,7 +427,7 @@ mod imp {
         let stream = match UnixStream::connect(socket_path).await {
             Ok(s) => s,
             Err(_) => {
-                spawn_engine(socket_path, embedding_model);
+                spawn_engine(socket_path, engine_args);
                 let mut connected = None;
                 for _ in 0..60 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -404,6 +484,33 @@ mod imp {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    mod lock_tests {
+        use super::*;
+
+        /// flock is per open file description, not per process, so a second
+        /// open in the same process contends exactly as a second engine would.
+        #[test]
+        fn only_one_engine_may_own_a_socket() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("cg-engine.sock");
+
+            let first = acquire_engine_lock(&socket);
+            assert!(
+                matches!(first, EngineLock::Held(_)),
+                "first engine takes the lock"
+            );
+            assert!(
+                matches!(acquire_engine_lock(&socket), EngineLock::Contended),
+                "a second engine must back off before loading anything"
+            );
+
+            // Released on drop, as on process exit: the socket is free again.
+            drop(first);
+            assert!(matches!(acquire_engine_lock(&socket), EngineLock::Held(_)));
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -418,7 +525,7 @@ pub async fn serve(_cfg: EngineConfig) -> Result<(), String> {
 pub async fn connect(
     _socket_path: &std::path::Path,
     _workspace: PathBuf,
-    _embedding_model: &str,
+    _engine_args: &[std::ffi::OsString],
 ) -> Result<(), String> {
     Err("the socket engine is not yet supported on this platform".to_string())
 }
