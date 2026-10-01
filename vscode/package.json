@@ -306,7 +306,7 @@
                         "Jina Code V2 (768d) — 6x slower indexing, no quality advantage with full-body embeddings. ~642MB download.",
                         "Static (model2vec, 256d) — ~100x faster indexing, no ONNX runtime or 1.5GB RAM gate, ~90% of BGE quality in hybrid search. Needs a local model dir: ~/.codegraph/static_models/jina-code-static-256 by default, or codegraph.staticModelPath."
                     ],
-                    "description": "Embedding model for semantic search and code similarity"
+                    "description": "Embedding model for semantic search and code similarity. Takes effect after the window is reloaded; the embeddings are then rebuilt automatically in the background, since vectors from different models cannot be compared."
                 },
                 "codegraph.staticModelPath": {
                     "type": "string",
@@ -318,7 +318,13 @@
                     "type": "boolean",
                     "default": true,
                     "scope": "resource",
-                    "description": "Embed full function body (first ~50 lines) instead of just name+signature. Better quality for NL search and clone detection, ~3x slower indexing. Requires reindex after changing."
+                    "description": "Embed full function body (first ~50 lines) instead of just name+signature. Better quality for NL search and clone detection, ~3x slower indexing. Takes effect after the window is reloaded; the affected embeddings then rebuild automatically in the background, with no manual reindex."
+                },
+                "codegraph.splitIdentifiers": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Also embed the word-split form of identifiers whose words are run together, so getUserById embeds as \"get user by id\" too. Names already separated by _ or - are left alone, since they tokenise into the same words; a leading or trailing delimiter separates nothing, so _handleClick is split like handleClick. Improves natural-language search most in camelCase languages (TypeScript, Java, C#). Takes effect after the window is reloaded; the affected embeddings then rebuild automatically in the background, with no manual reindex."
                 },
                 "codegraph.embedOnOpen": {
                     "type": "boolean",

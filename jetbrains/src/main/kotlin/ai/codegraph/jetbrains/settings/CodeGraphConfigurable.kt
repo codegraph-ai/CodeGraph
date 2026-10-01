@@ -95,6 +95,17 @@ class CodeGraphConfigurable(private val project: Project) : BoundConfigurable(DI
                     )
             }
             row {
+                checkBox("Split identifiers into words when embedding")
+                    .bindSelected(state::splitIdentifiers)
+                    .comment(
+                        "Embeds <code>getUserById</code> as \"get user by id\" as well as the " +
+                            "raw name, which helps natural-language search most in camelCase " +
+                            "languages. snake_case names are left alone. Takes effect after the " +
+                            "IDE restarts; the affected embeddings then rebuild automatically in " +
+                            "the background, with no manual reindex.",
+                    )
+            }
+            row {
                 checkBox("Embed files as they are opened")
                     .bindSelected(state::embedOnOpen)
             }

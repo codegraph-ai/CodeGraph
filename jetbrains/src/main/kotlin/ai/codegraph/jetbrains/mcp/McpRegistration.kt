@@ -146,7 +146,14 @@ object McpRegistration {
                         // about what "similar" means.
                         add("--embedding-model")
                         add(settings.embeddingModel)
-                        if (settings.fullBodyEmbedding) add("--full-body-embedding")
+                        // Only passed when off: the engine already defaults
+                        // these on, and both flags take a value precisely so
+                        // the default can be overridden. Passing the bare
+                        // `--full-body-embedding` when the setting was on left
+                        // no way to express "off", so unchecking it in the
+                        // settings had no effect on the MCP-registered engine.
+                        if (!settings.fullBodyEmbedding) add("--full-body-embedding=false")
+                        if (!settings.splitIdentifiers) add("--split-identifiers=false")
                     },
                 ),
             )

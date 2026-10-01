@@ -272,6 +272,26 @@ impl StorageBackend for RocksDBBackend {
         Ok(results)
     }
 
+    fn scan_prefix_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let mut keys = Vec::new();
+        let iter = self.db.prefix_iterator(prefix);
+
+        for item in iter {
+            let (key, _) =
+                item.map_err(|e| GraphError::storage("Failed to iterate over prefix", Some(e)))?;
+
+            // RocksDB prefix iterator may return keys beyond the prefix
+            // so we need to check explicitly
+            if !key.starts_with(prefix) {
+                break;
+            }
+
+            keys.push(key.to_vec());
+        }
+
+        Ok(keys)
+    }
+
     fn write_batch(&mut self, operations: Vec<BatchOperation>) -> Result<()> {
         let mut batch = WriteBatch::default();
 

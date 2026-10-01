@@ -92,6 +92,16 @@ impl StorageBackend for NamespacedBackend {
             .collect())
     }
 
+    fn scan_prefix_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let namespaced_prefix = self.prefixed_key(prefix);
+        Ok(self
+            .inner
+            .scan_prefix_keys(&namespaced_prefix)?
+            .into_iter()
+            .map(|k| self.strip_prefix(&k).to_vec())
+            .collect())
+    }
+
     fn write_batch(&mut self, operations: Vec<BatchOperation>) -> Result<()> {
         let namespaced_ops = operations
             .into_iter()
@@ -178,6 +188,27 @@ mod tests {
         let results_b = backend_b.scan_prefix(b"node:").unwrap();
         assert_eq!(results_b.len(), 1);
         assert!(results_b.iter().any(|(k, _)| k == b"node:3"));
+    }
+
+    #[test]
+    fn test_scan_prefix_keys_scoped_and_stripped() {
+        let inner = MemoryBackend::new();
+        let mut backend_a = NamespacedBackend::new(Box::new(inner.clone()), "proj-a");
+        let mut backend_b = NamespacedBackend::new(Box::new(inner.clone()), "proj-b");
+
+        backend_a.put(b"node:1", b"a1").unwrap();
+        backend_a.put(b"node:2", b"a2").unwrap();
+        backend_a.put(b"edge:1", b"e1").unwrap();
+        backend_b.put(b"node:3", b"b3").unwrap();
+
+        let mut keys = backend_a.scan_prefix_keys(b"node:").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec![b"node:1".to_vec(), b"node:2".to_vec()]);
+
+        assert_eq!(
+            backend_b.scan_prefix_keys(b"node:").unwrap(),
+            vec![b"node:3".to_vec()]
+        );
     }
 
     #[test]

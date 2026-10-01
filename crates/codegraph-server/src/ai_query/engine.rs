@@ -15,7 +15,7 @@ use super::primitives::{
 };
 use super::text_index::{TextIndex, TextIndexBuilder};
 use crate::domain::node_props;
-use codegraph::{CodeGraph, Direction, EdgeType, NodeId, NodeType};
+use codegraph::{CodeGraph, Direction, EdgeType, NamespacedBackend, NodeId, NodeType};
 use codegraph_memory::VectorEngine;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -85,6 +85,289 @@ fn embed_memory_pressured(avail_mb: u64) -> bool {
     avail_mb > 0 && avail_mb < EMBED_LOW_MEM_MB
 }
 
+/// Version of the code that builds embedding text, bumped whenever that code
+/// changes what it emits.
+///
+/// 1 = raw name (through 0.20.1)
+/// 2 = delimiter-free identifiers also embedded word-split
+/// 3 = leading and trailing `_`/`-` no longer count as word delimiters, so
+///     `_handleClick` is split like `handleClick`
+const EMBED_TEXT_SCHEMA: u32 = 3;
+
+/// Identifies the embedding text a set of vectors was built from: the version
+/// of the code that builds it, plus the settings that change what it emits.
+///
+/// Vectors are only comparable to others built the same way. `getUserById` and
+/// `get user by id getUserById` describe the same symbol but land in different
+/// places, so ranking one against the other is worse than either scheme alone -
+/// and the same holds for a signature-only vector against a full-body one.
+/// The model comes first because it decides comparability most bluntly of all:
+/// bge-small emits 384 dimensions and jina-code-v2 emits 768, and
+/// `cosine_similarity` zips two vectors of different length down to the shorter
+/// one while dividing by the longer norm, so mixing them scores every symbol
+/// wrong without erroring.
+fn embed_text_id(model: &str, full_body: bool, split_identifiers: bool) -> String {
+    let flag = |on: bool| if on { "on" } else { "off" };
+    format!(
+        "{EMBED_TEXT_SCHEMA}-model={model}-body={}-split={}",
+        flag(full_body),
+        flag(split_identifiers)
+    )
+}
+
+/// What [`QueryEngine::load_symbol_vectors`] found in the store.
+///
+/// The three empty outcomes are not interchangeable. A caller that treats
+/// "nothing loaded" as "re-embed the repo" does a whole-corpus ONNX run because
+/// a watcher daemon had not reached its first persist yet, or because the store
+/// was locked for the moment it took the daemon to write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VectorLoad {
+    /// Vectors built from the same embed text this engine produces.
+    Loaded(usize),
+    /// Nothing is stored for this project yet.
+    Absent,
+    /// The stored vectors were built from different embed text - another
+    /// configuration, another model, or 0.20.1, which stamped nothing.
+    Mismatched,
+    /// The store could not be read. Says nothing about what it holds.
+    Unreadable,
+}
+
+impl VectorLoad {
+    /// Vectors actually loaded; zero for every outcome but [`Self::Loaded`].
+    pub fn count(&self) -> usize {
+        match self {
+            Self::Loaded(n) => *n,
+            _ => 0,
+        }
+    }
+}
+
+/// Key prefix for a project's persisted symbol vectors. One set per project.
+const VECTOR_KEY_PREFIX: &str = "vec:";
+
+/// Key holding the [`embed_text_id`] the persisted vectors were built from.
+///
+/// It is also the ownership marker. A project belongs to whichever embed text
+/// last claimed it, and only a rebuild that is about to write a full set may
+/// claim - see [`claim_project`].
+const EMBED_STAMP_KEY: &[u8] = b"embed_text_stamp";
+
+/// The node a `vec:` key belongs to, if it is one.
+fn vector_key_node(key: &[u8]) -> Option<NodeId> {
+    std::str::from_utf8(key)
+        .ok()?
+        .strip_prefix(VECTOR_KEY_PREFIX)?
+        .parse::<NodeId>()
+        .ok()
+}
+
+/// Whether a project's vectors belong to a watcher daemon other than this
+/// process.
+///
+/// The daemon's own indexing runs before it publishes a heartbeat and matches
+/// this pid afterwards, so it is never locked out of its own project; a daemon
+/// that died leaves a stale heartbeat that `live_daemon_for` discards, so a
+/// crash does not strand the vectors either.
+fn owned_by_another_process(daemon: Option<&crate::daemon::DaemonHeartbeat>) -> bool {
+    daemon.is_some_and(|d| d.pid != std::process::id())
+}
+
+/// The embed text a project's stored vectors belong to, if any.
+fn project_owner(backend: &NamespacedBackend) -> std::result::Result<Option<Vec<u8>>, String> {
+    use codegraph::StorageBackend;
+
+    backend
+        .get(EMBED_STAMP_KEY)
+        .map_err(|e| format!("Failed to read embed-text stamp: {e}"))
+}
+
+/// Take a project's vector set for `stamp`: drop whatever is stored and stamp
+/// the project, in one batch. Returns whether the project was taken.
+///
+/// This is the only destructive step in the lifecycle, and the process taking
+/// it is about to write a full set. Everything after it - every checkpoint, the
+/// final save - only adds to a set this run owns, so a crash mid-rebuild leaves
+/// a partial set under its own stamp that the next start loads and the fill
+/// pass completes. Losing a marathon first index to an OOM-kill is the failure
+/// checkpointing exists for; it only works if the checkpoints are loadable,
+/// which means the stamp has to be there from the start.
+///
+/// A live watcher daemon owns its workspace's vectors, so no other process may
+/// take them - not a session that attached to it, not the reindex tool inside
+/// one, not a path added later. The refusal lives here, at the delete, rather
+/// than in the callers that would otherwise each have to remember it.
+fn claim_project(
+    backend: &mut NamespacedBackend,
+    slug: &str,
+    stamp: &str,
+) -> std::result::Result<bool, String> {
+    use codegraph::storage::BatchOperation;
+    use codegraph::StorageBackend;
+
+    if owned_by_another_process(crate::daemon::live_daemon_for(slug).as_ref()) {
+        return Ok(false);
+    }
+
+    let mut ops: Vec<BatchOperation> = backend
+        .scan_prefix_keys(VECTOR_KEY_PREFIX.as_bytes())
+        .map_err(|e| format!("Failed to scan stored vector keys: {e}"))?
+        .into_iter()
+        .map(|key| BatchOperation::Delete { key })
+        .collect();
+    ops.push(BatchOperation::Put {
+        key: EMBED_STAMP_KEY.to_vec(),
+        value: stamp.as_bytes().to_vec(),
+    });
+
+    backend
+        .write_batch(ops)
+        .map_err(|e| format!("Failed to claim symbol vector set: {e}"))?;
+    Ok(true)
+}
+
+/// Vectors per write batch.
+///
+/// Each batch is copied into the backend's own buffer, so writing a large set
+/// as one batch peaks at several times the set's size. The checkpoint that runs
+/// when [`embed_memory_pressured`] fires is exactly the write that must not do
+/// that: it exists to survive low memory, not to triple the footprint at the
+/// moment memory is already short.
+const STORE_BATCH_VECTORS: usize = 2048;
+
+/// Store `vecs` for a project, returning whether anything was written.
+///
+/// Writes only into a set this stamp already owns. A project nobody has claimed
+/// is not adopted, and a set belonging to different embed text is left alone:
+/// stamping is [`claim_project`]'s job, reserved for a process about to write
+/// the whole set. Without that rule an unstamped set - everything a pre-0.21
+/// binary wrote, including a `--watch` daemon still running across an upgrade -
+/// would be adopted as current by the first complete save to come along, and
+/// then served as if it matched.
+///
+/// Only ever adds. [`claim_project`] is the sole path that deletes, so it is
+/// the sole place ownership has to be enforced, and a save can never destroy
+/// work another writer - a checkpointing rebuild, a watcher daemon, a session
+/// indexing a narrower set of paths - has already stored. Vectors for nodes
+/// that no longer exist are dropped by the next claim, which clears the set
+/// wholesale before the rebuild that follows refills it.
+///
+/// Written in chunks rather than one batch. An interrupted write leaves a
+/// subset of the set under its own stamp, which is the same state a checkpoint
+/// leaves and which the fill pass completes on the next start.
+fn store_vectors(
+    backend: &mut NamespacedBackend,
+    vecs: &HashMap<NodeId, Vec<f32>>,
+    stamp: &str,
+) -> std::result::Result<bool, String> {
+    use codegraph::storage::BatchOperation;
+    use codegraph::StorageBackend;
+
+    if project_owner(backend)?.as_deref() != Some(stamp.as_bytes()) {
+        return Ok(false);
+    }
+
+    let mut batch: Vec<BatchOperation> = Vec::with_capacity(STORE_BATCH_VECTORS.min(vecs.len()));
+    for (&node_id, vec) in vecs.iter() {
+        batch.push(BatchOperation::Put {
+            key: format!("{VECTOR_KEY_PREFIX}{node_id}").into_bytes(),
+            value: vec.iter().flat_map(|f| f.to_le_bytes()).collect(),
+        });
+        if batch.len() == STORE_BATCH_VECTORS {
+            backend
+                .write_batch(std::mem::take(&mut batch))
+                .map_err(|e| format!("Failed to store symbol vectors: {e}"))?;
+            batch.reserve(STORE_BATCH_VECTORS);
+        }
+    }
+    if !batch.is_empty() {
+        backend
+            .write_batch(batch)
+            .map_err(|e| format!("Failed to store symbol vectors: {e}"))?;
+    }
+    Ok(true)
+}
+
+/// Read a project's persisted vectors, but only when they were built from
+/// `stamp`.
+///
+/// A set built from other text is left exactly where it is rather than deleted:
+/// the process that wrote it may still be using it, and the next complete save
+/// replaces it wholesale anyway. `vec:` keys carrying no stamp at all are the
+/// 0.20.1 layout and take the same path.
+///
+/// The error tells the caller *why* it got nothing, which is not one question
+/// but three - see [`VectorLoad`].
+fn read_vectors(
+    backend: &NamespacedBackend,
+    stamp: &str,
+) -> std::result::Result<Vec<(NodeId, Vec<f32>)>, VectorLoad> {
+    use codegraph::StorageBackend;
+
+    let stored_stamp = backend.get(EMBED_STAMP_KEY).map_err(|e| {
+        tracing::warn!("[QueryEngine] Failed to read embed-text stamp: {e}");
+        VectorLoad::Unreadable
+    })?;
+
+    if stored_stamp.as_deref() != Some(stamp.as_bytes()) {
+        let stored = backend
+            .scan_prefix_keys(VECTOR_KEY_PREFIX.as_bytes())
+            .map_err(|e| {
+                tracing::warn!("[QueryEngine] Failed to scan vector keys: {e}");
+                VectorLoad::Unreadable
+            })?;
+        return Err(if stored.is_empty() {
+            VectorLoad::Absent
+        } else {
+            VectorLoad::Mismatched
+        });
+    }
+
+    let entries = backend
+        .scan_prefix(VECTOR_KEY_PREFIX.as_bytes())
+        .map_err(|e| {
+            tracing::warn!("[QueryEngine] Failed to scan vectors: {e}");
+            VectorLoad::Unreadable
+        })?;
+
+    Ok(entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let node_id = vector_key_node(&key)?;
+            if value.len() % 4 != 0 {
+                return None;
+            }
+            let vec = value
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            Some((node_id, vec))
+        })
+        .collect())
+}
+
+/// Whether splitting an identifier into words tells the embedder anything it
+/// cannot already see.
+///
+/// A `_` or `-` *between* words is a delimiter every tokenizer already splits
+/// on, so prepending the split form of `get_user_by_id` just repeats the name.
+/// One at the start or the end separates nothing: `_handleClick` reaches the
+/// embedder as the same single rare token `handleClick` does, and the
+/// private/member conventions that produce it (`_privateField`, `type_`) belong
+/// to exactly the camelCase languages splitting was measured to help.
+///
+/// Measured on the doc->symbol retrieval eval (pure semantic, R@1, BGE-small):
+/// camelCase +79% (compressor, 377 symbols), PascalCase +23% (this repo, 200),
+/// snake_case +1.3% (this repo, 723) and -2.5% (SystemVerilog, 696). The Rust
+/// snake-vs-Pascal pair is the controlled comparison - same repo, same docs,
+/// only the casing differs - so splitting is applied where it pays and skipped
+/// where it is a wash or a small loss.
+fn needs_word_split(name: &str) -> bool {
+    let between_words = name.trim_matches(|c| c == '_' || c == '-');
+    !between_words.contains('_') && !between_words.contains('-')
+}
+
 /// Split an identifier into camelCase/snake_case words (deduped, lowercased),
 /// reusing the BM25 tokenizer: `getUserById` -> "get user by id".
 fn split_identifier_words(name: &str) -> String {
@@ -109,7 +392,11 @@ impl QueryEngine {
             symbol_vectors: Arc::new(RwLock::new(HashMap::new())),
             symbol_texts: Arc::new(RwLock::new(HashMap::new())),
             full_body_embedding: std::sync::atomic::AtomicBool::new(true),
-            split_identifiers: std::sync::atomic::AtomicBool::new(false),
+            // On by default: run-together identifiers are the common case in
+            // TypeScript, Java, C# and Go, and are exactly where the embedder
+            // cannot recover the words on its own. needs_word_split() keeps it
+            // off for snake_case, where it does not help.
+            split_identifiers: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -120,10 +407,23 @@ impl QueryEngine {
     }
 
     /// Enable or disable prepending split-identifier words to the embed text.
-    /// Helps static (lookup-table) embedders; off by default.
+    ///
+    /// On by default, and applied only to identifiers whose words are not
+    /// already separated by `_`/`-` - see `needs_word_split`. Turning it off
+    /// reverts to embedding the raw name, which releases up to 0.20.1 did.
     pub fn set_split_identifiers(&self, enabled: bool) {
         self.split_identifiers
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn split_identifiers_enabled(&self) -> bool {
+        self.split_identifiers
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn full_body_enabled(&self) -> bool {
+        self.full_body_embedding
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Build the embedding text for a symbol node.
@@ -155,7 +455,7 @@ impl QueryEngine {
         // Static (lookup-table) embedders can't subword-recover `authenticateUser`
         // from one rare token; the split words ("authenticate user") are their
         // strongest signal, front-loaded so they survive truncation.
-        let base = if split_identifiers {
+        let base = if split_identifiers && needs_word_split(name) {
             let words = split_identifier_words(name);
             if words.is_empty() || words == name.to_lowercase() {
                 base
@@ -289,10 +589,10 @@ impl QueryEngine {
     /// Like [`Self::build_symbol_vectors`], with crash resilience for marathon
     /// first-index runs (telemetry: linux OOM-kills ~25 min into embedding,
     /// losing the whole run because the only save happened at the very end):
-    /// - with a `slug`, persists accumulated vectors every
-    ///   [`EMBED_CHECKPOINT_SYMBOLS`] symbols (status `partial:N`), so a kill
-    ///   loses minutes and the next start resumes via
-    ///   [`Self::embed_missing_symbols`];
+    /// - with a `slug`, claims the project's vector set up front and then
+    ///   persists accumulated vectors every [`EMBED_CHECKPOINT_SYMBOLS`]
+    ///   symbols, so a kill loses minutes and the next start loads the partial
+    ///   set and finishes it via [`Self::embed_missing_symbols`];
     /// - polls available RAM every [`EMBED_MEM_CHECK_CHUNKS`] chunks; under
     ///   [`EMBED_LOW_MEM_MB`] it halves the ONNX batch and forces a
     ///   checkpoint — degrade to slow instead of being OOM-killed.
@@ -306,6 +606,12 @@ impl QueryEngine {
         };
 
         let start = Instant::now();
+        // Read once: every vector this run writes, and the stamp its
+        // checkpoints are matched against, must describe the same settings.
+        let full_body = self.full_body_enabled();
+        let split_identifiers = self.split_identifiers_enabled();
+        let stamp = embed_text_id(engine.model_name(), full_body, split_identifiers);
+
         let graph = self.graph.read().await;
 
         // Collect symbol texts for embedding. Texts are stored ONCE here and
@@ -334,16 +640,8 @@ impl QueryEngine {
             }
 
             // Build embedding text
-            let embed_text = Self::build_embed_text(
-                node,
-                node_id,
-                name,
-                self.full_body_embedding
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                self.split_identifiers
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                &graph,
-            );
+            let embed_text =
+                Self::build_embed_text(node, node_id, name, full_body, split_identifiers, &graph);
 
             node_ids.push(node_id);
             texts.push(embed_text);
@@ -354,6 +652,32 @@ impl QueryEngine {
         if texts.is_empty() {
             return;
         }
+
+        // Claiming replaces the stored set, so it happens only once this run
+        // is known to have something to write. It used to run first, before a
+        // single symbol had been collected: a rebuild that found nothing to
+        // embed - an index whose paths were renamed away, say - cleared the
+        // project's vectors and then returned having written none.
+        let slug = match slug {
+            Some(slug) => match Self::claim_vector_set(slug, &stamp) {
+                Ok(true) => Some(slug),
+                Ok(false) => {
+                    tracing::info!(
+                        "[QueryEngine] A watcher daemon owns '{slug}' - embedding in memory only, \
+                         leaving its vectors alone."
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[QueryEngine] Could not claim the vector set for '{slug}': {e}. \
+                         Embedding in memory only; an interrupted run will restart."
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
 
         let model_name = engine.model_name();
         tracing::info!(
@@ -366,10 +690,17 @@ impl QueryEngine {
         // ONNX Runtime allocates intermediate tensors proportional to batch size × token count.
         // Signature mode (~20 tokens/item): batch 64 is fine.
         // Full-body mode (~500 tokens/item): reduce batch to 16 to stay within memory.
-        let is_full_body = self
-            .full_body_embedding
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut chunk_size: usize = if is_full_body { 16 } else { 64 };
+        let mut chunk_size: usize = if full_body { 16 } else { 64 };
+
+        // Accumulated here and published in one swap at the end, never
+        // incrementally: `symbol_vectors` is also the live search set, and a
+        // partial one is worse than none. `compute_semantic_scores` succeeds as
+        // soon as it is non-empty, so every symbol not embedded yet scores 0 on
+        // the semantic half and is ranked below whatever the first chunks
+        // happened to cover - for the whole run, on a big repo tens of minutes.
+        // Leaving it empty keeps search on pure BM25 and keeps
+        // `are_embeddings_ready` false, which is what tells the client
+        // embeddings are still building.
         let mut symbol_vecs = HashMap::with_capacity(texts.len());
 
         let total = texts.len();
@@ -421,12 +752,16 @@ impl QueryEngine {
                 if since_checkpoint >= EMBED_CHECKPOINT_SYMBOLS
                     || (pressured && since_checkpoint > 0)
                 {
-                    match Self::save_vectors_map(slug, &symbol_vecs, false) {
-                        Ok(()) => tracing::info!(
+                    match Self::save_vectors_map(slug, &symbol_vecs, false, &stamp) {
+                        Ok(true) => tracing::info!(
                             "[QueryEngine] Checkpointed {} vectors ({}/{} embedded)",
                             symbol_vecs.len(),
                             pos,
                             total
+                        ),
+                        Ok(false) => tracing::debug!(
+                            "[QueryEngine] Checkpoint skipped: the stored set belongs to another \
+                             embed text and only a complete save may replace it"
                         ),
                         Err(e) => tracing::warn!("[QueryEngine] Vector checkpoint failed: {e}"),
                     }
@@ -462,6 +797,11 @@ impl QueryEngine {
             None => return,
         };
 
+        // Read once: every vector this run writes, and the stamp its
+        // checkpoints are matched against, must describe the same settings.
+        let full_body = self.full_body_enabled();
+        let split_identifiers = self.split_identifiers_enabled();
+        let stamp = embed_text_id(engine.model_name(), full_body, split_identifiers);
         let graph = self.graph.read().await;
         let existing_vecs = self.symbol_vectors.read().await;
 
@@ -487,16 +827,8 @@ impl QueryEngine {
             if name.is_empty() || name == "arrow_function" || name == "anonymous" {
                 continue;
             }
-            let embed_text = Self::build_embed_text(
-                node,
-                node_id,
-                name,
-                self.full_body_embedding
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                self.split_identifiers
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                &graph,
-            );
+            let embed_text =
+                Self::build_embed_text(node, node_id, name, full_body, split_identifiers, &graph);
             node_ids.push(node_id);
             texts.push(embed_text);
         }
@@ -519,10 +851,7 @@ impl QueryEngine {
         // files, but on the post-crash resume path "missing" can be most of
         // the corpus, making the single batch its own OOM. Same backpressure
         // and (with a slug) the same crash-resilience checkpoints.
-        let is_full_body = self
-            .full_body_embedding
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut chunk_size: usize = if is_full_body { 16 } else { 64 };
+        let mut chunk_size: usize = if full_body { 16 } else { 64 };
         let total = texts.len();
         let mut pos = 0usize;
         let mut chunks_done = 0usize;
@@ -570,12 +899,16 @@ impl QueryEngine {
                     || (pressured && since_checkpoint > 0)
                 {
                     let vecs = self.symbol_vectors.read().await;
-                    match Self::save_vectors_map(slug, &vecs, false) {
-                        Ok(()) => tracing::info!(
+                    match Self::save_vectors_map(slug, &vecs, false, &stamp) {
+                        Ok(true) => tracing::info!(
                             "[QueryEngine] Checkpointed {} vectors ({}/{} resumed)",
                             vecs.len(),
                             pos,
                             total
+                        ),
+                        Ok(false) => tracing::debug!(
+                            "[QueryEngine] Checkpoint skipped: the stored set belongs to another \
+                             embed text and only a complete save may replace it"
                         ),
                         Err(e) => tracing::warn!("[QueryEngine] Vector checkpoint failed: {e}"),
                     }
@@ -593,28 +926,77 @@ impl QueryEngine {
 
     /// Persist symbol vectors to RocksDB alongside the graph.
     ///
-    /// Each vector is stored as key `vec:{node_id}` → binary `[f32]` (little-endian).
-    /// Uses the namespaced backend so vectors are scoped per project.
+    /// Each vector is stored as key `vec:{node_id}` → binary `[f32]`
+    /// (little-endian), stamped with the [`embed_text_id`] they were built
+    /// from. Uses the namespaced backend so vectors are scoped per project.
     pub async fn save_symbol_vectors(&self, slug: &str) -> std::result::Result<(), String> {
+        let Some(stamp) = self.embed_stamp().await else {
+            return Ok(());
+        };
         let vecs = self.symbol_vectors.read().await;
         if vecs.is_empty() {
             return Ok(());
         }
-        Self::save_vectors_map(slug, &vecs, true)
+
+        if !Self::save_vectors_map(slug, &vecs, true, &stamp)? {
+            tracing::debug!(
+                "[QueryEngine] Not persisting symbol vectors for '{slug}': the project belongs to \
+                 different embed text and only a rebuild may take it over"
+            );
+        }
+        Ok(())
     }
 
-    /// Write a vector map to RocksDB under `slug`. `complete = false` marks a
-    /// mid-run checkpoint (`embedding_status = partial:N`) so status readers
-    /// never mistake a crash-interrupted run for a finished one.
+    /// Take the project's vector set for `stamp`, so the checkpoints of the
+    /// rebuild that follows are loadable if it is interrupted. Returns whether
+    /// the project was taken - see [`claim_project`].
+    fn claim_vector_set(slug: &str, stamp: &str) -> std::result::Result<bool, String> {
+        use codegraph::RocksDBBackend;
+
+        let db_path = crate::memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
+        }
+        let rocks =
+            RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        let mut namespaced = NamespacedBackend::new(Box::new(rocks), slug);
+
+        claim_project(&mut namespaced, slug, stamp)
+    }
+
+    /// The embed-text id this engine's vectors carry, or `None` before a vector
+    /// engine is attached - without a model there is nothing to compare.
+    async fn embed_stamp(&self) -> Option<String> {
+        let model = self
+            .vector_engine
+            .read()
+            .await
+            .as_ref()
+            .map(|e| e.model_name().to_string())?;
+        Some(embed_text_id(
+            &model,
+            self.full_body_enabled(),
+            self.split_identifiers_enabled(),
+        ))
+    }
+
+    /// Write a vector map to RocksDB under `slug`. `complete` only distinguishes
+    /// a mid-run checkpoint from a final save in the log; both add to the
+    /// project's set and neither removes anything from it.
+    ///
+    /// `stamp` is the [`embed_text_id`] these vectors were built from. Returns
+    /// whether anything was written - see [`store_vectors`].
     fn save_vectors_map(
         slug: &str,
         vecs: &HashMap<NodeId, Vec<f32>>,
         complete: bool,
-    ) -> std::result::Result<(), String> {
-        use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
+        stamp: &str,
+    ) -> std::result::Result<bool, String> {
+        use codegraph::RocksDBBackend;
 
         if vecs.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         let db_path = crate::memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
@@ -627,62 +1009,18 @@ impl QueryEngine {
             RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
         let mut namespaced = NamespacedBackend::new(Box::new(rocks), slug);
 
-        // Write each vector as binary f32 array
-        for (&node_id, vec) in vecs.iter() {
-            let key = format!("vec:{node_id}");
-            let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
-            namespaced
-                .put(key.as_bytes(), &bytes)
-                .map_err(|e| format!("Failed to write vector: {e}"))?;
+        if !store_vectors(&mut namespaced, vecs, stamp)? {
+            return Ok(false);
         }
-
-        // Write embedding status
-        let status = if complete {
-            format!("complete:{}", vecs.len())
-        } else {
-            format!("partial:{}", vecs.len())
-        };
-        namespaced
-            .put(b"embedding_status", status.as_bytes())
-            .map_err(|e| format!("Failed to write embedding status: {e}"))?;
 
         tracing::info!(
-            "[QueryEngine] Saved {} symbol vectors to graph.db (namespace: {}, {})",
+            "[QueryEngine] Saved {} symbol vectors to graph.db (namespace: {}, embed text: {}, {})",
             vecs.len(),
             slug,
+            stamp,
             if complete { "complete" } else { "checkpoint" }
         );
-        Ok(())
-    }
-
-    /// Check if embeddings are complete (persisted status in RocksDB).
-    /// Returns (is_complete, count) or (false, 0) if no status found.
-    pub fn check_embedding_status(slug: &str) -> (bool, usize) {
-        use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
-
-        let db_path = match crate::memory::shared_graph_db_path() {
-            Ok(p) if p.exists() => p,
-            _ => return (false, 0),
-        };
-
-        let rocks = match RocksDBBackend::open(&db_path) {
-            Ok(r) => r,
-            Err(_) => return (false, 0),
-        };
-        let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
-
-        match namespaced.get(b"embedding_status") {
-            Ok(Some(value)) => {
-                let status = String::from_utf8_lossy(&value);
-                if let Some(count_str) = status.strip_prefix("complete:") {
-                    let count = count_str.parse::<usize>().unwrap_or(0);
-                    (true, count)
-                } else {
-                    (false, 0)
-                }
-            }
-            _ => (false, 0),
-        }
+        Ok(true)
     }
 
     /// Check if embeddings are ready (either loaded from persistence or built in background).
@@ -696,74 +1034,63 @@ impl QueryEngine {
 
     /// Load persisted symbol vectors from RocksDB.
     ///
-    /// Scans for keys prefixed with `vec:` in the project namespace.
-    /// Returns the number of vectors loaded, or 0 if none found.
-    pub async fn load_symbol_vectors(&self, slug: &str) -> usize {
-        use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
+    /// Loads nothing unless the stored set is stamped with the embed text this
+    /// engine is configured to build; a set built from other text is left
+    /// untouched for whoever wrote it. Returns the number of vectors loaded.
+    pub async fn load_symbol_vectors(&self, slug: &str) -> VectorLoad {
+        use codegraph::RocksDBBackend;
+
+        let Some(stamp) = self.embed_stamp().await else {
+            tracing::warn!("[QueryEngine] No vector engine attached - cannot load symbol vectors");
+            return VectorLoad::Unreadable;
+        };
 
         let db_path = match crate::memory::shared_graph_db_path() {
             Ok(p) => p,
-            Err(_) => return 0,
+            Err(e) => {
+                tracing::warn!("[QueryEngine] No graph.db path for vectors: {}", e);
+                return VectorLoad::Unreadable;
+            }
         };
 
         if !db_path.exists() {
-            return 0;
+            return VectorLoad::Absent;
         }
 
         let rocks = match RocksDBBackend::open(&db_path) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("[QueryEngine] Failed to open graph.db for vectors: {}", e);
-                return 0;
+                return VectorLoad::Unreadable;
             }
         };
         let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
 
-        let entries = match namespaced.scan_prefix(b"vec:") {
+        let entries = match read_vectors(&namespaced, &stamp) {
+            Ok(entries) if entries.is_empty() => return VectorLoad::Absent,
             Ok(entries) => entries,
-            Err(e) => {
-                tracing::warn!("[QueryEngine] Failed to scan vectors: {}", e);
-                return 0;
+            Err(outcome) => {
+                tracing::info!(
+                    "[QueryEngine] No usable symbol vectors for '{}' ({:?}, wanted embed text: {})",
+                    slug,
+                    outcome,
+                    stamp
+                );
+                return outcome;
             }
         };
 
+        let loaded = entries.len();
         let mut symbol_vecs = self.symbol_vectors.write().await;
-        let mut loaded = 0;
-
-        for (key, value) in entries {
-            // Key format: "vec:{node_id}" (already stripped of namespace prefix by NamespacedBackend)
-            let key_str = match std::str::from_utf8(&key) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let node_id_str = match key_str.strip_prefix("vec:") {
-                Some(s) => s,
-                None => continue,
-            };
-            let node_id = match node_id_str.parse::<NodeId>() {
-                Ok(id) => id,
-                Err(_) => continue,
-            };
-
-            // Decode binary f32 array (little-endian, 4 bytes per float)
-            if value.len() % 4 != 0 {
-                continue;
-            }
-            let vec: Vec<f32> = value
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
-
-            symbol_vecs.insert(node_id, vec);
-            loaded += 1;
-        }
+        symbol_vecs.extend(entries);
 
         tracing::info!(
-            "[QueryEngine] Loaded {} symbol vectors from graph.db (namespace: {})",
+            "[QueryEngine] Loaded {} symbol vectors from graph.db (namespace: {}, embed text: {})",
             loaded,
-            slug
+            slug,
+            stamp
         );
-        loaded
+        VectorLoad::Loaded(loaded)
     }
 
     /// Remove vectors for symbols from a deleted file.
@@ -4027,6 +4354,346 @@ mod tests {
         assert_eq!(split_identifier_words("foo"), "foo");
     }
 
+    /// An empty project namespace backed by an in-memory store.
+    fn namespace() -> NamespacedBackend {
+        use codegraph::MemoryBackend;
+        NamespacedBackend::new(Box::new(MemoryBackend::new()), "proj")
+    }
+
+    fn vectors(ids: &[NodeId]) -> HashMap<NodeId, Vec<f32>> {
+        ids.iter().map(|&id| (id, vec![id as f32, 0.5])).collect()
+    }
+
+    fn sorted(mut got: Vec<(NodeId, Vec<f32>)>) -> Vec<(NodeId, Vec<f32>)> {
+        got.sort_by_key(|(id, _)| *id);
+        got
+    }
+
+    fn stored_ids(ns: &NamespacedBackend) -> Vec<NodeId> {
+        use codegraph::StorageBackend;
+        let mut ids: Vec<NodeId> = ns
+            .scan_prefix_keys(VECTOR_KEY_PREFIX.as_bytes())
+            .unwrap()
+            .iter()
+            .filter_map(|k| vector_key_node(k))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// A project slug no watcher daemon holds a heartbeat for, so claiming is
+    /// permitted. `live_daemon_for` reads `~/.codegraph/daemons/<slug>.json`.
+    const UNWATCHED: &str = "no-daemon-owns-this-slug-c0ffee";
+
+    /// bge-small and jina-code-v2 differ in dimension, which is the sharpest
+    /// reason two vector sets cannot be ranked against each other.
+    const MODEL_A: &str = "bge-small";
+    const MODEL_B: &str = "jina-code-v2";
+
+    /// A namespace a rebuild has already taken for `stamp`, which is the only
+    /// state in which anything may be stored.
+    fn claimed(stamp: &str) -> NamespacedBackend {
+        let mut ns = namespace();
+        assert!(claim_project(&mut ns, UNWATCHED, stamp).unwrap());
+        ns
+    }
+
+    #[test]
+    fn vectors_round_trip_under_the_configuration_that_stored_them() {
+        let stamp = embed_text_id(MODEL_A, true, true);
+        let mut ns = claimed(&stamp);
+        let written = vectors(&[1, 2, 3]);
+
+        assert!(store_vectors(&mut ns, &written, &stamp).unwrap());
+
+        assert_eq!(
+            sorted(read_vectors(&ns, &stamp).unwrap()),
+            sorted(written.into_iter().collect())
+        );
+    }
+
+    #[test]
+    fn checkpoints_survive_a_crash_on_a_first_index() {
+        // The whole point of checkpointing: an OOM-kill partway through a
+        // marathon first index must leave loadable work behind. The rebuild
+        // claims the project up front, so its checkpoints have a set to land
+        // in and the next start finds them.
+        let mut ns = namespace();
+        let stamp = embed_text_id(MODEL_A, true, true);
+
+        assert!(claim_project(&mut ns, UNWATCHED, &stamp).unwrap());
+        assert!(store_vectors(&mut ns, &vectors(&[1, 2]), &stamp).unwrap());
+        assert!(store_vectors(&mut ns, &vectors(&[1, 2, 3, 4]), &stamp).unwrap());
+        // ... killed here, before any complete save.
+
+        assert_eq!(sorted(read_vectors(&ns, &stamp).unwrap()).len(), 4);
+        assert_eq!(stored_ids(&ns), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn checkpoints_survive_a_crash_while_migrating_an_older_index() {
+        use codegraph::StorageBackend;
+
+        // Same guarantee when the store already holds something incompatible:
+        // 0.20.1 raw-name vectors under the same prefix with no stamp.
+        let mut ns = namespace();
+        ns.put(b"vec:77", &[0u8; 8]).unwrap();
+        let stamp = embed_text_id(MODEL_A, true, true);
+
+        assert!(claim_project(&mut ns, UNWATCHED, &stamp).unwrap());
+        assert!(store_vectors(&mut ns, &vectors(&[1, 2]), &stamp).unwrap());
+
+        assert_eq!(stored_ids(&ns), vec![1, 2], "the claim drops the old set");
+        assert_eq!(read_vectors(&ns, &stamp).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn switching_the_embedding_model_invalidates_the_stored_set() {
+        // Regression: before the model was part of the stamp, a 384d set stayed
+        // loaded after a switch to a 768d model, and every symbol already had a
+        // vector so nothing re-embedded. Queries then scored 768d against 384d.
+        let bge = embed_text_id(MODEL_A, true, true);
+        let jina = embed_text_id(MODEL_B, true, true);
+        let mut ns = claimed(&bge);
+
+        store_vectors(&mut ns, &vectors(&[1, 2, 3]), &bge).unwrap();
+
+        assert_eq!(read_vectors(&ns, &jina), Err(VectorLoad::Mismatched));
+        assert_eq!(read_vectors(&ns, &bge).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn an_empty_store_is_distinguishable_from_a_foreign_one() {
+        // The caller reacts to these differently: a daemon that has not
+        // persisted yet must be waited for, a foreign set must be re-embedded.
+        let ns = namespace();
+        assert_eq!(
+            read_vectors(&ns, &embed_text_id(MODEL_A, true, true)),
+            Err(VectorLoad::Absent)
+        );
+
+        let mut ns = claimed(&embed_text_id(MODEL_A, true, true));
+        store_vectors(&mut ns, &vectors(&[1]), &embed_text_id(MODEL_A, true, true)).unwrap();
+        assert_eq!(
+            read_vectors(&ns, &embed_text_id(MODEL_A, false, true)),
+            Err(VectorLoad::Mismatched)
+        );
+    }
+
+    #[test]
+    fn unstamped_0_20_1_vectors_are_a_mismatch_not_an_empty_store() {
+        use codegraph::StorageBackend;
+
+        let mut ns = namespace();
+        ns.put(b"vec:1", &[0u8; 8]).unwrap();
+        ns.put(b"vec:2", &[0u8; 8]).unwrap();
+
+        assert_eq!(
+            read_vectors(&ns, &embed_text_id(MODEL_A, true, true)),
+            Err(VectorLoad::Mismatched)
+        );
+    }
+
+    #[test]
+    fn no_save_may_replace_a_set_another_embed_text_owns() {
+        // Enforced here rather than trusted to callers: a session attached to a
+        // watcher daemon embeds its own in-memory copy, and its reindex tool
+        // reaches the same complete-save path the daemon's periodic persist
+        // does. Taking a project over is a rebuild's job, via claim_project.
+        use codegraph::StorageBackend;
+
+        let theirs = embed_text_id(MODEL_A, true, true);
+        let ours = embed_text_id(MODEL_A, true, false);
+        let mut ns = claimed(&theirs);
+
+        store_vectors(&mut ns, &vectors(&[1, 2, 3]), &theirs).unwrap();
+
+        assert!(!store_vectors(&mut ns, &vectors(&[9]), &ours).unwrap());
+
+        assert_eq!(stored_ids(&ns), vec![1, 2, 3]);
+        assert_eq!(read_vectors(&ns, &theirs).unwrap().len(), 3);
+        assert_eq!(ns.get(EMBED_STAMP_KEY).unwrap(), Some(theirs.into_bytes()));
+    }
+
+    #[test]
+    fn claiming_is_how_a_rebuild_takes_a_project_over() {
+        let theirs = embed_text_id(MODEL_A, true, true);
+        let ours = embed_text_id(MODEL_B, false, false);
+        let mut ns = claimed(&theirs);
+
+        store_vectors(&mut ns, &vectors(&[1, 2, 3]), &theirs).unwrap();
+        assert!(claim_project(&mut ns, UNWATCHED, &ours).unwrap());
+
+        assert!(
+            stored_ids(&ns).is_empty(),
+            "storage stays bounded at one set"
+        );
+        assert_eq!(read_vectors(&ns, &theirs), Err(VectorLoad::Absent));
+        assert_eq!(read_vectors(&ns, &ours).unwrap(), vec![]);
+
+        assert!(store_vectors(&mut ns, &vectors(&[9]), &ours).unwrap());
+        assert_eq!(read_vectors(&ns, &ours).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn no_save_writes_into_a_project_nobody_has_claimed() {
+        // Stamping is a rebuild's act, not a side effect of saving. Otherwise
+        // the first complete save to come along adopts whatever unstamped set
+        // is lying there - everything a pre-0.21 binary wrote - and serves it
+        // as if it matched.
+        let stamp = embed_text_id(MODEL_A, true, true);
+
+        let mut ns = namespace();
+        assert!(!store_vectors(&mut ns, &vectors(&[1]), &stamp).unwrap());
+        assert!(stored_ids(&ns).is_empty());
+        assert_eq!(read_vectors(&ns, &stamp), Err(VectorLoad::Absent));
+    }
+
+    #[test]
+    fn a_pre_0_21_set_is_never_adopted_by_a_save() {
+        use codegraph::StorageBackend;
+
+        // A pre-0.21 `--watch` daemon left running across an upgrade keeps
+        // writing unstamped vectors. If a save could stamp them, later sessions
+        // would rank split-identifier queries against raw-name vectors and
+        // report semantic search ready.
+        let mut ns = namespace();
+        ns.put(b"vec:1", &[0u8; 8]).unwrap();
+        ns.put(b"vec:2", &[0u8; 8]).unwrap();
+        let stamp = embed_text_id(MODEL_A, true, true);
+
+        assert!(!store_vectors(&mut ns, &vectors(&[3]), &stamp).unwrap());
+
+        assert_eq!(stored_ids(&ns), vec![1, 2]);
+        assert_eq!(ns.get(EMBED_STAMP_KEY).unwrap(), None);
+        assert_eq!(read_vectors(&ns, &stamp), Err(VectorLoad::Mismatched));
+    }
+
+    #[test]
+    fn a_save_never_deletes_work_another_writer_stored() {
+        // Saves only add. A rebuild's checkpoints, a watcher daemon's periodic
+        // persist and a session indexing a narrower set of paths all reach this
+        // path with maps covering different parts of the project; any of them
+        // deleting what its own map does not carry would throw away the others'
+        // work. Clearing the set is the claim's job.
+        let stamp = embed_text_id(MODEL_A, true, true);
+        let mut ns = claimed(&stamp);
+
+        store_vectors(&mut ns, &vectors(&[1, 2, 3]), &stamp).unwrap();
+        store_vectors(&mut ns, &vectors(&[1]), &stamp).unwrap();
+        store_vectors(&mut ns, &vectors(&[9]), &stamp).unwrap();
+
+        assert_eq!(stored_ids(&ns), vec![1, 2, 3, 9]);
+    }
+
+    #[test]
+    fn a_set_larger_than_one_write_batch_round_trips() {
+        // Written in chunks so peak memory does not scale with the set: the
+        // checkpoint forced under memory pressure must not triple the footprint
+        // at the moment memory is already short.
+        let stamp = embed_text_id(MODEL_A, true, true);
+        let mut ns = claimed(&stamp);
+        let ids: Vec<NodeId> = (1..=(STORE_BATCH_VECTORS as NodeId + 17)).collect();
+
+        assert!(store_vectors(&mut ns, &vectors(&ids), &stamp).unwrap());
+
+        assert_eq!(stored_ids(&ns), ids);
+        assert_eq!(read_vectors(&ns, &stamp).unwrap().len(), ids.len());
+    }
+
+    #[test]
+    fn a_live_daemon_s_project_may_not_be_taken_by_another_process() {
+        // The reindex tool inside a daemon-attached session reaches the same
+        // rebuild path a standalone session does, so refusing at the call sites
+        // that remember to check is not enough - the delete itself refuses.
+        let mut daemon = crate::daemon::DaemonHeartbeat::new(
+            std::path::PathBuf::from("/tmp/some-project"),
+            "some-project".to_string(),
+        );
+
+        daemon.pid = u32::MAX;
+        assert!(owned_by_another_process(Some(&daemon)));
+
+        // The daemon indexes its own workspace, so it must not lock itself out.
+        daemon.pid = std::process::id();
+        assert!(!owned_by_another_process(Some(&daemon)));
+
+        // No live daemon - a stale heartbeat is discarded before this point -
+        // leaves the project free to claim.
+        assert!(!owned_by_another_process(None));
+    }
+
+    #[test]
+    fn an_unwatched_project_can_be_claimed_and_rebuilt() {
+        let mut ns = namespace();
+        let stamp = embed_text_id(MODEL_A, true, true);
+
+        assert!(claim_project(&mut ns, UNWATCHED, &stamp).unwrap());
+        assert!(store_vectors(&mut ns, &vectors(&[1]), &stamp).unwrap());
+        assert_eq!(read_vectors(&ns, &stamp).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn needs_word_split_only_when_words_are_not_already_separated() {
+        // Delimited names already tokenize into words, so prepending the split
+        // form repeats what the embedder sees. Measured as a wash on Rust
+        // (+1.3% R@1) and a small loss on SystemVerilog (-2.5%).
+        assert!(!needs_word_split("authenticate_user"));
+        assert!(!needs_word_split("axi_lite_slave"));
+        assert!(!needs_word_split("kebab-case-name"));
+
+        // These arrive as one rare token and are where splitting paid: +79%
+        // R@1 on camelCase, +23% on PascalCase.
+        assert!(needs_word_split("getUserById"));
+        assert!(needs_word_split("ParseRequestBody"));
+
+        // A leading or trailing delimiter separates nothing, so these reach the
+        // embedder as the same single rare token their undecorated siblings do.
+        assert!(needs_word_split("_handleClick"));
+        assert!(needs_word_split("__privateField"));
+        assert!(needs_word_split("parseType_"));
+        assert!(needs_word_split("-kebabLeading"));
+
+        // A single lowercase word has no words to separate but splits to itself;
+        // build_embed_text's own equality guard drops it, so this predicate
+        // does not need to.
+        assert!(needs_word_split("foo"));
+    }
+
+    #[test]
+    fn build_embed_text_splits_camel_case_but_leaves_snake_case_alone() {
+        let graph = CodeGraph::in_memory().unwrap();
+        let node = codegraph::Node::new(
+            0,
+            codegraph::NodeType::Function,
+            PropertyMap::new().with("signature", "fn get(id: u64) -> User"),
+        );
+
+        // camelCase arrives as one rare token; the split words are front-loaded.
+        let camel = QueryEngine::build_embed_text(&node, 0, "getUserById", false, true, &graph);
+        assert!(
+            camel.starts_with("get user by id"),
+            "camelCase should be split, got: {camel}"
+        );
+
+        // snake_case already tokenizes into the same words, so prepending them
+        // only repeats the name - measured as a wash to a small loss.
+        let snake = QueryEngine::build_embed_text(&node, 0, "get_user_by_id", false, true, &graph);
+        assert!(
+            snake.starts_with("get_user_by_id"),
+            "snake_case must be left as-is, got: {snake}"
+        );
+        assert!(!snake.starts_with("get user by id"));
+
+        // A leading underscore is not a word boundary: `_handleClick` is one
+        // rare token exactly as `handleClick` is, so it gets the same split.
+        let prefixed = QueryEngine::build_embed_text(&node, 0, "_handleClick", false, true, &graph);
+        assert!(
+            prefixed.starts_with("handle click"),
+            "prefixed camelCase should be split, got: {prefixed}"
+        );
+    }
+
     #[test]
     fn build_embed_text_prepends_split_name_only_when_enabled() {
         let graph = CodeGraph::in_memory().unwrap();
@@ -4044,7 +4711,8 @@ mod tests {
             "got: {with_split}"
         );
 
-        // Disabled (default): original transformer-path text is unchanged.
+        // Explicitly disabled: the original raw-name text, as shipped
+        // through 0.20.1.
         let without = QueryEngine::build_embed_text(&node, 0, "getUserById", false, false, &graph);
         assert!(without.starts_with("getUserById"), "got: {without}");
         assert!(!without.contains("get user by id"));

@@ -168,7 +168,15 @@ fn metrics(ranks: &[usize]) -> Scores {
 
 /// Returns (semantic-only, hybrid 0.4*BM25 + 0.6*cosine) scores.
 fn evaluate(engine: &VectorEngine, syms: &[Sym]) -> (Scores, Scores) {
-    let split = std::env::var("CODEGRAPH_SPLIT_IDS").is_ok();
+    // Presence is not the question - `CODEGRAPH_SPLIT_IDS=0` must mean off.
+    // `is_ok()` made setting it to 0 turn the feature ON, which silently turned
+    // an A/B run into two identical arms. `=1` is the one spelling this harness
+    // documents, so it is the one spelling it accepts.
+    //
+    // Note this forces splitting on every identifier, unlike the engine, which
+    // applies it only to delimiter-free names: the point of this harness is to
+    // measure the lever in isolation.
+    let split = std::env::var("CODEGRAPH_SPLIT_IDS").as_deref() == Ok("1");
     let sym_texts: Vec<String> = syms
         .iter()
         .map(|s| {

@@ -60,8 +60,38 @@ struct Args {
     embedding_model: String,
 
     /// Embed full function body instead of just name+signature (captured at parse time, minimal overhead)
-    #[arg(long, default_value = "true")]
+    /// Takes an optional value, so the default can be overridden:
+    /// `--full-body-embedding=false` turns it off. With a bare
+    /// `default_value` this parsed as a flag that rejected a value and was
+    /// always true, which made the option impossible to disable.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_value_t = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     full_body_embedding: bool,
+
+    /// Prepend the word-split form of run-together identifiers to their
+    /// embedding text, so `getUserById` also embeds as "get user by id".
+    ///
+    /// Names already separated by `_` or `-` are left alone: they tokenise into
+    /// the same words, where this measured as a wash to a small loss. A leading
+    /// or trailing delimiter separates nothing, so `_handleClick` is split. Disable to embed raw names, as releases up to 0.20.1 did.
+    /// Takes an optional value so the default can actually be turned off:
+    /// `--split-identifiers` and `--split-identifiers=true` enable it,
+    /// `--split-identifiers=false` disables it. A bare `default_value` on a
+    /// `bool` parses as a flag that is always true - see
+    /// `--full-body-embedding`, which cannot be disabled for that reason.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_value_t = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
+    split_identifiers: bool,
 
     /// Scope the MCP tool surface to a named profile.
     ///
@@ -137,10 +167,11 @@ struct Args {
 /// is shown, and a shared engine would apply the first client's profile to
 /// every client that connects after it.
 ///
-/// `--full-body-embedding` is not forwarded either: on this release it cannot
-/// be set to false (a bare `default_value` on a bool parses as an always-true
-/// flag), so the engine's default is already the only value a client can ask
-/// for.
+/// `--full-body-embedding` and `--split-identifiers` are forwarded with their
+/// values, and must be. Both decide the text every symbol is embedded from,
+/// so both are part of the vector stamp: an engine started with defaults
+/// would write vectors under one stamp while the client that started it
+/// expects another, and the client would be served no vectors at all.
 fn engine_args(args: &Args) -> Vec<std::ffi::OsString> {
     let mut out: Vec<std::ffi::OsString> = vec![
         "--embedding-model".into(),
@@ -155,6 +186,8 @@ fn engine_args(args: &Args) -> Vec<std::ffi::OsString> {
     if args.graph_only {
         out.push("--graph-only".into());
     }
+    out.push(format!("--full-body-embedding={}", args.full_body_embedding).into());
+    out.push(format!("--split-identifiers={}", args.split_identifiers).into());
     out
 }
 
@@ -390,6 +423,8 @@ async fn run() {
             exclude_patterns: args.exclude.clone(),
             extension_path: args.extension_path.clone(),
             embedding_model: Some(args.embedding_model.clone()),
+            full_body_embedding: args.full_body_embedding,
+            split_identifiers: args.split_identifiers,
         };
         if let Err(e) = codegraph_server::daemon::run(config).await {
             eprintln!("daemon error: {e}");
@@ -423,6 +458,7 @@ async fn run() {
             embedding_model,
             args.full_body_embedding,
         )
+        .with_split_identifiers(args.split_identifiers)
         .with_graph_only(args.graph_only);
 
         match server.run_single_tool(&tool_name, Some(tool_args)).await {
@@ -455,6 +491,7 @@ async fn run() {
             exclude_dirs: args.exclude.clone(),
             max_files: args.max_files,
             full_body_embedding: args.full_body_embedding,
+            split_identifiers: args.split_identifiers,
             graph_only: args.graph_only,
             seeds: args.workspace.clone(),
         };
@@ -479,6 +516,7 @@ async fn run() {
         tracing::info!("Workspaces: {:?}", workspaces);
         tracing::info!("Embedding model: {}", embedding_model.display_name());
         tracing::info!("Full-body embedding: {}", args.full_body_embedding);
+        tracing::info!("Split identifiers: {}", args.split_identifiers);
         if !args.exclude.is_empty() {
             tracing::info!("Excluding: {:?}", args.exclude);
         }
@@ -502,6 +540,7 @@ async fn run() {
             embedding_model,
             args.full_body_embedding,
         )
+        .with_split_identifiers(args.split_identifiers)
         .with_tool_profile(tool_profile)
         .with_graph_only(args.graph_only);
         codegraph_server::crash_phase::mark("serving");
@@ -671,6 +710,24 @@ mod engine_args_tests {
             .map(|w| &w[1])
             .collect();
         assert_eq!(excludes, ["cache", "generated"]);
+    }
+
+    /// Both settings are part of the vector stamp. An engine started without
+    /// them would stamp its vectors differently from the client that started
+    /// it, and that client would then load none of them.
+    #[test]
+    fn embed_text_settings_reach_the_engine_with_their_values() {
+        let off = forwarded(&[
+            "--connect",
+            "--full-body-embedding=false",
+            "--split-identifiers=false",
+        ]);
+        assert!(off.contains(&"--full-body-embedding=false".to_string()));
+        assert!(off.contains(&"--split-identifiers=false".to_string()));
+
+        let defaults = forwarded(&["--connect"]);
+        assert!(defaults.contains(&"--full-body-embedding=true".to_string()));
+        assert!(defaults.contains(&"--split-identifiers=true".to_string()));
     }
 
     #[test]

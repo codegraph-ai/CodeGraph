@@ -87,6 +87,7 @@ class CodeGraphConnectionProvider(private val project: Project) : OSProcessStrea
             "embeddingModel" to settings.embeddingModel,
             "staticModelPath" to settings.staticModelPath.ifBlank { null },
             "fullBodyEmbedding" to settings.fullBodyEmbedding,
+            "splitIdentifiers" to settings.splitIdentifiers,
             "embedOnOpen" to settings.embedOnOpen,
         )
     }

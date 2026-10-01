@@ -94,11 +94,27 @@ one tool and exits without the MCP stdio handshake — ideal for scripting.
 | `--workspace <path>` | current dir | Directories to index (repeatable for multi-project) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
 | `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast), `jina-code-v2` (768d, 6× slower), `granite-97m` (384d, 32K ctx, ~3× slower), or `static` (model2vec, 256d — ~100× faster indexing, no ONNX; needs a local model dir, see below) |
-| `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
+| `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection. Takes a value: `--full-body-embedding=false` turns it off |
+| `--split-identifiers` | `true` | Also embed the word-split form of identifiers whose words are run together, so `getUserById` embeds as "get user by id" too. Names already separated by `_` or `-` are left alone, since they tokenise into the same words; a leading or trailing delimiter separates nothing, so `_handleClick` is split like `handleClick`. Takes a value: `--split-identifiers=false` embeds raw names, as releases up to 0.20.1 did |
 | `--max-files <n>` | 5000 | Maximum files to index |
 | `--profile <name>` | `all` | Filter the exposed MCP tool surface to a named subset (see below) |
 | `--graph-only` | off | Skip embedding generation — build the graph and serve structural tools only. No ONNX model load, 10-50× faster indexing. Semantic search and memory tools unavailable. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot mode: index, run a single tool, print its result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
+
+`--split-identifiers` and `--full-body-embedding` both change the text every
+symbol is embedded from, and vectors built from different text cannot be ranked
+against each other.
+A project's stored vectors are therefore stamped with the settings that built
+them - `--embedding-model` included, since models differ in dimension - and are
+ignored by any process configured differently.
+An index written by 0.20.1 or earlier carries no stamp, so it is re-embedded the
+first time this version opens it; changing any of the three re-embeds in the
+background rather than requiring a manual reindex.
+Run `--watch` with the same flags as the sessions that read the project, so both
+sides share one set instead of re-embedding over each other.
+A daemon left running across an upgrade keeps writing vectors the new build
+cannot match, and sessions attached to it serve without semantic search until it
+is restarted - so restart `--watch` after upgrading.
 
 #### `--embedding-model static` — model2vec fast indexing
 

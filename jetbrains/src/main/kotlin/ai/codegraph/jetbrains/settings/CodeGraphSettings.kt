@@ -68,6 +68,17 @@ class CodeGraphSettings : PersistentStateComponent<CodeGraphSettings.State> {
          */
         @JvmField var fullBodyEmbedding: Boolean = true
 
+        /**
+         * Also embed the word-split form of identifiers whose words are run
+         * together, so `getUserById` embeds as "get user by id" too. Names
+         * already separated by `_` or `-` are left alone; a leading or trailing
+         * delimiter separates nothing, so `_handleClick` is split like
+         * `handleClick`. Defaults to true, matching the engine and the VS Code
+         * client - the three are held equal by
+         * jetbrains/scripts/engine_probe.py.
+         */
+        @JvmField var splitIdentifiers: Boolean = true
+
         @JvmField var embedOnOpen: Boolean = true
 
         @JvmField var codeLensEnabled: Boolean = true

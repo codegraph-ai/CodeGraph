@@ -75,6 +75,28 @@ pub trait StorageBackend: Send + Sync {
     /// Returns an error if iteration setup fails.
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<KeyValue>>;
 
+    /// Keys of all pairs whose key starts with the given prefix.
+    ///
+    /// The same range as [`Self::scan_prefix`], without retaining the values.
+    /// Callers that only need to know which keys exist - deciding what to
+    /// delete, sizing a range - would otherwise hold the whole matching value
+    /// set in memory at once, which on a vector store is hundreds of megabytes.
+    ///
+    /// The default implementation discards the values [`Self::scan_prefix`]
+    /// returned, which costs the memory this method exists to save; backends
+    /// that can iterate keys directly should override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if iteration setup fails.
+    fn scan_prefix_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        Ok(self
+            .scan_prefix(prefix)?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect())
+    }
+
     /// Execute a batch of write operations atomically.
     ///
     /// Either all operations succeed or none do.
