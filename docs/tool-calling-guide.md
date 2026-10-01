@@ -589,7 +589,7 @@ Add an entire directory alongside existing data.
 
 ### Workspace exclusion: `.codegraphignore` + default skip list
 
-`reindex_workspace` and `index_directory` honor a per-folder `.codegraphignore` file (gitignore-like syntax — one pattern per line, `#` comments, blank lines ignored; no `!` negation in v1) plus a built-in skip list for binary archives, compiled artifacts, OS metadata, and bulky non-source:
+Initial indexing, `reindex_workspace`, `index_directory` and the file watcher honor a per-folder `.codegraphignore` file (gitignore-like syntax — one pattern per line, `#` comments, blank lines ignored; no `!` negation in v1) plus a built-in skip list for binary archives, compiled artifacts, OS metadata, and bulky non-source:
 
 - Archives: `**/*.tar.gz`, `**/*.tar.bz2`, `**/*.tar.xz`, `**/*.tgz`, `**/*.tbz2`, `**/*.zip`, `**/*.7z`, `**/*.rar`, `**/*.deb`, `**/*.rpm`, `**/*.pkg`, `**/*.dmg`, `**/*.iso`, `**/*.img`
 - Binaries: `**/*.exe`, `**/*.dll`, `**/*.so`, `**/*.dylib`, `**/*.bin`, `**/*.o`, `**/*.a`, `**/*.lib`, `**/*.obj`, `**/*.pdb`, `**/*.pyc`, `**/*.class`, `**/*.jar`
@@ -599,6 +599,7 @@ Add an entire directory alongside existing data.
 - Misc: `**/*.sqlite`, `**/*.db`, `**/*.lock`
 
 Prevents fastembed/ONNX runaway on workspaces containing proof bundles, cloned upstream targets, prebuilt binaries, or triage doc folders. Per-folder so each workspace can have its own rules.
+The file watcher reads `.codegraphignore` once at startup, so edits to it (like changes to `--exclude`) take effect on the next start.
 
 Example `.codegraphignore` for a bounty workspace:
 

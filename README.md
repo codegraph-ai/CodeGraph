@@ -97,7 +97,7 @@ one tool and exits without the MCP stdio handshake — ideal for scripting.
 | `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
 | `--max-files <n>` | 5000 | Maximum files to index |
 | `--profile <name>` | `all` | Filter the exposed MCP tool surface to a named subset (see below) |
-| `--graph-only` | off | Skip embedding generation — build the graph and serve structural tools only. No ONNX model load, 10-50× faster indexing. Semantic search unavailable. For CI / one-shot graph queries. |
+| `--graph-only` | off | Skip embedding generation — build the graph and serve structural tools only. No ONNX model load, 10-50× faster indexing. Semantic search and memory tools unavailable. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot mode: index, run a single tool, print its result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
 
 #### `--embedding-model static` — model2vec fast indexing
