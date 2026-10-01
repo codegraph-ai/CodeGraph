@@ -129,11 +129,13 @@ impl WorkspaceFilter {
     /// opened as `/var/folders/...` or through any symlinked directory is
     /// reported by FSEvents at its resolved location, `/private/var/folders/...`,
     /// so a plain prefix test rejected every event and the watcher admitted
-    /// nothing at all. Both sides are compared resolved and as given.
+    /// nothing at all. The event path is compared, as reported, against both
+    /// spellings of the root; that needs no filesystem access, so it still
+    /// works when the file's directory was deleted along with it.
     ///
-    /// The event path is resolved through its parent directory, which still
-    /// exists when the file itself was just deleted. The most specific root
-    /// wins when workspace folders nest.
+    /// A path reported in unresolved form is additionally resolved through its
+    /// parent directory. The most specific root wins when workspace folders
+    /// nest.
     fn locate(&self, path: &Path) -> Option<(PathBuf, PathBuf, &IndexConfig, &globset::GlobSet)> {
         let resolved = path
             .parent()
@@ -143,7 +145,11 @@ impl WorkspaceFilter {
 
         let mut best: Option<(usize, PathBuf, PathBuf, &IndexConfig, &globset::GlobSet)> = None;
         for (given, canonical, config, exclude_set) in &self.roots {
-            for (candidate, root) in [(Some(path), given), (resolved.as_deref(), canonical)] {
+            for (candidate, root) in [
+                (Some(path), given),
+                (Some(path), canonical),
+                (resolved.as_deref(), canonical),
+            ] {
                 let Some(candidate) = candidate else { continue };
                 let Ok(relative) = candidate.strip_prefix(root) else {
                     continue;
@@ -865,6 +871,26 @@ mod tests {
             filter.indexed_form(&link.join("src/lib.rs")),
             link.join("src/lib.rs")
         );
+    }
+
+    /// Deleting a directory removes the parent an event path would be resolved
+    /// through, so a resolved-form path must be located without touching disk.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_filter_locates_files_in_a_deleted_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("src/old")).unwrap();
+        std::fs::write(real.join("src/old/a.rs"), "fn a() {}\n").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let filter = WorkspaceFilter::new(std::slice::from_ref(&link), &filter_config(&[], 20));
+        let deleted = real.canonicalize().unwrap().join("src/old/a.rs");
+        std::fs::remove_dir_all(real.join("src/old")).unwrap();
+
+        assert!(filter.admits(&deleted));
+        assert_eq!(filter.indexed_form(&deleted), link.join("src/old/a.rs"));
     }
 
     #[test]
