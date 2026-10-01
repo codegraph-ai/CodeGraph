@@ -125,6 +125,39 @@ struct Args {
     socket: Option<PathBuf>,
 }
 
+/// The settings an auto-spawned engine is started with.
+///
+/// Only the model name used to be passed, so an engine started on a client's
+/// behalf ignored its `--exclude`, `--max-files` and `--graph-only` and indexed
+/// and embedded as if none had been given (issue #23). These are the
+/// engine-level settings: they decide what is indexed and whether a model is
+/// loaded, for every client of that engine.
+///
+/// `--profile` is deliberately not forwarded. It filters the tools one client
+/// is shown, and a shared engine would apply the first client's profile to
+/// every client that connects after it.
+///
+/// `--full-body-embedding` is not forwarded either: on this release it cannot
+/// be set to false (a bare `default_value` on a bool parses as an always-true
+/// flag), so the engine's default is already the only value a client can ask
+/// for.
+fn engine_args(args: &Args) -> Vec<std::ffi::OsString> {
+    let mut out: Vec<std::ffi::OsString> = vec![
+        "--embedding-model".into(),
+        args.embedding_model.clone().into(),
+        "--max-files".into(),
+        args.max_files.to_string().into(),
+    ];
+    for dir in &args.exclude {
+        out.push("--exclude".into());
+        out.push(dir.into());
+    }
+    if args.graph_only {
+        out.push("--graph-only".into());
+    }
+    out
+}
+
 /// Default engine socket path (`~/.codegraph/cg-engine.sock`).
 fn default_socket_path() -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -336,7 +369,7 @@ async fn run() {
                 std::env::current_dir().expect("Failed to get current directory")
             });
         if let Err(e) =
-            codegraph_server::mcp::engine::connect(&sock, workspace, &args.embedding_model).await
+            codegraph_server::mcp::engine::connect(&sock, workspace, &engine_args(&args)).await
         {
             eprintln!("connect failed: {e}");
             std::process::exit(1);
@@ -422,6 +455,7 @@ async fn run() {
             exclude_dirs: args.exclude.clone(),
             max_files: args.max_files,
             full_body_embedding: args.full_body_embedding,
+            graph_only: args.graph_only,
             seeds: args.workspace.clone(),
         };
         if let Err(e) = codegraph_server::mcp::engine::serve(cfg).await {
@@ -596,5 +630,55 @@ mod crash_breadcrumb_tests {
             None => std::env::remove_var("USERPROFILE"),
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod engine_args_tests {
+    use super::*;
+
+    fn forwarded(argv: &[&str]) -> Vec<String> {
+        let args =
+            Args::try_parse_from(std::iter::once("codegraph-server").chain(argv.iter().copied()))
+                .expect("parses");
+        engine_args(&args)
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn engine_level_resource_settings_reach_an_auto_spawned_engine() {
+        let got = forwarded(&[
+            "--connect",
+            "--graph-only",
+            "--max-files",
+            "7",
+            "--exclude",
+            "cache",
+            "--exclude",
+            "generated",
+            "--embedding-model",
+            "static",
+        ]);
+        let pairs: Vec<&[String]> = got.chunks(2).collect();
+        assert!(got.contains(&"--graph-only".to_string()));
+        assert!(pairs.iter().any(|p| p == &["--max-files", "7"]));
+        assert!(pairs.iter().any(|p| p == &["--embedding-model", "static"]));
+        let excludes: Vec<&String> = got
+            .windows(2)
+            .filter(|w| w[0] == "--exclude")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(excludes, ["cache", "generated"]);
+    }
+
+    #[test]
+    fn per_client_settings_stay_with_the_client() {
+        // A shared engine would apply one client's profile to every client.
+        let got = forwarded(&["--connect", "--profile", "core"]);
+        assert!(!got.iter().any(|a| a == "--profile" || a == "core"));
+        // And graph-only is not forced on when the client did not ask for it.
+        assert!(!got.iter().any(|a| a == "--graph-only"));
     }
 }
