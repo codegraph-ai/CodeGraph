@@ -30,7 +30,7 @@ The server indexes the current working directory automatically.
 Install the VSIX:
 
 ```bash
-code --install-extension codegraph-0.20.1.vsix
+code --install-extension codegraph-0.21.0.vsix
 ```
 
 One VSIX serves every platform.
@@ -82,6 +82,30 @@ codegraph-server --graph-only \
 This prints a ready-to-post markdown comment. The `--graph-only` flag
 skips embedding generation (10-50× faster indexing); `--run-tool` runs
 one tool and exits without the MCP stdio handshake — ideal for scripting.
+
+---
+
+## Upgrading to 0.21
+
+Each project re-embeds once, in the background, the first time 0.21 opens it.
+Stored vectors now record the model and settings that built them, and an index from 0.20.1 or earlier records none.
+Keyword search keeps working while it runs.
+
+Restart any `--watch` daemon after upgrading.
+A daemon left running keeps writing vectors that 0.21 will not load, and sessions attached to it run without semantic search until it restarts.
+
+Identifiers whose words run together, like `getUserById`, are now also embedded in word-split form.
+This mostly helps natural-language search in camelCase languages such as TypeScript, Java and C#.
+Pass `--split-identifiers=false` to keep the old behaviour.
+
+`--full-body-embedding=false` now takes effect; in 0.20.1 the flag was always on.
+
+Run a reindex once (`codegraph_reindex_workspace`) if either of these applied to you:
+
+- you excluded generated directories with `--exclude` or `.codegraphignore`, because 0.20.1's file watcher still let changes to them into the graph;
+- your workspace path goes through a symlink (on macOS that includes anything under `/tmp`), because 0.20.1 kept the old symbols of every edited or deleted file.
+
+Both are fixed, but symbols already persisted by 0.20.1 stay until the graph is rebuilt.
 
 ---
 
