@@ -118,20 +118,11 @@ Pass `--split-identifiers=false` to keep the old behaviour.
 | `--graph-only` | off | Skip embedding generation — build the graph and serve structural tools only. No ONNX model load, 10-50× faster indexing. Semantic search and memory tools unavailable. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot mode: index, run a single tool, print its result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
 
-`--split-identifiers` and `--full-body-embedding` both change the text every
-symbol is embedded from, and vectors built from different text cannot be ranked
-against each other.
-A project's stored vectors are therefore stamped with the settings that built
-them - `--embedding-model` included, since models differ in dimension - and are
-ignored by any process configured differently.
-An index written by 0.20.1 or earlier carries no stamp, so it is re-embedded the
-first time this version opens it; changing any of the three re-embeds in the
-background rather than requiring a manual reindex.
-Run `--watch` with the same flags as the sessions that read the project, so both
-sides share one set instead of re-embedding over each other.
-A daemon left running across an upgrade keeps writing vectors the new build
-cannot match, and sessions attached to it serve without semantic search until it
-is restarted - so restart `--watch` after upgrading.
+`--split-identifiers` and `--full-body-embedding` both change the text every symbol is embedded from, and vectors built from different text cannot be ranked against each other.
+A project's stored vectors are therefore stamped with the settings that built them - `--embedding-model` included, since models differ in dimension - and are ignored by any process configured differently.
+Changing any of the three re-embeds in the background rather than requiring a manual reindex.
+Run `--watch` with the same flags as the sessions that read the project, so both sides share one set instead of re-embedding over each other.
+For what this means when upgrading from 0.20.1 or earlier, see [Upgrading to 0.21](#upgrading-to-021).
 
 #### `--embedding-model static` — model2vec fast indexing
 
