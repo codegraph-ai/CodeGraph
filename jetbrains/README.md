@@ -118,7 +118,7 @@ Claude Code, Cursor and the AI Assistant MCP settings all read:
     "codegraph": {
       "command": "/path/to/codegraph-server",
       "args": ["--mcp", "--workspace", "/path/to/project",
-               "--embedding-model", "bge-small", "--full-body-embedding"]
+               "--embedding-model", "bge-small"]
     }
   }
 }

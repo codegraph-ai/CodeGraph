@@ -29,6 +29,7 @@ pub struct EngineConfig {
     pub exclude_dirs: Vec<String>,
     pub max_files: usize,
     pub full_body_embedding: bool,
+    pub split_identifiers: bool,
     /// Build graphs only and never load the embedding model. An auto-spawned
     /// engine used to drop this along with every other resource setting but the
     /// model name, so a client that asked for graph-only still caused a model
@@ -128,6 +129,7 @@ mod imp {
             engine.cfg.embedding_model.clone(),
             engine.cfg.full_body_embedding,
         )
+        .with_split_identifiers(engine.cfg.split_identifiers)
         .with_graph_only(engine.cfg.graph_only);
         if let Some(shared) = &engine.shared_engine {
             server.set_shared_engine(Arc::clone(shared)).await;

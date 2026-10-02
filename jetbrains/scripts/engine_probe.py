@@ -126,6 +126,7 @@ init_options = {
     "embeddingModel": "bge-small",
     "staticModelPath": None,
     "fullBodyEmbedding": True,
+    "splitIdentifiers": True,
     "embedOnOpen": True,
 }
 
@@ -185,6 +186,7 @@ check(
 # while the plugin was still deciding whether to prompt for an index.
 PARITY_KEYS = {
     "indexOnStartup": "codegraph.indexOnStartup",
+    "splitIdentifiers": "codegraph.splitIdentifiers",
     "maxFileSizeKB": "codegraph.maxFileSizeKB",
     "embeddingModel": "codegraph.embeddingModel",
     "fullBodyEmbedding": "codegraph.fullBodyEmbedding",

@@ -30,7 +30,7 @@ The server indexes the current working directory automatically.
 Install from the marketplace, or sideload the VSIX:
 
 ```bash
-code --install-extension codegraph-0.20.1.vsix
+code --install-extension codegraph-0.21.0.vsix
 ```
 
 One VSIX serves every platform.
@@ -46,13 +46,7 @@ CodeGraph's Symbols and Memories views live in the CodeGraph activity-bar contai
 
 ### MCP Server flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--workspace <path>` | current dir | Directories to index (repeatable for multi-project) |
-| `--exclude <dir>` | — | Directories to skip (repeatable) |
-| `--embedding-model <model>` | `bge-small` | `bge-small` (384d, fast), `jina-code-v2` (768d, 6x slower), or `static` (model2vec, 256d — ~100× faster indexing, no ONNX, ~90% of BGE quality in hybrid search; needs a local model directory, see `codegraph.staticModelPath` below) |
-| `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection |
-| `--max-files <n>` | 5000 | Maximum files to index |
+The engine's command-line flags (`--workspace`, `--exclude`, `--embedding-model`, `--full-body-embedding`, `--split-identifiers` and more) are documented in the [main README](https://github.com/codegraph-ai/codegraph#mcp-server-flags).
 
 ### VS Code settings
 

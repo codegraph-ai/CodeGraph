@@ -86,7 +86,7 @@ use super::protocol::*;
 use super::resources::get_all_resources;
 use super::tools::{get_all_tools, tool_in_profile, ToolProfile};
 use super::transport::AsyncStdioTransport;
-use crate::ai_query::QueryEngine;
+use crate::ai_query::{QueryEngine, VectorLoad};
 use crate::domain::node_props;
 use crate::index_state::IndexState;
 use crate::indexer::{IndexConfig, Indexer};
@@ -983,10 +983,24 @@ impl McpBackend {
                 self.query_engine.set_vector_engine(engine).await;
 
                 // Load persisted vectors synchronously (fast — just reads from RocksDB)
-                let loaded = self
+                let load = self
                     .query_engine
                     .load_symbol_vectors(&self.project_slug)
                     .await;
+                // An unreadable store says nothing about what it holds - graph.db is
+                // one RocksDB shared by every project, and a lock held elsewhere reads
+                // exactly like this. Rebuilding with a slug claims the project, which
+                // clears its stored vectors, so a transient read failure used to
+                // destroy a valid set. Embed in memory this session; leave the store.
+                let persist = !matches!(load, crate::ai_query::VectorLoad::Unreadable);
+                if !persist {
+                    tracing::warn!(
+                        "Could not read persisted vectors for '{}'; embedding in memory \
+                         only this session and leaving the store untouched",
+                        self.project_slug
+                    );
+                }
+                let loaded = load.count();
 
                 if loaded > 0 && result.files_parsed == 0 {
                     tracing::info!(
@@ -995,10 +1009,10 @@ impl McpBackend {
                     );
                     // Steady-state restart: persisted vectors loaded, files
                     // unchanged. Still run a background verify-and-fill —
-                    // a crash-interrupted embed run leaves a `partial:`
-                    // checkpoint that loads fine here but is missing the
-                    // tail; embed_missing_symbols no-ops (one graph scan, no
-                    // ONNX work) when the set is actually complete.
+                    // a crash-interrupted embed run leaves a partial set that
+                    // loads fine here but is missing the tail;
+                    // embed_missing_symbols no-ops (one graph scan, no ONNX
+                    // work) when the set is actually complete.
                     let query_engine = Arc::clone(&self.query_engine);
                     let slug = self.project_slug.clone();
                     tokio::spawn(async move {
@@ -1038,11 +1052,13 @@ impl McpBackend {
                         } else {
                             // No persisted vectors — full build
                             query_engine
-                                .build_symbol_vectors_checkpointed(Some(&slug))
+                                .build_symbol_vectors_checkpointed(persist.then_some(slug.as_str()))
                                 .await;
                         }
-                        if let Err(e) = query_engine.save_symbol_vectors(&slug).await {
-                            tracing::warn!("Failed to persist symbol vectors: {}", e);
+                        if persist {
+                            if let Err(e) = query_engine.save_symbol_vectors(&slug).await {
+                                tracing::warn!("Failed to persist symbol vectors: {}", e);
+                            }
                         }
                         tracing::info!(
                             "Background embedding generation complete — semantic search ready"
@@ -1280,6 +1296,15 @@ impl McpServer {
         self
     }
 
+    /// Split run-together identifiers into words in the embedding text.
+    ///
+    /// A builder rather than another positional on `new`: every caller of
+    /// `new` would otherwise have to be updated to say "yes, the default".
+    pub fn with_split_identifiers(self, enabled: bool) -> Self {
+        self.backend.query_engine.set_split_identifiers(enabled);
+        self
+    }
+
     /// Skip embedding generation (graph + structural tools only).
     /// Avoids loading the ONNX model. For CI / one-shot runs.
     pub fn with_graph_only(mut self, graph_only: bool) -> Self {
@@ -1346,15 +1371,52 @@ impl McpServer {
             if !self.backend.graph_only {
                 if let Some(engine) = self.backend.memory_manager.get_vector_engine().await {
                     self.backend.query_engine.set_vector_engine(engine).await;
-                    let loaded = self
+                    match self
                         .backend
                         .query_engine
                         .load_symbol_vectors(&self.backend.project_slug)
-                        .await;
-                    tracing::info!(
-                        "Loaded {} persisted symbol vectors from daemon-maintained graph",
-                        loaded
-                    );
+                        .await
+                    {
+                        VectorLoad::Loaded(n) => tracing::info!(
+                            "Loaded {} persisted symbol vectors from daemon-maintained graph",
+                            n
+                        ),
+                        // Built from embed text this session cannot use - a
+                        // daemon left running from before an upgrade (it writes
+                        // unstamped vectors this build will never match), or one
+                        // started with different flags. Serve without semantic
+                        // vectors and say what to do: re-embedding here would
+                        // run the whole corpus through ONNX in every attached
+                        // session, which is the cold-start cost attaching to a
+                        // daemon exists to avoid. The daemon owns the set, so
+                        // the daemon is what should rebuild it.
+                        VectorLoad::Mismatched => {
+                            self.backend.query_engine.set_daemon_vectors_mismatched();
+                            tracing::warn!(
+                                "Watcher daemon's vectors were built from different embed text - \
+                                 semantic search and similarity tools are unavailable this session. \
+                                 Restart the daemon (after an upgrade), or start it with the same \
+                                 --full-body-embedding / --split-identifiers / --embedding-model \
+                                 flags as this session."
+                            )
+                        }
+                        // The daemon owns this workspace and simply has not
+                        // finished its first embed run. Re-embedding here would
+                        // duplicate, in every attached session, exactly the
+                        // cold-start work attaching to a daemon exists to
+                        // avoid. Wait for it instead.
+                        VectorLoad::Absent => tracing::warn!(
+                            "Watcher daemon has not persisted any symbol vectors yet - semantic \
+                             tools are unavailable until it has and this session is restarted."
+                        ),
+                        // Says nothing about what the store holds, so it is not
+                        // grounds for re-embedding the workspace.
+                        VectorLoad::Unreadable => tracing::error!(
+                            "Could not read the vector store - semantic tools are unavailable \
+                             this session. The daemon may be mid-persist; retry, and check \
+                             ~/.codegraph/graph.db if it persists."
+                        ),
+                    }
                 }
             }
             return;

@@ -86,6 +86,15 @@ impl StorageBackend for MemoryBackend {
         Ok(results)
     }
 
+    fn scan_prefix_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let data = self.data.read().unwrap();
+        Ok(data
+            .range(prefix.to_vec()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, _)| k.clone())
+            .collect())
+    }
+
     fn write_batch(&mut self, operations: Vec<BatchOperation>) -> Result<()> {
         let mut data = self.data.write().unwrap();
         for op in operations {

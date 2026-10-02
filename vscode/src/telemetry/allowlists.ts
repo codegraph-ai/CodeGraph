@@ -410,6 +410,7 @@ export const SETTINGS_SNAPSHOT_KEYS = {
         'parallelParsing',
         'cache.enabled',
         'fullBodyEmbedding',
+        'splitIdentifiers',
         'memory.enabled',
         'memory.autoInvalidate',
         'memory.gitMining.enabled',

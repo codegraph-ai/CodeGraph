@@ -15,6 +15,6 @@ mod engine;
 mod primitives;
 mod text_index;
 
-pub use engine::QueryEngine;
+pub use engine::{QueryEngine, VectorLoad};
 pub use primitives::*;
 pub use text_index::{Posting, TextIndex, TextIndexBuilder};

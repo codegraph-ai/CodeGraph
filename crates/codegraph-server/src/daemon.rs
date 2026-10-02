@@ -173,6 +173,18 @@ pub struct DaemonConfig {
     pub extension_path: Option<PathBuf>,
     /// Embedding model id (e.g. `bge-small`). Defaults to the server default.
     pub embedding_model: Option<String>,
+    /// Whether to embed full function bodies rather than name + signature.
+    ///
+    /// Carried, like [`Self::split_identifiers`], from the same CLI flag the
+    /// MCP and LSP sessions reading this workspace's vectors get it from. Both
+    /// decide the embedding text and are stamped on the vectors, so a daemon
+    /// that defaulted either one independently would persist a set those
+    /// sessions cannot load - and they would replace it with one the daemon
+    /// cannot load, indefinitely.
+    pub full_body_embedding: bool,
+    /// Whether to split run-together identifiers into words when embedding.
+    /// Carried for the same reason as [`Self::full_body_embedding`].
+    pub split_identifiers: bool,
 }
 
 /// Run the watcher daemon for a workspace until a termination signal arrives.
@@ -204,6 +216,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         "indexOnStartup": true,
         "excludePatterns": config.exclude_patterns,
         "embeddingModel": config.embedding_model,
+        "fullBodyEmbedding": config.full_body_embedding,
+        "splitIdentifiers": config.split_identifiers,
         "embedOnOpen": true,
     });
     let uri = Url::from_file_path(&workspace)

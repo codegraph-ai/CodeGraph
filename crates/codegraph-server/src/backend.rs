@@ -1011,6 +1011,19 @@ impl LanguageServer for CodeGraphBackend {
             MemoryManager::with_model(extension_path.clone(), embedding_model),
         );
 
+        // Absent means OFF, which disagrees with the engine, the CLI and the
+        // daemon, all of which default it on. Deliberate, with a known cost.
+        //
+        // full_body is part of the vector stamp, and a project stores one
+        // vector set. So a bare nvim/emacs/helix client that omits this option
+        // and a client that sends true cannot share vectors: whichever rebuilds
+        // claims the project and replaces the other's set.
+        //
+        // Left at false because flipping it would silently move every bare LSP
+        // client to ~3x slower indexing, and VS Code and JetBrains always send
+        // the option explicitly - so the conflict needs a bare client and an IDE
+        // client on the same project. Revisit if bare LSP clients become a
+        // supported path; aligning the default is then the fix.
         let full_body = init_opts
             .as_ref()
             .and_then(|opts| opts.get("fullBodyEmbedding"))
@@ -1018,6 +1031,17 @@ impl LanguageServer for CodeGraphBackend {
             .unwrap_or(false);
         self.query_engine.set_full_body_embedding(full_body);
         tracing::info!("[LSP::initialize] Full-body embedding: {}", full_body);
+
+        // Absent means on, matching the engine default and the CLI flag. A
+        // client that has never heard of this option should get the behaviour
+        // the engine ships with, not the opposite of it.
+        let split_identifiers = init_opts
+            .as_ref()
+            .and_then(|opts| opts.get("splitIdentifiers"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        self.query_engine.set_split_identifiers(split_identifiers);
+        tracing::info!("[LSP::initialize] Split identifiers: {}", split_identifiers);
 
         // Store workspace folders.
         //
@@ -1335,7 +1359,22 @@ impl LanguageServer for CodeGraphBackend {
                         let slug = crate::memory::project_slug(first_folder);
 
                         // Always try loading persisted vectors first
-                        let loaded = self.query_engine.load_symbol_vectors(&slug).await;
+                        let load = self.query_engine.load_symbol_vectors(&slug).await;
+                        // An unreadable store says nothing about what it holds - the shared
+                        // graph.db is one RocksDB for every project, and a lock held by
+                        // another process reads exactly like this. Rebuilding with a slug
+                        // claims the project, which clears its stored vectors, so a
+                        // transient read failure used to destroy a valid set. Embed in
+                        // memory for this session and leave the store alone.
+                        let persist = !matches!(load, crate::ai_query::VectorLoad::Unreadable);
+                        if !persist {
+                            tracing::warn!(
+                                "Could not read persisted vectors for '{}'; embedding in memory \
+                                 only this session and leaving the store untouched",
+                                slug
+                            );
+                        }
+                        let loaded = load.count();
 
                         if loaded > 0 && files_parsed == 0 {
                             // All files unchanged — persisted vectors are current
@@ -1348,8 +1387,8 @@ impl LanguageServer for CodeGraphBackend {
                                 .await;
                             // Warm restart: still run a background verify-and-
                             // fill — a crash-interrupted embed run leaves a
-                            // `partial:` checkpoint that loads fine here but is
-                            // missing the tail; embed_missing_symbols no-ops
+                            // partial set that loads fine here but is missing
+                            // the tail; embed_missing_symbols no-ops
                             // (one graph scan, no ONNX work) when complete. The
                             // guard also resets the breadcrumb off `post_onnx`
                             // so warm-restart sessions steady-state at `serving`.
@@ -1391,11 +1430,16 @@ impl LanguageServer for CodeGraphBackend {
                                         .await;
                                 } else {
                                     query_engine
-                                        .build_symbol_vectors_checkpointed(Some(&slug_bg))
+                                        .build_symbol_vectors_checkpointed(
+                                            persist.then_some(slug_bg.as_str()),
+                                        )
                                         .await;
                                 }
-                                if let Err(e) = query_engine.save_symbol_vectors(&slug_bg).await {
-                                    tracing::warn!("Failed to persist symbol vectors: {}", e);
+                                if persist {
+                                    if let Err(e) = query_engine.save_symbol_vectors(&slug_bg).await
+                                    {
+                                        tracing::warn!("Failed to persist symbol vectors: {}", e);
+                                    }
                                 }
                                 tracing::info!("Background embedding generation complete");
                             });
@@ -1992,7 +2036,13 @@ impl LanguageServer for CodeGraphBackend {
 
                 // Rebuild AI query engine indexes
                 self.query_engine.build_indexes().await;
-                self.query_engine.build_symbol_vectors().await;
+                let reindex_slug = {
+                    let folders = self.workspace_folders.read().await;
+                    folders.first().map(|f| crate::memory::project_slug(f))
+                };
+                self.query_engine
+                    .build_symbol_vectors_checkpointed(reindex_slug.as_deref())
+                    .await;
 
                 // Persist graph and vectors for next session
                 if total_indexed > 0 {

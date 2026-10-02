@@ -410,6 +410,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 embeddingModel: latestConfig.get<string>('embeddingModel'),
                 staticModelPath: latestConfig.get<string>('staticModelPath'),
                 fullBodyEmbedding: latestConfig.get<boolean>('fullBodyEmbedding'),
+                splitIdentifiers: latestConfig.get<boolean>('splitIdentifiers'),
                 embedOnOpen: latestConfig.get<boolean>('embedOnOpen'),
             };
             console.log('[CodeGraph] Initialization options:', JSON.stringify(opts));
