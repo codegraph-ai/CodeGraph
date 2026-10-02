@@ -100,13 +100,6 @@ Pass `--split-identifiers=false` to keep the old behaviour.
 
 `--full-body-embedding=false` now takes effect; in 0.20.1 the flag was always on.
 
-Run a reindex once (`codegraph_reindex_workspace`) if either of these applied to you:
-
-- you excluded generated directories with `--exclude` or `.codegraphignore`, because 0.20.1's file watcher still let changes to them into the graph;
-- your workspace path goes through a symlink (on macOS that includes anything under `/tmp`), because 0.20.1 kept the old symbols of every edited or deleted file.
-
-Both are fixed, but symbols already persisted by 0.20.1 stay until the graph is rebuilt.
-
 ---
 
 ## Configuration
