@@ -26,6 +26,19 @@ pub enum GraphError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
+    /// The database is held by another open handle, usually another process.
+    ///
+    /// Contention, not damage: the database itself is fine and opens once the
+    /// holder lets go.
+    #[error("Database at {path:?} is in use by another process")]
+    Locked {
+        /// Database directory
+        path: PathBuf,
+        /// The storage engine's lock error
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// Node not found in the graph
     #[error("Node not found: {node_id}")]
     NodeNotFound {

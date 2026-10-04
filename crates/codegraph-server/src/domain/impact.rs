@@ -7,9 +7,7 @@
 
 use crate::ai_query::QueryEngine;
 use crate::domain::node_props;
-use codegraph::{
-    CodeGraph, Direction, EdgeType, NamespacedBackend, NodeId, RocksDBBackend, StorageBackend,
-};
+use codegraph::{CodeGraph, Direction, EdgeType, NamespacedBackend, NodeId, StorageBackend};
 use serde::Serialize;
 use std::collections::HashSet;
 use tokio::sync::RwLock;
@@ -341,7 +339,7 @@ fn find_cross_project_consumers(
     // Open RocksDB, scan registry, then DROP the connection before per-project
     // loading — RocksDB uses exclusive locks, so only one connection at a time.
     let entries = {
-        let rocks = match RocksDBBackend::open(&db_path) {
+        let rocks = match crate::memory::open_shared_graph_db(&db_path) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("[cross-project] Failed to open graph.db: {}", e);
@@ -401,7 +399,7 @@ fn find_cross_project_consumers(
             })
             .unwrap_or_else(|| slug.clone());
 
-        let other_rocks = match RocksDBBackend::open(&db_path) {
+        let other_rocks = match crate::memory::open_shared_graph_db(&db_path) {
             Ok(r) => r,
             Err(_) => continue,
         };

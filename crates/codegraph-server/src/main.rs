@@ -276,7 +276,7 @@ fn classify_panic(payload: &str, location: &str) -> (&'static str, &'static str)
 /// Strategy: panic / SIGINT / SIGTERM all funnel into `process::exit`.
 /// At process exit the kernel releases all fcntl / LockFileEx grants,
 /// so the next launch sees only the `LOCK` *file* (no live holder),
-/// which `RocksDBBackend::open_with_stale_lock_recovery` clears. WAL
+/// which RocksDB reuses without complaint. WAL
 /// durability is per-write, so any in-flight batch is either fully
 /// applied or fully discarded on next open — `exit` skipping `Drop` is
 /// a safe tradeoff here.

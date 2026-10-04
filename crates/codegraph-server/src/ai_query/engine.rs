@@ -971,15 +971,13 @@ impl QueryEngine {
     /// rebuild that follows are loadable if it is interrupted. Returns whether
     /// the project was taken - see [`claim_project`].
     fn claim_vector_set(slug: &str, stamp: &str) -> std::result::Result<bool, String> {
-        use codegraph::RocksDBBackend;
-
         let db_path = crate::memory::shared_graph_db_path().map_err(|e| format!("{e}"))?;
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
-        let rocks =
-            RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        let rocks = crate::memory::open_shared_graph_db(&db_path)
+            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
         let mut namespaced = NamespacedBackend::new(Box::new(rocks), slug);
 
         claim_project(&mut namespaced, slug, stamp)
@@ -1013,8 +1011,6 @@ impl QueryEngine {
         complete: bool,
         stamp: &str,
     ) -> std::result::Result<bool, String> {
-        use codegraph::RocksDBBackend;
-
         if vecs.is_empty() {
             return Ok(false);
         }
@@ -1025,8 +1021,8 @@ impl QueryEngine {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
-        let rocks =
-            RocksDBBackend::open(&db_path).map_err(|e| format!("Failed to open graph.db: {e}"))?;
+        let rocks = crate::memory::open_shared_graph_db(&db_path)
+            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
         let mut namespaced = NamespacedBackend::new(Box::new(rocks), slug);
 
         if !store_vectors(&mut namespaced, vecs, stamp)? {
@@ -1058,8 +1054,6 @@ impl QueryEngine {
     /// engine is configured to build; a set built from other text is left
     /// untouched for whoever wrote it. Returns the number of vectors loaded.
     pub async fn load_symbol_vectors(&self, slug: &str) -> VectorLoad {
-        use codegraph::RocksDBBackend;
-
         let Some(stamp) = self.embed_stamp().await else {
             tracing::warn!("[QueryEngine] No vector engine attached - cannot load symbol vectors");
             return VectorLoad::Unreadable;
@@ -1077,7 +1071,7 @@ impl QueryEngine {
             return VectorLoad::Absent;
         }
 
-        let rocks = match RocksDBBackend::open(&db_path) {
+        let rocks = match crate::memory::open_shared_graph_db(&db_path) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("[QueryEngine] Failed to open graph.db for vectors: {}", e);

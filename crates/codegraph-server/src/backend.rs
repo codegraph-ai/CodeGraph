@@ -515,7 +515,7 @@ impl CodeGraphBackend {
         workspace: &std::path::Path,
         graph: &codegraph::CodeGraph,
     ) -> std::result::Result<(), String> {
-        use codegraph::{NamespacedBackend, RocksDBBackend, StorageBackend};
+        use codegraph::{NamespacedBackend, StorageBackend};
 
         // Ephemeral workspaces (test harness tempdirs) skip
         // persistence to the shared graph.db entirely. The in-memory
@@ -532,7 +532,7 @@ impl CodeGraphBackend {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
-        let mut rocks = RocksDBBackend::open_with_stale_lock_recovery(&db_path)
+        let mut rocks = crate::memory::open_shared_graph_db(&db_path)
             .map_err(|e| format!("Failed to open graph.db: {e}"))?;
 
         let registry_value = serde_json::json!({
@@ -1206,21 +1206,27 @@ impl LanguageServer for CodeGraphBackend {
                 }
                 Err(e) => {
                     tracing::error!(
-                        "LSP: RocksDB graph.db open failed: {e} — running in-memory only \
-                         this session. Changes will NOT persist across restarts."
+                        "LSP: could not load the persisted graph ({e}) - starting without it."
                     );
                     self.client
                         .log_message(
                             MessageType::ERROR,
                             format!(
-                                "CodeGraph: graph database open failed ({e}). \
-                                 Index is volatile this session — restart to retry; \
-                                 if the error persists, check ~/.codegraph/graph.db for a stale LOCK file."
+                                "CodeGraph: could not load the saved index ({e}), so this session \
+                                 starts without it. If another CodeGraph process keeps \
+                                 ~/.codegraph/graph.db busy, restart once it is idle."
                             ),
                         )
                         .await;
                 }
             }
+        }
+
+        // The saved hashes (loaded in `initialize`) vouch that files are already
+        // in the graph. Without a persisted graph they would make the indexer
+        // skip every unchanged file and leave the session empty.
+        if !loaded_from_persistence {
+            self.index_state.lock().await.clear();
         }
 
         // Run incremental indexing: hash-based dedup skips unchanged files.

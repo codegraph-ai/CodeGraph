@@ -11,6 +11,7 @@ use crate::error::{GraphError, Result};
 use rocksdb::{Options, WriteBatch, DB};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// RocksDB-backed persistent storage.
 ///
@@ -47,41 +48,41 @@ impl RocksDBBackend {
         // open-time option can catch.
         opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::PointInTime);
 
-        let db = DB::open(&opts, path.as_ref()).map_err(|e| {
-            GraphError::storage(
-                format!("Failed to open RocksDB at {:?}", path.as_ref()),
-                Some(e),
-            )
-        })?;
+        let db = DB::open(&opts, path.as_ref()).map_err(|e| open_error(path.as_ref(), e))?;
 
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Open with recovery from a stale `LOCK` file left by a prior crash.
+    /// Open, waiting up to `max_wait` for another open handle to release the
+    /// database.
     ///
-    /// Falls back to a single retry only when the original failure looks
-    /// lock-related AND an advisory-lock probe of `<path>/LOCK` succeeds —
-    /// the probe is the authoritative signal that no live process still
-    /// holds the inode. Without that double check we would happily steal a
-    /// lock from a healthy concurrent process.
+    /// RocksDB allows one open handle per database, and the holder is usually
+    /// another process that keeps it open only for a load or a persist, so
+    /// contention clears within moments. This retries with backoff while
+    /// [`Self::open`] reports [`GraphError::Locked`], and returns that error
+    /// once `max_wait` has elapsed.
     ///
-    /// Use this for production open-paths (server startup, persist). Tests
-    /// and tools that want strict open-time conflict detection should
-    /// continue to call [`Self::open`].
-    pub fn open_with_stale_lock_recovery<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_ref = path.as_ref();
-        match Self::open(path_ref) {
-            Ok(b) => Ok(b),
-            Err(e) => {
-                if is_lock_error(&e) && try_clear_stale_lock(path_ref) {
-                    log::warn!(
-                        "RocksDB at {:?} had a stale LOCK from a prior crash; cleared and retrying",
-                        path_ref,
+    /// It never removes the `LOCK` file. The OS releases a lock when its
+    /// holder exits, crashed or not, so a `LOCK` file left behind does not
+    /// block the next open, and removing one that is still held would let a
+    /// second process open the same database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::Locked`] if the database is still held after
+    /// `max_wait`, or [`GraphError::Storage`] for any other open failure.
+    pub fn open_waiting_for_lock<P: AsRef<Path>>(path: P, max_wait: Duration) -> Result<Self> {
+        let deadline = Instant::now() + max_wait;
+        let mut delay = Duration::from_millis(20);
+        loop {
+            match Self::open(path.as_ref()) {
+                Err(GraphError::Locked { .. }) if Instant::now() < deadline => {
+                    std::thread::sleep(
+                        delay.min(deadline.saturating_duration_since(Instant::now())),
                     );
-                    Self::open(path_ref)
-                } else {
-                    Err(e)
+                    delay = (delay * 2).min(Duration::from_millis(500));
                 }
+                result => return result,
             }
         }
     }
@@ -168,62 +169,28 @@ impl RocksDBBackend {
     }
 }
 
-/// Heuristic: does this storage error look like a `LOCK`-file failure?
+/// Classify a failed `DB::open`: lock contention becomes [`GraphError::Locked`],
+/// anything else [`GraphError::Storage`].
 ///
-/// RocksDB's `Error` type is opaque (string-only), so substring matching
-/// is the only portable detector. Patterns checked here are the literal
-/// strings the underlying C++ layer emits across the platforms we ship
-/// (`IOError: While lock file ... LOCK`, `Resource temporarily unavailable`,
-/// `lock hold`). False positives are safe — they only cause a probe; the
-/// probe itself is what authorises cleanup.
-fn is_lock_error(e: &GraphError) -> bool {
-    use std::error::Error;
-    // Walk the source chain so we catch the underlying rocksdb::Error too.
-    let mut s = format!("{e}");
-    let mut src: Option<&(dyn Error + 'static)> = e.source();
-    while let Some(inner) = src {
-        s.push('\n');
-        s.push_str(&inner.to_string());
-        src = inner.source();
-    }
-    let needles = [
-        "lock",
-        "LOCK",
-        "Resource temporarily unavailable",
-        "lock hold",
+/// RocksDB's error is string-only. These are the messages its `LockFile`
+/// returns when another handle holds the database: another process on POSIX,
+/// this process on POSIX, and any holder on Windows (the `LOCK` file is opened
+/// without sharing there).
+fn open_error(path: &Path, e: rocksdb::Error) -> GraphError {
+    const LOCK_HELD: [&str; 3] = [
+        "While lock file",
+        "lock hold by current process",
+        "Failed to create lock file",
     ];
-    needles.iter().any(|n| s.contains(n))
-}
-
-/// Probe `<db_path>/LOCK` for a live holder; remove it if none.
-///
-/// Returns `true` only when (a) the file exists, (b) an advisory-lock
-/// probe succeeds — meaning no other process holds an exclusive lock on
-/// the inode — and (c) the file was successfully removed. Any other
-/// outcome returns `false` so the caller surfaces the original error
-/// (real conflict, permission issue, missing parent dir, etc.).
-///
-/// The advisory probe uses the same lock primitive RocksDB itself uses
-/// (fcntl on POSIX, LockFileEx on Windows), so a healthy concurrent
-/// process is reliably detected and not stomped.
-fn try_clear_stale_lock(db_path: &Path) -> bool {
-    use fs2::FileExt;
-    use std::fs::OpenOptions;
-
-    let lock_path = db_path.join("LOCK");
-    if !lock_path.exists() {
-        return false;
+    let message = e.to_string();
+    if LOCK_HELD.iter().any(|m| message.contains(m)) {
+        GraphError::Locked {
+            path: path.to_path_buf(),
+            source: Box::new(e),
+        }
+    } else {
+        GraphError::storage(format!("Failed to open RocksDB at {path:?}"), Some(e))
     }
-    let file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    if file.try_lock_exclusive().is_err() {
-        return false;
-    }
-    let _ = FileExt::unlock(&file);
-    drop(file);
-    std::fs::remove_file(&lock_path).is_ok()
 }
 
 impl StorageBackend for RocksDBBackend {
@@ -467,50 +434,61 @@ mod tests {
     }
 
     #[test]
-    fn test_stale_lock_recovery_clears_orphaned_lock() {
-        // Simulate the post-crash state: a LOCK file exists but no
-        // process holds an advisory lock on it. open() returns Err
-        // (because we manually fcntl-locked it from a side-channel that
-        // got closed); open_with_stale_lock_recovery() should clear and
-        // succeed.
+    fn test_leftover_lock_file_does_not_block_open() {
+        // A holder that exits, crashed or not, leaves its LOCK file behind
+        // but not its lock: the next open succeeds and the file is reused.
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().to_path_buf();
-        std::fs::create_dir_all(&db_path).unwrap();
+        drop(RocksDBBackend::open(&db_path).unwrap());
+        assert!(db_path.join("LOCK").exists());
 
-        // First clean open creates the LOCK as a side-effect of RocksDB
-        // initialising the directory.
-        {
-            let backend = RocksDBBackend::open(&db_path).unwrap();
-            drop(backend);
-        }
-
-        // Recreate a LOCK file by hand — emulates a leftover from a
-        // killed process where the kernel released the fcntl lock but
-        // never removed the file (Windows-shaped state).
-        let lock_path = db_path.join("LOCK");
-        if !lock_path.exists() {
-            std::fs::write(&lock_path, b"").unwrap();
-        }
-
-        // No one holds an advisory lock on it → recovery should succeed.
-        let backend = RocksDBBackend::open_with_stale_lock_recovery(&db_path).unwrap();
+        let backend = RocksDBBackend::open(&db_path).unwrap();
         backend.get(b"anything").unwrap();
     }
 
     #[test]
-    fn test_stale_lock_recovery_with_live_holder_does_not_deadlock_or_panic() {
-        // A live holder is alive in the same process. The recovery API
-        // must not deadlock, panic, or corrupt state. Either Ok or Err
-        // is acceptable as the return — Windows refuses the LOCK probe
-        // outright (sharing violation), POSIX may permit it under
-        // same-process fcntl semantics. The load-bearing assertion is
-        // simply that the call returns within a reasonable time.
+    fn test_open_reports_a_held_database_as_locked() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().to_path_buf();
-        std::fs::create_dir_all(&db_path).unwrap();
-
         let _holder = RocksDBBackend::open(&db_path).unwrap();
-        let _ = RocksDBBackend::open_with_stale_lock_recovery(&db_path);
+
+        let err = RocksDBBackend::open(&db_path).err().unwrap();
+        assert!(matches!(err, GraphError::Locked { .. }), "got {err}");
+    }
+
+    #[test]
+    fn test_waiting_open_gives_up_after_max_wait_and_keeps_the_lock_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+        let mut holder = RocksDBBackend::open(&db_path).unwrap();
+        holder.put(b"k", b"v").unwrap();
+
+        let started = std::time::Instant::now();
+        let err = RocksDBBackend::open_waiting_for_lock(&db_path, Duration::from_millis(300))
+            .err()
+            .unwrap();
+        assert!(matches!(err, GraphError::Locked { .. }), "got {err}");
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(db_path.join("LOCK").exists());
+        // The holder is undisturbed.
+        assert_eq!(holder.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn test_waiting_open_succeeds_once_the_holder_releases() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+        let mut holder = RocksDBBackend::open(&db_path).unwrap();
+        holder.put(b"k", b"v").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(holder);
+        });
+
+        let backend =
+            RocksDBBackend::open_waiting_for_lock(&db_path, Duration::from_secs(10)).unwrap();
+        assert_eq!(backend.get(b"k").unwrap(), Some(b"v".to_vec()));
+        release.join().unwrap();
     }
 
     #[test]
