@@ -115,7 +115,22 @@ pub(crate) const SHARED_GRAPH_DB_LOCK_WAIT: std::time::Duration =
 /// handle at a time, so an open that gives up at the first refusal fails
 /// whenever a sibling session happens to be persisting.
 pub(crate) fn open_shared_graph_db(path: &Path) -> codegraph::Result<codegraph::RocksDBBackend> {
-    codegraph::RocksDBBackend::open_waiting_for_lock(path, SHARED_GRAPH_DB_LOCK_WAIT)
+    open_shared_graph_db_with(path, || {}, || {})
+}
+
+/// [`open_shared_graph_db`] with the per-attempt hooks of
+/// [`codegraph::RocksDBBackend::open_waiting_for_lock_with`].
+pub(crate) fn open_shared_graph_db_with(
+    path: &Path,
+    before_attempt: impl FnMut(),
+    on_locked: impl FnMut(),
+) -> codegraph::Result<codegraph::RocksDBBackend> {
+    codegraph::RocksDBBackend::open_waiting_for_lock_with(
+        path,
+        SHARED_GRAPH_DB_LOCK_WAIT,
+        before_attempt,
+        on_locked,
+    )
 }
 
 /// Redirect the shared graph DB to a brand-new directory by bumping the

@@ -336,24 +336,22 @@ fn find_cross_project_consumers(
         }
     };
 
-    // Open RocksDB, scan registry, then DROP the connection before per-project
-    // loading — RocksDB uses exclusive locks, so only one connection at a time.
-    let entries = {
-        let rocks = match crate::memory::open_shared_graph_db(&db_path) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("[cross-project] Failed to open graph.db: {}", e);
-                return Vec::new();
-            }
-        };
-        match StorageBackend::scan_prefix(&rocks, b"_registry:") {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("[cross-project] Failed to scan registry: {}", e);
-                return Vec::new();
-            }
+    // Open RocksDB once for the registry scan and every per-project load, so
+    // a busy DB costs this query at most one lock wait. The handle drops, and
+    // the lock is released, when this function returns.
+    let rocks = match crate::memory::open_shared_graph_db(&db_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("[cross-project] Failed to open graph.db: {}", e);
+            return Vec::new();
         }
-        // rocks dropped here — lock released
+    };
+    let entries = match StorageBackend::scan_prefix(&rocks, b"_registry:") {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("[cross-project] Failed to scan registry: {}", e);
+            return Vec::new();
+        }
     };
 
     tracing::debug!(
@@ -399,11 +397,7 @@ fn find_cross_project_consumers(
             })
             .unwrap_or_else(|| slug.clone());
 
-        let other_rocks = match crate::memory::open_shared_graph_db(&db_path) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let namespaced = NamespacedBackend::new(Box::new(other_rocks), &slug);
+        let namespaced = NamespacedBackend::new(Box::new(rocks.clone()), &slug);
         let mut other_graph = match CodeGraph::with_backend(Box::new(namespaced)) {
             Ok(g) => g,
             Err(_) => continue,

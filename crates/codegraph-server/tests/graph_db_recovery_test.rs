@@ -88,7 +88,6 @@ impl Env {
             "tools/call",
             json!({"name": "codegraph_symbol_search", "arguments": {"query": MARKER}}),
         );
-        drop(request);
         drop(stdin);
         assert!(child.wait().unwrap().success());
         reply.to_string().contains(MARKER)

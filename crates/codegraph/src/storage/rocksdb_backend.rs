@@ -72,17 +72,43 @@ impl RocksDBBackend {
     /// Returns [`GraphError::Locked`] if the database is still held after
     /// `max_wait`, or [`GraphError::Storage`] for any other open failure.
     pub fn open_waiting_for_lock<P: AsRef<Path>>(path: P, max_wait: Duration) -> Result<Self> {
+        Self::open_waiting_for_lock_with(path, max_wait, || {}, || {})
+    }
+
+    /// [`Self::open_waiting_for_lock`], calling `before_attempt` right before
+    /// every open attempt and `on_locked` right after every attempt refused
+    /// with [`GraphError::Locked`], including the last one. Nothing runs
+    /// between `on_locked` and the next `before_attempt` except the backoff
+    /// sleep, so state set up in `before_attempt` and torn down in
+    /// `on_locked` never exists while waiting.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_waiting_for_lock`].
+    pub fn open_waiting_for_lock_with<P: AsRef<Path>>(
+        path: P,
+        max_wait: Duration,
+        mut before_attempt: impl FnMut(),
+        mut on_locked: impl FnMut(),
+    ) -> Result<Self> {
         let deadline = Instant::now() + max_wait;
         let mut delay = Duration::from_millis(20);
         loop {
+            before_attempt();
             match Self::open(path.as_ref()) {
                 Err(GraphError::Locked { .. }) if Instant::now() < deadline => {
+                    on_locked();
                     std::thread::sleep(
                         delay.min(deadline.saturating_duration_since(Instant::now())),
                     );
                     delay = (delay * 2).min(Duration::from_millis(500));
                 }
-                result => return result,
+                result => {
+                    if matches!(result, Err(GraphError::Locked { .. })) {
+                        on_locked();
+                    }
+                    return result;
+                }
             }
         }
     }
@@ -472,6 +498,60 @@ mod tests {
         assert!(db_path.join("LOCK").exists());
         // The holder is undisturbed.
         assert_eq!(holder.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn test_waiting_open_hooks_bracket_every_refused_attempt() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+        let _holder = RocksDBBackend::open(&db_path).unwrap();
+
+        let attempts = std::cell::Cell::new(0u32);
+        let refused = std::cell::Cell::new(0u32);
+        let err = RocksDBBackend::open_waiting_for_lock_with(
+            &db_path,
+            Duration::from_millis(300),
+            || {
+                assert_eq!(attempts.get(), refused.get(), "attempt began while armed");
+                attempts.set(attempts.get() + 1);
+            },
+            || refused.set(refused.get() + 1),
+        )
+        .err()
+        .unwrap();
+
+        assert!(matches!(err, GraphError::Locked { .. }), "got {err}");
+        assert!(
+            attempts.get() > 1,
+            "expected retries, got {}",
+            attempts.get()
+        );
+        assert_eq!(refused.get(), attempts.get());
+    }
+
+    #[test]
+    fn test_waiting_open_hooks_leave_a_successful_attempt_armed() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().to_path_buf();
+        let holder = RocksDBBackend::open(&db_path).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(holder);
+        });
+
+        let attempts = std::cell::Cell::new(0u32);
+        let refused = std::cell::Cell::new(0u32);
+        RocksDBBackend::open_waiting_for_lock_with(
+            &db_path,
+            Duration::from_secs(10),
+            || attempts.set(attempts.get() + 1),
+            || refused.set(refused.get() + 1),
+        )
+        .unwrap();
+        release.join().unwrap();
+
+        assert!(refused.get() > 0);
+        assert_eq!(attempts.get(), refused.get() + 1);
     }
 
     #[test]

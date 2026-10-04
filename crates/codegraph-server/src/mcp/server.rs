@@ -327,28 +327,15 @@ impl McpBackend {
             }
         }
 
-        // Mark WHERE we are (telemetry) and arm this process's sentinel for
-        // the load. The phase guard resets to `serving` on return; the
+        // Mark WHERE we are (telemetry); the load arms this process's
+        // sentinel. The phase guard resets to `serving` on return; the
         // sentinel only clears on a completed load (success or graceful
-        // error), not on a native AV. The sentinel body carries this
-        // process's start time so a recycled PID can't impersonate a live
-        // loader (Windows reuses PIDs aggressively during crash-restart
-        // churn).
+        // error) or a lock wait, not on a native AV. The sentinel body
+        // carries this process's start time so a recycled PID can't
+        // impersonate a live loader (Windows reuses PIDs aggressively during
+        // crash-restart churn).
         let _phase = crate::crash_phase::enter("graph_load");
-        let sentinel = db_path
-            .parent()
-            .map(|p| p.join(format!("graph.loading.{}", std::process::id())));
-        if let Some(s) = &sentinel {
-            let body = Self::own_start_time()
-                .map(|t| t.to_string())
-                .unwrap_or_default();
-            let _ = std::fs::write(s, body);
-        }
-
         let result = Self::load_persistent_graph_inner(&db_path, slug);
-        if let Some(s) = &sentinel {
-            let _ = std::fs::remove_file(s);
-        }
 
         match result {
             Ok(graph) => Ok(graph),
@@ -521,18 +508,43 @@ impl McpBackend {
     /// detach storage to release the lock. The fallible core of
     /// [`open_persistent_graph`], split out so the poison-pill wrapper can
     /// retry it on a fresh DB after quarantining a corrupt one.
+    ///
+    /// This process's `graph.loading.<pid>` sentinel is armed for every open
+    /// attempt (open itself can AV on a torn DB) and kept from a successful
+    /// open through the load, but removed while waiting out another holder:
+    /// a session killed mid-wait must not leave poison evidence behind.
     fn load_persistent_graph_inner(
         db_path: &std::path::Path,
         slug: &str,
     ) -> Result<CodeGraph, codegraph::GraphError> {
-        let rocks = memory::open_shared_graph_db(db_path)?;
-        let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
-        let mut graph = CodeGraph::with_backend(Box::new(namespaced))?;
+        let sentinel = db_path
+            .parent()
+            .map(|p| p.join(format!("graph.loading.{}", std::process::id())));
+        let body = Self::own_start_time()
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let arm = || {
+            if let Some(s) = &sentinel {
+                let _ = std::fs::write(s, &body);
+            }
+        };
+        let disarm = || {
+            if let Some(s) = &sentinel {
+                let _ = std::fs::remove_file(s);
+            }
+        };
 
-        // Detach to release the RocksDB lock — all data is now in memory
-        graph.detach_storage()?;
+        let result = memory::open_shared_graph_db_with(db_path, arm, disarm).and_then(|rocks| {
+            let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
+            let mut graph = CodeGraph::with_backend(Box::new(namespaced))?;
 
-        Ok(graph)
+            // Detach to release the RocksDB lock — all data is now in memory
+            graph.detach_storage()?;
+
+            Ok(graph)
+        });
+        disarm();
+        result
     }
 
     /// Move a corrupt `graph.db` aside so the next open starts clean. RocksDB
