@@ -1,0 +1,10 @@
+# One compiler for every release build. Each platform's engine is built on a
+# different host (and linux-arm64 in a container that installs Rust itself);
+# without a pin they drifted onto three different rustc versions, so one release
+# shipped binaries the same source compiled differently.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
+# darwin-x64 is cross-built on the arm64 Mac.
+targets = ["x86_64-apple-darwin"]

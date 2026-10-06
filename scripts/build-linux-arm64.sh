@@ -139,7 +139,7 @@ apt_install gcc-11 g++-11 clang libclang-dev cmake pkg-config libssl-dev make bi
 
 if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal >/dev/null || exit 1
+    | sh -s -- -y --default-toolchain none --profile minimal >/dev/null || exit 1
 fi
 . "$HOME/.cargo/env"
 
@@ -162,6 +162,7 @@ restore_ownership() {
 trap restore_ownership EXIT
 
 cd /src
+rustc --version || { echo "RUST TOOLCHAIN INSTALL FAILED"; exit 1; }
 export CARGO_TARGET_DIR=/target
 export CC=gcc-11 CXX=g++-11
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=gcc-11
