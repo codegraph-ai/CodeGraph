@@ -105,6 +105,34 @@ pub(crate) fn shared_graph_db_path() -> Result<PathBuf, MemoryError> {
     Ok(graph_db_path_for_generation(&dir, graph_db_generation()))
 }
 
+/// How long an open of the shared graph DB waits for another process to let go
+/// of it. Sessions and daemons hold it only for a load or a persist.
+pub(crate) const SHARED_GRAPH_DB_LOCK_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+/// Open the shared graph DB at `path`, waiting out another process that has it
+/// open. Every open of the shared DB goes through here: RocksDB admits one
+/// handle at a time, so an open that gives up at the first refusal fails
+/// whenever a sibling session happens to be persisting.
+pub(crate) fn open_shared_graph_db(path: &Path) -> codegraph::Result<codegraph::RocksDBBackend> {
+    open_shared_graph_db_with(path, || {}, || {})
+}
+
+/// [`open_shared_graph_db`] with the per-attempt hooks of
+/// [`codegraph::RocksDBBackend::open_waiting_for_lock_with`].
+pub(crate) fn open_shared_graph_db_with(
+    path: &Path,
+    before_attempt: impl FnMut(),
+    on_locked: impl FnMut(),
+) -> codegraph::Result<codegraph::RocksDBBackend> {
+    codegraph::RocksDBBackend::open_waiting_for_lock_with(
+        path,
+        SHARED_GRAPH_DB_LOCK_WAIT,
+        before_attempt,
+        on_locked,
+    )
+}
+
 /// Redirect the shared graph DB to a brand-new directory by bumping the
 /// generation pointer; returns the new path. The poisoned old directory is
 /// NOT touched here — renaming/deleting it is best-effort cleanup that can

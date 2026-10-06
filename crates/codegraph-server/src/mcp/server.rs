@@ -92,7 +92,7 @@ use crate::index_state::IndexState;
 use crate::indexer::{IndexConfig, Indexer};
 use crate::memory::{self, MemoryManager};
 use crate::parser_registry::ParserRegistry;
-use codegraph::{CodeGraph, NamespacedBackend, RocksDBBackend, StorageBackend};
+use codegraph::{CodeGraph, NamespacedBackend, StorageBackend};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -200,9 +200,9 @@ impl McpBackend {
             }
             Err(e) => {
                 tracing::error!(
-                    "RocksDB graph.db open failed: {e} — running in-memory only this session. \
-                     Changes will NOT persist across restarts. Inspect ~/.codegraph/graph.db and \
-                     ensure no other codegraph-server process is running."
+                    "Could not load the persisted graph ({e}) - this session re-indexes the \
+                     workspace instead. If another codegraph process keeps ~/.codegraph/graph.db \
+                     busy, restart this session once it is idle."
                 );
                 Arc::new(RwLock::new(
                     CodeGraph::in_memory().expect("Failed to create in-memory graph"),
@@ -327,31 +327,22 @@ impl McpBackend {
             }
         }
 
-        // Mark WHERE we are (telemetry) and arm this process's sentinel for
-        // the load. The phase guard resets to `serving` on return; the
+        // Mark WHERE we are (telemetry); the load arms this process's
+        // sentinel. The phase guard resets to `serving` on return; the
         // sentinel only clears on a completed load (success or graceful
-        // error), not on a native AV. The sentinel body carries this
-        // process's start time so a recycled PID can't impersonate a live
-        // loader (Windows reuses PIDs aggressively during crash-restart
-        // churn).
+        // error) or a lock wait, not on a native AV. The sentinel body
+        // carries this process's start time so a recycled PID can't
+        // impersonate a live loader (Windows reuses PIDs aggressively during
+        // crash-restart churn).
         let _phase = crate::crash_phase::enter("graph_load");
-        let sentinel = db_path
-            .parent()
-            .map(|p| p.join(format!("graph.loading.{}", std::process::id())));
-        if let Some(s) = &sentinel {
-            let body = Self::own_start_time()
-                .map(|t| t.to_string())
-                .unwrap_or_default();
-            let _ = std::fs::write(s, body);
-        }
-
         let result = Self::load_persistent_graph_inner(&db_path, slug);
-        if let Some(s) = &sentinel {
-            let _ = std::fs::remove_file(s);
-        }
 
         match result {
             Ok(graph) => Ok(graph),
+            // Another process kept the DB open past the wait. That is
+            // contention, not damage: redirecting here would abandon every
+            // project's graph because a sibling session was mid-persist.
+            Err(e @ codegraph::GraphError::Locked { .. }) => Err(format!("graph.db: {e}")),
             Err(e) => {
                 // RocksDB reported corruption gracefully (didn't AV).
                 // Redirect to a fresh generation and retry once so the
@@ -363,6 +354,7 @@ impl McpBackend {
                     Self::sweep_stale_graph_dbs(parent, &fresh);
                 }
                 Self::load_persistent_graph_inner(&fresh, slug)
+                    .map_err(|e| format!("graph.db load failed: {e}"))
             }
         }
     }
@@ -516,25 +508,43 @@ impl McpBackend {
     /// detach storage to release the lock. The fallible core of
     /// [`open_persistent_graph`], split out so the poison-pill wrapper can
     /// retry it on a fresh DB after quarantining a corrupt one.
+    ///
+    /// This process's `graph.loading.<pid>` sentinel is armed for every open
+    /// attempt (open itself can AV on a torn DB) and kept from a successful
+    /// open through the load, but removed while waiting out another holder:
+    /// a session killed mid-wait must not leave poison evidence behind.
     fn load_persistent_graph_inner(
         db_path: &std::path::Path,
         slug: &str,
-    ) -> Result<CodeGraph, String> {
-        // Stale-LOCK recovery: a prior crash can leave LOCK in place. The
-        // recovery variant only clobbers it after probing for a live holder —
-        // a healthy concurrent process is still respected.
-        let rocks = RocksDBBackend::open_with_stale_lock_recovery(db_path)
-            .map_err(|e| format!("Failed to open graph.db: {e}"))?;
-        let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
-        let mut graph = CodeGraph::with_backend(Box::new(namespaced))
-            .map_err(|e| format!("Failed to load graph: {e}"))?;
+    ) -> Result<CodeGraph, codegraph::GraphError> {
+        let sentinel = db_path
+            .parent()
+            .map(|p| p.join(format!("graph.loading.{}", std::process::id())));
+        let body = Self::own_start_time()
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let arm = || {
+            if let Some(s) = &sentinel {
+                let _ = std::fs::write(s, &body);
+            }
+        };
+        let disarm = || {
+            if let Some(s) = &sentinel {
+                let _ = std::fs::remove_file(s);
+            }
+        };
 
-        // Detach to release the RocksDB lock — all data is now in memory
-        graph
-            .detach_storage()
-            .map_err(|e| format!("Failed to detach storage: {e}"))?;
+        let result = memory::open_shared_graph_db_with(db_path, arm, disarm).and_then(|rocks| {
+            let namespaced = NamespacedBackend::new(Box::new(rocks), slug);
+            let mut graph = CodeGraph::with_backend(Box::new(namespaced))?;
 
-        Ok(graph)
+            // Detach to release the RocksDB lock — all data is now in memory
+            graph.detach_storage()?;
+
+            Ok(graph)
+        });
+        disarm();
+        result
     }
 
     /// Move a corrupt `graph.db` aside so the next open starts clean. RocksDB
@@ -580,7 +590,7 @@ impl McpBackend {
                 .map_err(|e| format!("Failed to create ~/.codegraph: {e}"))?;
         }
 
-        let mut rocks = RocksDBBackend::open_with_stale_lock_recovery(&db_path)
+        let mut rocks = memory::open_shared_graph_db(&db_path)
             .map_err(|e| format!("Failed to open graph.db for persist: {e}"))?;
 
         // Write project registry entry (un-namespaced, global key)
@@ -633,7 +643,7 @@ impl McpBackend {
             return Ok(vec![]);
         }
 
-        let rocks = RocksDBBackend::open_with_stale_lock_recovery(&db_path)
+        let rocks = memory::open_shared_graph_db(&db_path)
             .map_err(|e| format!("Failed to open graph.db: {e}"))?;
 
         let entries = rocks
@@ -903,7 +913,16 @@ impl McpBackend {
     }
 
     /// Load saved file hashes from disk. Returns true if state was loaded.
+    ///
+    /// The hashes vouch that a file's symbols are already in the graph, so
+    /// they only load alongside a graph that has some. Against an empty graph
+    /// (a redirected or unloadable DB) they would make the indexer skip every
+    /// unchanged file and leave the session with no symbols at all.
     pub async fn load_index_state(&self) -> bool {
+        if self.graph.read().await.node_count() == 0 {
+            tracing::info!("No persisted graph to resume from - indexing every file");
+            return false;
+        }
         let mut state = self.index_state.lock().await;
         let count = state.load();
         count > 0
