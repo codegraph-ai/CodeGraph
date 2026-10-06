@@ -387,9 +387,10 @@ function isStale(targetDir, version) {
  *   and which assets were downloaded (empty when everything was already there).
  */
 async function ensureEngine(version, targetDir, options = {}) {
-  const assets = requiredAssets(options.platform, options.arch);
+  const { platform = os.platform(), arch = os.arch() } = options;
+  const assets = requiredAssets(platform, arch);
   if (assets.length === 0) {
-    throw new Error(`no CodeGraph engine is published for ${os.platform()}-${os.arch()}`);
+    throw new Error(`no CodeGraph engine is published for ${platform}-${arch}`);
   }
 
   fs.mkdirSync(targetDir, { recursive: true });
