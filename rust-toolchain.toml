@@ -6,3 +6,5 @@
 channel = "1.94.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
+# darwin-x64 is cross-built on the arm64 Mac.
+targets = ["x86_64-apple-darwin"]
