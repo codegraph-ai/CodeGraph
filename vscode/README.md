@@ -145,7 +145,7 @@ cd vscode && npm install && npm run esbuild  # VS Code extension
 npx @vscode/vsce package                     # VSIX
 ```
 
-Requires Rust stable, Node.js 18+, VS Code 1.90+.
+Requires rustup (it installs the Rust version pinned in `rust-toolchain.toml`), Node.js 18+, VS Code 1.90+.
 
 ---
 
