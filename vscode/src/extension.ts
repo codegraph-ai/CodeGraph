@@ -17,7 +17,14 @@ import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath, engineSpawnEnv } from './server';
-import { engineVersion, installEngine, managedEnginePath, updateEngineIfStale } from './engineDownload';
+import {
+    clearUpdateFailure,
+    EngineLifecycle,
+    engineVersion,
+    installEngine,
+    managedEnginePath,
+    updateEngineIfStale,
+} from './engineDownload';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
 import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from './funnel';
@@ -277,12 +284,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // but only when activation did stop early, since in a session that already
     // has an engine running a reload prompt is noise and a plain confirmation
     // is all the user needs.
+    // The lifecycle callbacks read `client` lazily: the command and the update
+    // below both run long after activation has created and started it.
+    const engineLifecycle: EngineLifecycle = {
+        isRunning: () => client?.isRunning() ?? false,
+        stop: () => client.stop(),
+        start: () => client.start(),
+    };
     context.subscriptions.push(
         vscode.commands.registerCommand('codegraph.downloadEngine', async () => {
             const activationStopped = !client;
-            if (!('binary' in (await installEngine(engineVersion())))) {
+            if (!('binary' in (await installEngine(engineVersion(), engineLifecycle)))) {
                 return;
             }
+            await clearUpdateFailure(context.globalState);
             if (!activationStopped) {
                 void vscode.window.showInformationMessage('CodeGraph engine installed.');
                 return;
@@ -332,14 +347,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Not awaited: the engine on disk still runs, and holding activation - and
     // with it the language client, the tree views and the lenses - behind a
     // ~120 MB transfer on a slow network is a far worse trade than one release of
-    // drift. The lifecycle callbacks read `client` lazily for the same reason:
-    // by the time the download finishes it has usually been created and started.
+    // drift.
     if (serverInfo.path === managedEnginePath()) {
-        void updateEngineIfStale(engineVersion(), context.globalState, {
-            isRunning: () => client?.isRunning() ?? false,
-            stop: () => client.stop(),
-            start: () => client.start(),
-        });
+        void updateEngineIfStale(engineVersion(), context.globalState, engineLifecycle);
     }
 
     setServerEdition(serverInfo.edition === 'pro' ? 'pro' : 'community');

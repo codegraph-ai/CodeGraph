@@ -85,6 +85,39 @@ export function shouldSkipAutomaticUpdate(
     return failure?.version === version && now - failure.at < UPDATE_RETRY_BACKOFF_MS;
 }
 
+/** Forget a failed automatic update, once the engine has been installed some other way. */
+export async function clearUpdateFailure(state: vscode.Memento): Promise<void> {
+    if (state.get<UpdateFailure>(UPDATE_FAILURE_KEY)) {
+        await state.update(UPDATE_FAILURE_KEY, undefined);
+    }
+}
+
+/**
+ * Stops a running engine at the last moment before its binary is replaced, and
+ * restarts it afterwards whichever way the install ended.
+ *
+ * The engine holds its own binary open, so it is stopped once every asset is
+ * downloaded and verified - stopping it for the length of a transfer that may
+ * fail costs the user a working engine for nothing.
+ */
+function engineSwap(lifecycle: EngineLifecycle | undefined) {
+    let stopped = false;
+    return {
+        beforeInstall: async () => {
+            if (!stopped && lifecycle?.isRunning()) {
+                stopped = true;
+                await lifecycle.stop();
+            }
+        },
+        restart: async () => {
+            if (stopped && lifecycle) {
+                stopped = false;
+                await lifecycle.start();
+            }
+        },
+    };
+}
+
 /** The engine asset for this platform, or null when none is published. */
 export function platformBinaryName(): string | null {
     return fetchEngine.platformBinaryName();
@@ -148,7 +181,8 @@ export async function downloadEngine(
  * `shouldSkipAutomaticUpdate`). Activation happens once per window, and the
  * commonest failure - another window or an MCP client still running the old
  * binary - repeats until those close, so warning or re-downloading on every
- * window would be noise. The `codegraph.downloadEngine` command is not held off.
+ * window would be noise. The warning's Update Now action runs the
+ * `codegraph.downloadEngine` command, which is not held off.
  */
 export async function updateEngineIfStale(
     version: string,
@@ -167,32 +201,15 @@ export async function updateEngineIfStale(
         return;
     }
 
-    // The engine holds its own binary open, so it is stopped once every asset
-    // is downloaded and verified - the last possible moment, since stopping it
-    // for the length of a transfer that may fail costs the user a working
-    // engine for nothing - and started again whichever way the install ends.
-    let stopped = false;
-    const beforeInstall = async () => {
-        if (lifecycle?.isRunning()) {
-            stopped = true;
-            await lifecycle.stop();
-        }
-    };
-
+    const swap = engineSwap(lifecycle);
     try {
-        await downloadEngine(version, { beforeInstall });
-        if (previousFailure) {
-            await state.update(UPDATE_FAILURE_KEY, undefined);
-        }
-        if (stopped && lifecycle) {
-            await lifecycle.start();
-        }
+        await downloadEngine(version, { beforeInstall: swap.beforeInstall });
+        await clearUpdateFailure(state);
+        await swap.restart();
     } catch (error) {
-        if (stopped && lifecycle) {
-            // A failed update must not leave the user without an engine: the
-            // binary on disk is still the one that was running.
-            await lifecycle.start().catch(() => { });
-        }
+        // A failed update must not leave the user without an engine: the
+        // binary on disk is still the one that was running.
+        await swap.restart().catch(() => { });
         await state.update(UPDATE_FAILURE_KEY, { version, at: Date.now() } satisfies UpdateFailure);
         if (previousFailure?.version === version) {
             return;
@@ -202,12 +219,19 @@ export async function updateEngineIfStale(
         // install over one version of drift is worse than the drift. "In use"
         // gets its own wording because it is the one failure the user can act
         // on, and reading it as a network problem sends them somewhere useless.
-        void vscode.window.showWarningMessage(
-            isEngineInUse(error)
-                ? `The CodeGraph engine could not be updated because it is still running. ` +
-                  `Close other windows or editors using it, then reload this window to try again.`
-                : `Could not update the CodeGraph engine to ${version}: ${message}`,
-        );
+        void vscode.window
+            .showWarningMessage(
+                isEngineInUse(error)
+                    ? 'The CodeGraph engine could not be updated because it is still running. ' +
+                      'Close other windows or editors using it, then choose Update Now.'
+                    : `Could not update the CodeGraph engine to ${version}: ${message}`,
+                'Update Now',
+            )
+            .then((choice) => {
+                if (choice === 'Update Now') {
+                    void vscode.commands.executeCommand('codegraph.downloadEngine');
+                }
+            });
     }
 }
 
@@ -231,9 +255,13 @@ const RETRY_DELAYS_MS = [2_000, 10_000];
  *
  * Never prompts first (see `downloadEngine`). A failure is shown with a Retry
  * button but not awaited, so activation reports it and moves on instead of
- * waiting on a toast the user may never answer.
+ * waiting on a toast the user may never answer. When [lifecycle] is given, an
+ * engine this window is running is stopped for the swap and started again.
  */
-export async function installEngine(version: string): Promise<EngineInstallResult> {
+export async function installEngine(
+    version: string,
+    lifecycle?: EngineLifecycle,
+): Promise<EngineInstallResult> {
     if (!platformBinaryName()) {
         void vscode.window.showErrorMessage(
             `CodeGraph does not publish an engine for ${os.platform()}-${os.arch()}. ` +
@@ -242,14 +270,16 @@ export async function installEngine(version: string): Promise<EngineInstallResul
         return { failure: 'unsupported_platform', attempts: 0 };
     }
 
+    const swap = engineSwap(lifecycle);
     let attempts = 0;
     let lastError: unknown;
     for (;;) {
         attempts++;
+        let binary: string;
         try {
-            const binary = await downloadEngine(version);
-            return { binary, attempts };
+            binary = await downloadEngine(version, { beforeInstall: swap.beforeInstall });
         } catch (error) {
+            await swap.restart().catch(() => { });
             lastError = error;
             // Retrying cannot fix bytes that fail verification or a binary
             // another process holds open.
@@ -257,7 +287,10 @@ export async function installEngine(version: string): Promise<EngineInstallResul
                 break;
             }
             await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempts - 1]));
+            continue;
         }
+        await swap.restart();
+        return { binary, attempts };
     }
 
     const message = lastError instanceof Error ? lastError.message : String(lastError);
