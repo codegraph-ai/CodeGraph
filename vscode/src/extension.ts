@@ -52,6 +52,9 @@ let rapidCrashTimestamps: number[] = [];
 // deactivate) so the onDidChangeState→Stopped that follows isn't logged
 // as a crash. Consume-once: the handler resets it after skipping.
 let expectedShutdown = false;
+// Set for an intentional start (the engine swap) so the Running transition that
+// follows isn't counted or reported as a crash restart. Consume-once.
+let expectedStart = false;
 
 /**
  * Read + classify the server's crash breadcrumb. The server's panic hook
@@ -288,8 +291,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // below both run long after activation has created and started it.
     const engineLifecycle: EngineLifecycle = {
         isRunning: () => client?.isRunning() ?? false,
-        stop: () => client.stop(),
-        start: () => client.start(),
+        stop: async () => {
+            expectedShutdown = true;
+            await client.stop();
+        },
+        start: async () => {
+            expectedStart = true;
+            try {
+                await client.start();
+            } finally {
+                expectedShutdown = false;
+                expectedStart = false;
+            }
+        },
     };
     context.subscriptions.push(
         vscode.commands.registerCommand('codegraph.downloadEngine', async () => {
@@ -555,6 +569,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 }
             }
             if (evt.newState === 3 && serverUptimeStart > 0) {
+                if (expectedStart) {
+                    expectedStart = false;
+                    serverUptimeStart = Date.now();
+                    return;
+                }
                 serverRestartCount += 1;
                 serverUptimeStart = Date.now();
                 reporter.serverRestart('crash');
