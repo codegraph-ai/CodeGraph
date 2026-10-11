@@ -4,6 +4,15 @@ All notable changes to CodeGraph are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). Releases from 0.18.1 on are tagged
 `vX.Y.Z`; earlier ones `vscode/vX.Y.Z`.
 
+## [0.21.1] - 2026-10-10
+
+VS Code extension only; the engine stays 0.21.0.
+
+- The extension now downloads its engine automatically on first start, with retries.
+  0.21.0 asked first, and most users who auto-updated from 0.19.1 (which bundled the engine) dismissed or never saw the prompt and were left without a working extension.
+  A failed download shows an error with a Retry button.
+- An engine older than the extension expects is updated automatically instead of prompting.
+
 ## [0.21.0] - 2026-10-05
 
 ### Upgrading

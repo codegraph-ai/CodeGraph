@@ -17,7 +17,7 @@ import { registerCodeLens } from './views/codeLensProvider';
 import { CodeGraphAIProvider } from './ai/contextProvider';
 import { CodeGraphToolManager } from './ai/toolManager';
 import { getServerPath, engineSpawnEnv } from './server';
-import { engineVersion, managedEnginePath, offerEngineDownload, offerEngineUpdateIfStale } from './engineDownload';
+import { engineVersion, installEngine, managedEnginePath, updateEngineIfStale } from './engineDownload';
 import { createReporter, setServerEdition, type Reporter } from './telemetry/reporter';
 import { detectMachineProfile } from './telemetry/machineProfile';
 import { handleIndexOutcome, filesIndexed, reportIndexTelemetry } from './funnel';
@@ -267,12 +267,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
     }
 
-    // The one command registered before the engine is resolved, because
-    // declining the download below ends activation and nothing after it -
-    // commands, tree views, lenses - is ever contributed. Without this, a user
-    // who says "Not Now" and later changes their mind has no way back short of
-    // reloading the window and guessing that the prompt returns; the npm
-    // channel ships `codegraph-mcp-fetch-engine` for exactly that case.
+    // The one command registered before the engine is resolved, because a
+    // failed download below ends activation and nothing after it - commands,
+    // tree views, lenses - is ever contributed. It is what the failure toast's
+    // Retry button runs, and the way back for anyone who dismissed that toast;
+    // the npm channel ships `codegraph-mcp-fetch-engine` for the same case.
     //
     // Reloading is what puts a late download to use, so the command offers it -
     // but only when activation did stop early, since in a session that already
@@ -280,7 +279,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(
         vscode.commands.registerCommand('codegraph.downloadEngine', async () => {
             const activationStopped = !client;
-            if (!(await offerEngineDownload(engineVersion()))) {
+            if (!('binary' in (await installEngine(engineVersion())))) {
                 return;
             }
             if (!activationStopped) {
@@ -301,20 +300,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     //
     // The published VSIX no longer bundles engines: shipping all four platform
     // binaries meant a 118 MB download for the one a user can actually run.
-    // When none is found we offer to fetch this platform's engine, which is
-    // also where an npm- or JetBrains-installed engine gets picked up, since
-    // all three channels share ~/.codegraph/bin.
+    // When none is found we fetch this platform's engine, which is also where
+    // an npm- or JetBrains-installed engine gets picked up, since all three
+    // channels share ~/.codegraph/bin.
     let serverInfo: ReturnType<typeof getServerPath>;
     try {
         serverInfo = getServerPath(context);
     } catch {
-        const downloaded = await offerEngineDownload(engineVersion());
-        if (!downloaded) {
+        const started = Date.now();
+        const installed = await installEngine(engineVersion());
+        if (!('binary' in installed)) {
             reporter.activationServerStartResult({
                 outcome: 'spawn_fail',
-                durationMs: 0,
+                durationMs: Date.now() - started,
                 serverBinaryFound: false,
-                errorHint: 'engine_not_installed',
+                errorHint: `engine_${installed.failure}`,
             });
             return;
         }
@@ -323,17 +323,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // The managed engine is found by filename alone, so one installed by an
     // earlier release would otherwise be reused forever. The extension and the
-    // engine ship in lockstep, so offer to bring it up to the engine release
-    // this build expects - only when it is the binary we actually resolved,
+    // engine ship in lockstep, so bring it up to the engine release this
+    // build expects - only when it is the binary we actually resolved,
     // since a pro, bundled or locally built engine is the user's to manage.
     //
     // Not awaited: the engine on disk still runs, and holding activation - and
     // with it the language client, the tree views and the lenses - behind a
     // ~120 MB transfer on a slow network is a far worse trade than one release of
     // drift. The lifecycle callbacks read `client` lazily for the same reason:
-    // by the time the user answers the prompt it has been created and started.
+    // by the time the download finishes it has usually been created and started.
     if (serverInfo.path === managedEnginePath()) {
-        void offerEngineUpdateIfStale(engineVersion(), context.globalState, {
+        void updateEngineIfStale(engineVersion(), context.globalState, {
             isRunning: () => client?.isRunning() ?? false,
             stop: () => client.stop(),
             start: () => client.start(),
