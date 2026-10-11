@@ -275,7 +275,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     //
     // Reloading is what puts a late download to use, so the command offers it -
     // but only when activation did stop early, since in a session that already
-    // has an engine running a reload prompt is noise.
+    // has an engine running a reload prompt is noise and a plain confirmation
+    // is all the user needs.
     context.subscriptions.push(
         vscode.commands.registerCommand('codegraph.downloadEngine', async () => {
             const activationStopped = !client;
@@ -283,6 +284,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 return;
             }
             if (!activationStopped) {
+                void vscode.window.showInformationMessage('CodeGraph engine installed.');
                 return;
             }
             const choice = await vscode.window.showInformationMessage(

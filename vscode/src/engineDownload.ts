@@ -57,8 +57,33 @@ export interface EngineLifecycle {
     start(): Promise<void>;
 }
 
-/** globalState key holding the engine version whose update failure was already reported. */
-const UPDATE_FAILURE_NOTIFIED_KEY = 'codegraph.engineUpdateFailureNotified';
+/** globalState key holding the last failed automatic update, as an `UpdateFailure`. */
+const UPDATE_FAILURE_KEY = 'codegraph.engineUpdateFailure';
+
+/** How long a failed automatic update of one engine version holds off the next attempt. */
+export const UPDATE_RETRY_BACKOFF_MS = 24 * 60 * 60 * 1000;
+
+/** The engine version an automatic update last failed to install, and when. */
+export interface UpdateFailure {
+    version: string;
+    at: number;
+}
+
+/**
+ * Whether the automatic update to [version] should wait out an earlier failure.
+ *
+ * Each attempt is a full ~120 MB transfer plus an engine stop and restart, and
+ * the commonest failure - another window or an MCP client holding the binary -
+ * outlasts many window activations. Only a failure of the same version counts:
+ * a newer release deserves its own attempt straight away.
+ */
+export function shouldSkipAutomaticUpdate(
+    failure: UpdateFailure | undefined,
+    version: string,
+    now: number,
+): boolean {
+    return failure?.version === version && now - failure.at < UPDATE_RETRY_BACKOFF_MS;
+}
 
 /** The engine asset for this platform, or null when none is published. */
 export function platformBinaryName(): string | null {
@@ -118,10 +143,12 @@ export async function downloadEngine(
  * engine as a mismatch would have the two clients reinstall over each other on
  * every launch.
  *
- * A failure is reported once per engine version. Activation happens once per
- * window, and the commonest failure - another window or an MCP client still
- * running the old binary - repeats until those close, so warning on every
- * window would be noise; the next activation simply tries again.
+ * A failure is reported once per engine version and holds off further
+ * automatic attempts at that version for a day (see
+ * `shouldSkipAutomaticUpdate`). Activation happens once per window, and the
+ * commonest failure - another window or an MCP client still running the old
+ * binary - repeats until those close, so warning or re-downloading on every
+ * window would be noise. The `codegraph.downloadEngine` command is not held off.
  */
 export async function updateEngineIfStale(
     version: string,
@@ -133,6 +160,10 @@ export async function updateEngineIfStale(
         return;
     }
     if (!fetchEngine.isStale(managedInstallDir(), version)) {
+        return;
+    }
+    const previousFailure = state.get<UpdateFailure>(UPDATE_FAILURE_KEY);
+    if (shouldSkipAutomaticUpdate(previousFailure, version, Date.now())) {
         return;
     }
 
@@ -150,6 +181,9 @@ export async function updateEngineIfStale(
 
     try {
         await downloadEngine(version, { beforeInstall });
+        if (previousFailure) {
+            await state.update(UPDATE_FAILURE_KEY, undefined);
+        }
         if (stopped && lifecycle) {
             await lifecycle.start();
         }
@@ -159,10 +193,10 @@ export async function updateEngineIfStale(
             // binary on disk is still the one that was running.
             await lifecycle.start().catch(() => { });
         }
-        if (state.get<string>(UPDATE_FAILURE_NOTIFIED_KEY) === version) {
+        await state.update(UPDATE_FAILURE_KEY, { version, at: Date.now() } satisfies UpdateFailure);
+        if (previousFailure?.version === version) {
             return;
         }
-        await state.update(UPDATE_FAILURE_NOTIFIED_KEY, version);
         const message = error instanceof Error ? error.message : String(error);
         // Not fatal: the engine already on disk still runs, and losing a working
         // install over one version of drift is worse than the drift. "In use"
