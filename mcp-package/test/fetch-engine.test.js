@@ -290,6 +290,81 @@ async function run() {
     }
   }
 
+  // --- a transfer that stops making progress ----------------------------
+  // Neither transport times out on its own, so a server (or a proxy) that
+  // goes quiet used to hang the update forever. Silence must reject and leave
+  // nothing behind; a slow transfer that keeps delivering must still finish,
+  // even when it takes far longer than the stall window in total.
+  {
+    const name = platformBinaryName();
+    const content = "engine-".repeat(8);
+    const digest = crypto.createHash("sha256").update(content).digest("hex");
+    const stallTimeoutMs = 300;
+    const cases = [
+      ["no response at all", () => {}],
+      [
+        "headers, then silence",
+        (res) => {
+          res.writeHead(200, { "Content-Length": content.length });
+          res.write(content.slice(0, 4));
+        },
+      ],
+      [
+        "a slow transfer that keeps delivering",
+        (res) => {
+          res.writeHead(200, { "Content-Length": content.length });
+          let sent = 0;
+          const tick = setInterval(() => {
+            res.write(content.slice(sent, sent + 4));
+            sent += 4;
+            if (sent >= content.length) {
+              clearInterval(tick);
+              res.end();
+            }
+          }, stallTimeoutMs / 3);
+        },
+      ],
+    ];
+    for (const [label, serveBinary] of cases) {
+      const dir = scratch();
+      const server = http.createServer((req, res) => {
+        if (req.url.endsWith(".sha256")) {
+          res.writeHead(200);
+          res.end(`${digest}  ${name}\n`);
+          return;
+        }
+        serveBinary(res);
+      });
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const baseUrl = `http://127.0.0.1:${server.address().port}`;
+      const slow = label.startsWith("a slow");
+      try {
+        const started = Date.now();
+        let threw = null;
+        await ensureEngine(VERSION, dir, {
+          baseUrl,
+          stallTimeoutMs,
+          // The sidecar is not under test; serve every asset the same way.
+          platform: "linux",
+          arch: "x64",
+        }).catch((e) => (threw = e));
+        const elapsed = Date.now() - started;
+        if (slow) {
+          check(threw === null, `${label}: completes${threw ? ` (${threw.message})` : ""}`);
+          check(elapsed > stallTimeoutMs * 2, `${label}: outlasts the stall window in total`);
+        } else {
+          check(threw !== null && /no progress/.test(threw.message), `${label}: rejects as stalled`);
+          check(elapsed < stallTimeoutMs * 10, `${label}: gives up promptly (${elapsed} ms)`);
+          check(fs.readdirSync(dir).length === 0, `${label}: leaves nothing behind`);
+        }
+      } finally {
+        server.closeAllConnections();
+        server.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+
   // --- nothing is installed until everything is verified ----------------
   // Installing each asset as its download finishes is how a Windows install
   // ends up with a new engine beside the old onnxruntime.dll: that combination
