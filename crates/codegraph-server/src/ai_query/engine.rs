@@ -54,6 +54,16 @@ pub struct QueryEngine {
     /// built with different embed settings. No embed run will follow, so the
     /// search status must not say embeddings are building.
     daemon_vectors_mismatched: std::sync::atomic::AtomicBool,
+    /// Held for a whole-workspace embedding pass, so a second one waits for
+    /// the first instead of running beside it. A full build publishes its
+    /// vectors only when it finishes, so a pass started meanwhile, such as the
+    /// reindex tool's `embed_missing_symbols`, found nothing embedded and
+    /// embedded everything again, both runs competing for the same cores.
+    /// Run in turn, the second finds the first's vectors.
+    ///
+    /// Per-file updates do not take it: they are small, and a save awaits
+    /// them.
+    workspace_embed: tokio::sync::Mutex<()>,
 }
 
 /// Search status when the attached watcher daemon's vectors were built with
@@ -409,6 +419,7 @@ impl QueryEngine {
             // off for snake_case, where it does not help.
             split_identifiers: std::sync::atomic::AtomicBool::new(true),
             daemon_vectors_mismatched: std::sync::atomic::AtomicBool::new(false),
+            workspace_embed: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -617,6 +628,7 @@ impl QueryEngine {
     ///   [`EMBED_LOW_MEM_MB`] it halves the ONNX batch and forces a
     ///   checkpoint — degrade to slow instead of being OOM-killed.
     pub async fn build_symbol_vectors_checkpointed(&self, slug: Option<&str>) {
+        let _turn = self.workspace_embed.lock().await;
         let engine = match self.vector_engine.read().await.clone() {
             Some(e) => e,
             None => {
@@ -812,6 +824,7 @@ impl QueryEngine {
     /// path after a crash-interrupted embed run: persisted checkpoint vectors
     /// load on startup and this fills in only the remainder.
     pub async fn embed_missing_symbols_checkpointed(&self, slug: Option<&str>) {
+        let _turn = self.workspace_embed.lock().await;
         let engine = match self.vector_engine.read().await.clone() {
             Some(e) => e,
             None => return,

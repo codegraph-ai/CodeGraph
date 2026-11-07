@@ -58,6 +58,7 @@ The engine's command-line flags (`--workspace`, `--exclude`, `--embedding-model`
   "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
   "codegraph.staticModelPath": "",                // only to override the default model2vec model dir
   "codegraph.maxFileSizeKB": 1024,
+  "codegraph.maxThreads": 0,                      // CPU threads for indexing and embeddings; 0 = half the CPUs
   "codegraph.codeLens.enabled": true,             // caller / test / complexity counts above functions
   "codegraph.hover.enabled": true,                // the same stats on hover
   "codegraph.debug": false

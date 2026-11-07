@@ -114,6 +114,7 @@ Pass `--split-identifiers=false` to keep the old behaviour.
 | `--full-body-embedding` | `true` | Embed full function body (~50 lines) for better semantic search and duplicate detection. Takes a value: `--full-body-embedding=false` turns it off |
 | `--split-identifiers` | `true` | Also embed the word-split form of identifiers whose words are run together, so `getUserById` embeds as "get user by id" too. Names already separated by `_` or `-` are left alone, since they tokenise into the same words; a leading or trailing delimiter separates nothing, so `_handleClick` is split like `handleClick`. Takes a value: `--split-identifiers=false` embeds raw names, as releases up to 0.20.1 did |
 | `--max-files <n>` | 5000 | Maximum files to index |
+| `--max-threads <n>` | half the CPUs | Most threads the engine computes on: the embedding model's pool, the pool tokenizing for it, and the async runtime. Also read from `CODEGRAPH_MAX_THREADS`. Lower it to keep the machine responsive while a large workspace embeds |
 | `--profile <name>` | `all` | Filter the exposed MCP tool surface to a named subset (see below) |
 | `--graph-only` | off | Skip embedding generation — build the graph and serve structural tools only. No ONNX model load, 10-50× faster indexing. Semantic search and memory tools unavailable. For CI / one-shot graph queries. |
 | `--run-tool <name>` | — | One-shot mode: index, run a single tool, print its result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |

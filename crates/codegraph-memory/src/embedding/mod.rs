@@ -14,6 +14,32 @@ pub use fastembed_embed::CodeGraphEmbeddingModel;
 
 use crate::error::Result;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static ONNX_THREADS: OnceLock<usize> = OnceLock::new();
+
+/// Threads a process uses for compute when nothing caps it: half the cores,
+/// at least one. Embedding a workspace on every core made the machine
+/// unusable for as long as it ran (issue #29); with idle ONNX threads
+/// blocking rather than spinning, half the cores still embeds faster than
+/// every core did with spinning.
+#[must_use]
+pub fn default_thread_budget() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
+}
+
+/// Size ONNX Runtime's intra-op pool for every model loaded afterwards.
+///
+/// Process-wide, like rayon's global pool: set it once at startup, before the
+/// first model loads. Returns false if it was already set. Without a call,
+/// models use [`default_thread_budget`].
+pub fn set_onnx_threads(threads: usize) -> bool {
+    ONNX_THREADS.set(threads.max(1)).is_ok()
+}
+
+fn onnx_threads() -> usize {
+    *ONNX_THREADS.get_or_init(default_thread_budget)
+}
 
 /// Pluggable embedding backend. The transformer path (fastembed/ONNX) and a
 /// future static (lookup-table) path both implement this; `VectorEngine` holds a

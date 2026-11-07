@@ -43,13 +43,16 @@ pub mod storage;
 pub mod temporal;
 
 // Re-exports for convenience
-pub use embedding::{CodeGraphEmbeddingModel, EmbeddingBackend, VectorEngine};
+pub use docs::{extract_identifiers, DocChunk, DocClaim, DocSearchResult, DocStore};
+pub use embedding::{
+    default_thread_budget, set_onnx_threads, CodeGraphEmbeddingModel, EmbeddingBackend,
+    VectorEngine,
+};
 pub use error::MemoryError;
 pub use node::{
     CodeLink, IssueSeverity, LinkedNodeType, MemoryId, MemoryKind, MemoryNode, MemoryNodeBuilder,
     MemorySource,
 };
 pub use search::{MemorySearch, SearchConfig, SearchResult};
-pub use docs::{extract_identifiers, DocChunk, DocClaim, DocSearchResult, DocStore};
 pub use storage::MemoryStore;
 pub use temporal::TemporalMetadata;

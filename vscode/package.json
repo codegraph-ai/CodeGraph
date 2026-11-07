@@ -314,6 +314,13 @@
                     "scope": "resource",
                     "description": "Directory of the model2vec static model (config.json + tokenizer.json + model.safetensors). Only set this to use a model outside the default location: left empty, the engine resolves ~/.codegraph/static_models/jina-code-static-256, which is where installing @astudioplus/codegraph-mcp from npm puts it. The model is not bundled with the extension - distill one with scripts/distill_static_model.py if you have neither."
                 },
+                "codegraph.maxThreads": {
+                    "type": "integer",
+                    "default": 0,
+                    "minimum": 0,
+                    "scope": "machine",
+                    "markdownDescription": "Most CPU threads the engine uses for indexing and embeddings. `0` uses half the logical CPUs. Lower it to keep the machine responsive while a large workspace embeds, raise it to embed faster. Takes effect after the window is reloaded."
+                },
                 "codegraph.fullBodyEmbedding": {
                     "type": "boolean",
                     "default": true,

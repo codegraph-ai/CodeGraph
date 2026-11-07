@@ -37,6 +37,8 @@ export function getServerPath(context: vscode.ExtensionContext): ServerInfo {
 /**
  * Environment for the spawned engine process.
  *
+ * CODEGRAPH_MAX_THREADS carries `codegraph.maxThreads` when it is set.
+ *
  * CODEGRAPH_STATIC_MODEL is set only when the user names a directory.
  *
  * It used to default to <extensionPath>/bin/jina-code-static-256, which
@@ -59,6 +61,12 @@ export function engineSpawnEnv(
     const staticModelPath = cfg.get<string>('staticModelPath');
     if (cfg.get<string>('embeddingModel') === 'static' && staticModelPath) {
         spawnEnv.CODEGRAPH_STATIC_MODEL = staticModelPath;
+    }
+    // 0 (the default) leaves the engine's own default, half the CPUs, or a
+    // CODEGRAPH_MAX_THREADS the user exported themselves.
+    const maxThreads = cfg.get<number>('maxThreads');
+    if (typeof maxThreads === 'number' && Number.isInteger(maxThreads) && maxThreads > 0) {
+        spawnEnv.CODEGRAPH_MAX_THREADS = String(maxThreads);
     }
     return spawnEnv;
 }
