@@ -84,6 +84,7 @@ class CodeGraphConnectionProvider(private val project: Project) : OSProcessStrea
             "excludePatterns" to settings.excludePatterns.toList(),
             "indexPaths" to settings.indexPaths.toList(),
             "maxFileSizeKB" to settings.maxFileSizeKB,
+            "maxFiles" to settings.maxFiles,
             "embeddingModel" to settings.embeddingModel,
             "staticModelPath" to settings.staticModelPath.ifBlank { null },
             "fullBodyEmbedding" to settings.fullBodyEmbedding,

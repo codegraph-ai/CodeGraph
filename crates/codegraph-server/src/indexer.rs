@@ -192,12 +192,15 @@ impl Default for IndexConfig {
             exclude_patterns: Self::default_exclude_patterns(),
             max_file_size_bytes: 1024 * 1024, // 1 MiB
             max_depth: 20,
-            max_files: 5_000,
+            max_files: Self::DEFAULT_MAX_FILES,
         }
     }
 }
 
 impl IndexConfig {
+    /// Files indexed per scan when neither the client nor `--max-files` says otherwise.
+    pub const DEFAULT_MAX_FILES: usize = 5_000;
+
     /// The hardcoded list of directories that are always excluded.
     ///
     /// Three categories:
@@ -639,7 +642,8 @@ impl Indexer {
             for entry in entries.flatten() {
                 if counter.load(Ordering::Relaxed) >= config.max_files {
                     tracing::warn!(
-                        "Reached max indexed file limit of {}; stopping",
+                        "Reached max indexed file limit of {}; stopping. Raise it with \
+                         --max-files or the codegraph.maxFiles setting",
                         config.max_files
                     );
                     break;

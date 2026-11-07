@@ -51,7 +51,7 @@ pub mod runtime_deps;
 pub mod telemetry;
 pub mod watcher;
 
-pub use backend::CodeGraphBackend;
+pub use backend::{CodeGraphBackend, LaunchOptions};
 pub use error::LspError;
 pub use git_mining::{GitMiner, MiningConfig, MiningResult};
 pub use memory::MemoryManager;

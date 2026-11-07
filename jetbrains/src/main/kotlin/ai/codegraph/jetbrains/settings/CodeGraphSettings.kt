@@ -55,6 +55,9 @@ class CodeGraphSettings : PersistentStateComponent<CodeGraphSettings.State> {
         @JvmField var indexPaths: MutableList<String> = mutableListOf()
         @JvmField var maxFileSizeKB: Int = 1024
 
+        /** Files indexed per workspace; 0 leaves it to the engine's `--max-files`. */
+        @JvmField var maxFiles: Int = 0
+
         /** One of `bge-small`, `granite-97m`, `static`. */
         @JvmField var embeddingModel: String = "bge-small"
 
