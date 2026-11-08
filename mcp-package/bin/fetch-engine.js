@@ -214,19 +214,30 @@ const STALL_TIMEOUT_MS = 60_000;
 
 /**
  * Abort `request` with `fail` once it has gone `ms` without `touch()`.
- * `stop()` disarms it; every way the caller settles must call it, or the timer
- * keeps an otherwise finished process alive until it fires.
+ *
+ * Settling latches the guard, because the body does not stop arriving just
+ * because the caller is done with it: a settle that only cleared the timer
+ * would see the next chunk arm a fresh one and hold an otherwise finished
+ * process alive for another `ms`. `stop()` settles a transfer whose bytes the
+ * caller already has; `abort()` settles one that failed, and hangs up so the
+ * rest of the body stops arriving at all.
  */
 function stallGuard(url, ms, fail) {
   let timer = null;
   let request = null;
-  const touch = () => {
+  let settled = false;
+  const settle = (hangUp) => {
+    settled = true;
     clearTimeout(timer);
-    timer = setTimeout(() => {
-      const error = new Error(`no progress for ${ms / 1000}s fetching ${url}`);
-      if (request) request.destroy(error);
-      fail(error);
-    }, ms);
+    if (hangUp && request) request.destroy();
+  };
+  const touch = () => {
+    if (settled) return;
+    clearTimeout(timer);
+    timer = setTimeout(
+      () => fail(new Error(`no progress for ${ms / 1000}s fetching ${url}`)),
+      ms
+    );
   };
   return {
     watch(req) {
@@ -235,7 +246,8 @@ function stallGuard(url, ms, fail) {
       return req;
     },
     touch,
-    stop: () => clearTimeout(timer),
+    stop: () => settle(false),
+    abort: () => settle(true),
   };
 }
 
@@ -254,7 +266,7 @@ function download(url, destination, options = {}) {
      * file with a live handle on it cannot be unlinked on Windows.
      */
     const fail = (error) => {
-      guard.stop();
+      guard.abort();
       if (file) file.destroy();
       reject(error);
     };
@@ -302,7 +314,7 @@ function readText(url, options = {}) {
   return new Promise((resolve, reject) => {
     if (redirects < 0) return reject(new Error(`too many redirects for ${url}`));
     const fail = (error) => {
-      guard.stop();
+      guard.abort();
       reject(error);
     };
     const done = (value) => {

@@ -300,32 +300,43 @@ async function run() {
     const content = "engine-".repeat(8);
     const digest = crypto.createHash("sha256").update(content).digest("hex");
     const stallTimeoutMs = 300;
+    // The slow case gets a wider window and ticks at a tenth of it, so a
+    // scheduling hiccup on a loaded machine cannot be mistaken for silence
+    // while the transfer still takes several windows in total.
+    const slowStallTimeoutMs = 500;
     const cases = [
-      ["no response at all", () => {}],
-      [
-        "headers, then silence",
-        (res) => {
+      { label: "no response at all", serveBinary: () => {} },
+      {
+        label: "headers, then silence",
+        serveBinary: (res) => {
           res.writeHead(200, { "Content-Length": content.length });
           res.write(content.slice(0, 4));
         },
-      ],
-      [
-        "a slow transfer that keeps delivering",
-        (res) => {
+      },
+      {
+        label: "a slow transfer that keeps delivering",
+        slow: true,
+        stallTimeoutMs: slowStallTimeoutMs,
+        serveBinary: (res) => {
           res.writeHead(200, { "Content-Length": content.length });
           let sent = 0;
           const tick = setInterval(() => {
-            res.write(content.slice(sent, sent + 4));
-            sent += 4;
+            res.write(content.slice(sent, sent + 2));
+            sent += 2;
             if (sent >= content.length) {
               clearInterval(tick);
               res.end();
             }
-          }, stallTimeoutMs / 3);
+          }, slowStallTimeoutMs / 10);
         },
-      ],
+      },
     ];
-    for (const [label, serveBinary] of cases) {
+    for (const {
+      label,
+      serveBinary,
+      slow = false,
+      stallTimeoutMs: caseStallMs = stallTimeoutMs,
+    } of cases) {
       const dir = scratch();
       const server = http.createServer((req, res) => {
         if (req.url.endsWith(".sha256")) {
@@ -337,13 +348,12 @@ async function run() {
       });
       await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
       const baseUrl = `http://127.0.0.1:${server.address().port}`;
-      const slow = label.startsWith("a slow");
       try {
         const started = Date.now();
         let threw = null;
         await ensureEngine(VERSION, dir, {
           baseUrl,
-          stallTimeoutMs,
+          stallTimeoutMs: caseStallMs,
           // The sidecar is not under test; serve every asset the same way.
           platform: "linux",
           arch: "x64",
@@ -351,10 +361,10 @@ async function run() {
         const elapsed = Date.now() - started;
         if (slow) {
           check(threw === null, `${label}: completes${threw ? ` (${threw.message})` : ""}`);
-          check(elapsed > stallTimeoutMs * 2, `${label}: outlasts the stall window in total`);
+          check(elapsed > caseStallMs * 2, `${label}: outlasts the stall window in total`);
         } else {
           check(threw !== null && /no progress/.test(threw.message), `${label}: rejects as stalled`);
-          check(elapsed < stallTimeoutMs * 10, `${label}: gives up promptly (${elapsed} ms)`);
+          check(elapsed < caseStallMs * 10, `${label}: gives up promptly (${elapsed} ms)`);
           check(fs.readdirSync(dir).length === 0, `${label}: leaves nothing behind`);
         }
       } finally {
@@ -362,6 +372,74 @@ async function run() {
         server.close();
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    }
+  }
+
+  // --- a failed transfer hangs up ---------------------------------------
+  // The body does not stop arriving just because the download failed. While
+  // the response keeps flowing, a settle that only disarmed the stall timer
+  // let the next chunk arm a fresh one, so the rest of a ~120 MB transfer
+  // still arrived and the process stayed alive for another stall window after
+  // an install that had already failed - inside an npm postinstall, a hang.
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    const stallTimeoutMs = 300;
+    const digest = crypto.createHash("sha256").update("engine").digest("hex");
+    let closedAt = null;
+    const server = http.createServer((req, res) => {
+      if (req.url.endsWith(".sha256")) {
+        res.writeHead(200);
+        res.end(`${digest}  ${name}\n`);
+        return;
+      }
+      // Promise far more than the client will take and keep delivering it:
+      // only the client hanging up can end this transfer.
+      res.writeHead(200, { "Content-Length": 1 << 20 });
+      const tick = setInterval(() => res.write("engine"), stallTimeoutMs / 10);
+      res.on("close", () => {
+        clearInterval(tick);
+        if (closedAt === null) closedAt = Date.now();
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    // A staged file that cannot be opened is the reachable form of a failure
+    // that arrives mid-body: the write stream errors while bytes keep coming.
+    fs.chmodSync(dir, 0o500);
+    let readOnly = false;
+    try {
+      fs.accessSync(dir, fs.constants.W_OK);
+    } catch {
+      readOnly = true;
+    }
+    try {
+      if (!readOnly) {
+        console.log("SKIP a failed transfer hangs up (cannot make a directory read-only here)");
+      } else {
+        let threw = null;
+        await ensureEngine(VERSION, dir, {
+          baseUrl,
+          stallTimeoutMs,
+          platform: "linux",
+          arch: "x64",
+        }).catch((e) => (threw = e));
+        const failedAt = Date.now();
+        check(threw !== null, "an unwritable staging directory fails the install");
+        const deadline = failedAt + stallTimeoutMs * 3;
+        while (closedAt === null && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        check(
+          closedAt !== null && closedAt - failedAt < stallTimeoutMs,
+          `a failed transfer hangs up at once (${closedAt === null ? "still connected" : `${closedAt - failedAt} ms`})`
+        );
+      }
+    } finally {
+      fs.chmodSync(dir, 0o700);
+      server.closeAllConnections();
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   }
 

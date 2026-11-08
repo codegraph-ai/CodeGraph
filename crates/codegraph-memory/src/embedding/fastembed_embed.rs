@@ -745,6 +745,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads the BGE Small EN v1.5 model"]
     fn bge_small_matches_fastembed() {
         assert_matches_fastembed(CodeGraphEmbeddingModel::BgeSmall);
     }
