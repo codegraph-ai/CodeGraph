@@ -4,12 +4,18 @@
 //! AST visitor for extracting PHP entities
 
 use codegraph_parser_api::{
-    CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics, FunctionEntity,
-    ImplementationRelation, ImportRelation, InheritanceRelation, Parameter, TraitEntity,
-    BODY_PREFIX_MAX_CHARS,
-    truncate_body_prefix,
+    truncate_body_prefix, CallRelation, ClassEntity, ComplexityBuilder, ComplexityMetrics,
+    FunctionEntity, ImplementationRelation, ImportRelation, InheritanceRelation, Parameter,
+    TraitEntity,
 };
+use std::collections::HashMap;
 use tree_sitter::Node;
+
+/// Type names that can never be the receiver class of a method call.
+const NON_CLASS_TYPES: &[&str] = &[
+    "array", "bool", "callable", "false", "float", "int", "iterable", "mixed", "never", "null",
+    "object", "string", "true", "void",
+];
 
 pub struct PhpVisitor<'a> {
     pub source: &'a [u8],
@@ -23,6 +29,17 @@ pub struct PhpVisitor<'a> {
     current_namespace: Option<String>,
     current_class: Option<String>,
     current_function: Option<String>,
+    /// `use A\B\Screen;` maps `Screen` to `A\B\Screen` for the rest of the namespace.
+    class_aliases: HashMap<String, String>,
+    /// `use function A\helper;` maps `helper` to `A\helper`.
+    function_aliases: HashMap<String, String>,
+    /// Fully qualified base class of the class being visited, for `parent::`.
+    current_parent_class: Option<String>,
+    /// Declared property types of the class being visited, for `$this->prop->m()`.
+    property_types: HashMap<String, String>,
+    /// Classes of the variables in the function being visited. `None` marks a
+    /// variable seen with more than one class, which is not a known receiver.
+    local_types: HashMap<String, Option<String>>,
 }
 
 impl<'a> PhpVisitor<'a> {
@@ -39,6 +56,11 @@ impl<'a> PhpVisitor<'a> {
             current_namespace: None,
             current_class: None,
             current_function: None,
+            class_aliases: HashMap::new(),
+            function_aliases: HashMap::new(),
+            current_parent_class: None,
+            property_types: HashMap::new(),
+            local_types: HashMap::new(),
         }
     }
 
@@ -95,7 +117,10 @@ impl<'a> PhpVisitor<'a> {
                 false // Skip anonymous functions
             }
             // Call expressions - extract call relationships
-            "function_call_expression" | "member_call_expression" | "scoped_call_expression" => {
+            "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression" => {
                 self.visit_call_expression(node);
                 true // Recurse to find nested calls
             }
@@ -133,9 +158,7 @@ impl<'a> PhpVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -162,11 +185,13 @@ impl<'a> PhpVisitor<'a> {
         // Set current function context and visit body to extract calls
         let previous_function = self.current_function.take();
         self.current_function = Some(qualified_name);
+        let previous_locals = self.enter_function_scope(node);
 
         if let Some(body) = node.child_by_field_name("body") {
             self.visit_function_body(body);
         }
 
+        self.local_types = previous_locals;
         self.current_function = previous_function;
     }
 
@@ -190,9 +215,7 @@ impl<'a> PhpVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let func = FunctionEntity {
@@ -216,14 +239,18 @@ impl<'a> PhpVisitor<'a> {
 
         self.functions.push(func);
 
-        // Set current function context and visit body to extract calls
+        // Set current function context and visit body to extract calls.
+        // A method's identity is its class plus its name: two classes' `render`
+        // are different symbols, and keying calls by the bare name merged them.
         let previous_function = self.current_function.take();
-        self.current_function = Some(name);
+        self.current_function = Some(method_key(self.current_class.as_deref(), &name));
+        let previous_locals = self.enter_function_scope(node);
 
         if let Some(body) = node.child_by_field_name("body") {
             self.visit_function_body(body);
         }
 
+        self.local_types = previous_locals;
         self.current_function = previous_function;
     }
 
@@ -248,7 +275,7 @@ impl<'a> PhpVisitor<'a> {
                 let mut bc_cursor = child.walk();
                 for bc_child in child.named_children(&mut bc_cursor) {
                     if bc_child.kind() == "name" || bc_child.kind() == "qualified_name" {
-                        let base_name = self.node_text(bc_child);
+                        let base_name = self.resolve_class_name(&self.node_text(bc_child));
                         base_classes.push(base_name.clone());
                         self.inheritance.push(InheritanceRelation {
                             child: qualified_name.clone(),
@@ -271,9 +298,7 @@ impl<'a> PhpVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         let class_entity = ClassEntity {
@@ -293,17 +318,23 @@ impl<'a> PhpVisitor<'a> {
             body_prefix,
         };
 
+        let parent_class = class_entity.base_classes.first().cloned();
         self.classes.push(class_entity);
 
         // Set current class context for method extraction
         let previous_class = self.current_class.take();
         self.current_class = Some(qualified_name);
+        let previous_parent = std::mem::replace(&mut self.current_parent_class, parent_class);
+        let previous_properties = std::mem::take(&mut self.property_types);
 
         // Visit class body to extract methods and trait uses
         if let Some(body) = node.child_by_field_name("body") {
+            self.collect_property_types(body);
             self.visit_class_body(body);
         }
 
+        self.property_types = previous_properties;
+        self.current_parent_class = previous_parent;
         self.current_class = previous_class;
     }
 
@@ -323,7 +354,7 @@ impl<'a> PhpVisitor<'a> {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.kind() == "name" || child.kind() == "qualified_name" {
-                    let trait_name = self.node_text(child);
+                    let trait_name = self.resolve_class_name(&self.node_text(child));
                     self.implementations.push(ImplementationRelation {
                         implementor: class_name.clone(),
                         trait_name,
@@ -347,7 +378,7 @@ impl<'a> PhpVisitor<'a> {
         if let Some(base_clause) = node.child_by_field_name("base_clause") {
             for child in base_clause.children(&mut base_clause.walk()) {
                 if child.kind() == "name" || child.kind() == "qualified_name" {
-                    parent_traits.push(self.node_text(child));
+                    parent_traits.push(self.resolve_class_name(&self.node_text(child)));
                 }
             }
         }
@@ -437,9 +468,7 @@ impl<'a> PhpVisitor<'a> {
             .child_by_field_name("body")
             .and_then(|b| b.utf8_text(self.source).ok())
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                truncate_body_prefix(t)
-            })
+            .map(truncate_body_prefix)
             .map(|t| t.to_string());
 
         // PHP 8.1 enums are treated as classes
@@ -482,15 +511,40 @@ impl<'a> PhpVisitor<'a> {
     fn visit_namespace(&mut self, node: Node) {
         let name = node.child_by_field_name("name").map(|n| self.node_text(n));
 
+        // Imports belong to the namespace that declares them.
+        self.class_aliases.clear();
+        self.function_aliases.clear();
         self.current_namespace = name;
     }
 
     fn visit_use(&mut self, node: Node) {
-        // Extract use statements (imports)
+        // `use function A\{x, y};` puts the kind on the declaration,
+        // `use function A\x;` on the clause.
+        let declared_kind = node
+            .child_by_field_name("type")
+            .map(|n| self.node_text(n).to_ascii_lowercase());
         let mut cursor = node.walk();
+        let mut prefix: Option<String> = None;
         for child in node.children(&mut cursor) {
-            if child.kind() == "namespace_use_clause" {
-                self.extract_use_clause(child);
+            match child.kind() {
+                // The shared prefix of a group use: `use A\B\{Foo, Bar};`
+                "namespace_name" => prefix = Some(self.node_text(child)),
+                "namespace_use_clause" => {
+                    self.extract_use_clause(child, None, declared_kind.as_deref())
+                }
+                "namespace_use_group" => {
+                    let mut group_cursor = child.walk();
+                    for clause in child.children(&mut group_cursor) {
+                        if clause.kind() == "namespace_use_clause" {
+                            self.extract_use_clause(
+                                clause,
+                                prefix.as_deref(),
+                                declared_kind.as_deref(),
+                            );
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -682,12 +736,26 @@ impl<'a> PhpVisitor<'a> {
         text.trim_matches(|c| c == '\'' || c == '"').to_string()
     }
 
-    fn extract_use_clause(&mut self, node: Node) {
+    fn extract_use_clause(
+        &mut self,
+        node: Node,
+        prefix: Option<&str>,
+        declared_kind: Option<&str>,
+    ) {
         let mut cursor = node.walk();
         let mut imported = String::new();
         let mut alias = None;
+        let kind = node
+            .child_by_field_name("type")
+            .map(|n| self.node_text(n).to_ascii_lowercase())
+            .or_else(|| declared_kind.map(str::to_string));
+        let alias_node = node.child_by_field_name("alias");
 
         for child in node.children(&mut cursor) {
+            if alias_node == Some(child) {
+                alias = Some(self.node_text(child));
+                continue;
+            }
             match child.kind() {
                 "qualified_name" | "name" => {
                     imported = self.node_text(child);
@@ -706,6 +774,23 @@ impl<'a> PhpVisitor<'a> {
         }
 
         if !imported.is_empty() {
+            let imported = match prefix {
+                Some(prefix) => format!("{prefix}\\{imported}"),
+                None => imported,
+            };
+            let imported = imported.trim_start_matches('\\').to_string();
+            let local = alias
+                .clone()
+                .unwrap_or_else(|| last_segment(&imported).to_string());
+            match kind.as_deref() {
+                Some("function") => {
+                    self.function_aliases.insert(local, imported.clone());
+                }
+                Some("const") => {}
+                _ => {
+                    self.class_aliases.insert(local, imported.clone());
+                }
+            }
             let import = ImportRelation {
                 importer: self
                     .current_namespace
@@ -722,11 +807,12 @@ impl<'a> PhpVisitor<'a> {
 
     /// Visit a call expression and extract the call relationship
     fn visit_call_expression(&mut self, node: Node) {
-        // Only record calls if we're inside a function/method
-        let caller = match &self.current_function {
-            Some(name) => name.clone(),
-            None => return,
-        };
+        // A call outside any function runs when the file is executed - the
+        // usual shape of a template - so the file itself is its caller.
+        let caller = self
+            .current_function
+            .clone()
+            .unwrap_or_else(|| FILE_SCOPE_CALLER.to_string());
 
         let callee = self.extract_callee_name(node);
 
@@ -756,10 +842,15 @@ impl<'a> PhpVisitor<'a> {
             "function_call_expression" => {
                 if let Some(function_node) = node.child_by_field_name("function") {
                     match function_node.kind() {
-                        "name" => self.node_text(function_node),
+                        "name" => {
+                            let name = self.node_text(function_node);
+                            // An unqualified call keeps its bare name: PHP falls
+                            // back from the current namespace to the global one
+                            // at run time, so only an import pins it down.
+                            self.function_aliases.get(&name).cloned().unwrap_or(name)
+                        }
                         "qualified_name" => {
-                            // Fully qualified name like \Namespace\func()
-                            self.node_text(function_node)
+                            self.resolve_function_name(&self.node_text(function_node))
                         }
                         "variable_name" => {
                             // Dynamic call like $callback()
@@ -771,12 +862,21 @@ impl<'a> PhpVisitor<'a> {
                     String::new()
                 }
             }
-            // Method call: $obj->method(), $this->method()
-            "member_call_expression" => {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    self.node_text(name_node)
-                } else {
-                    String::new()
+            // Method call: $obj->method(), $this->method(), $obj?->method()
+            "member_call_expression" | "nullsafe_member_call_expression" => {
+                let Some(name_node) = node.child_by_field_name("name") else {
+                    return String::new();
+                };
+                let method = self.node_text(name_node);
+                // Qualify the call only when the receiver's class is certain.
+                // An unknown receiver keeps the bare name rather than being
+                // pinned to whichever same-named method happens to exist.
+                match node
+                    .child_by_field_name("object")
+                    .and_then(|object| self.receiver_class(object))
+                {
+                    Some(class) => method_key(Some(&class), &method),
+                    None => method,
                 }
             }
             // Static method call: Class::method(), self::method()
@@ -789,11 +889,15 @@ impl<'a> PhpVisitor<'a> {
                         .unwrap_or_default();
                     let method = self.node_text(name_node);
 
-                    // Return as Class::method for static calls
-                    if scope.is_empty() || scope == "self" || scope == "static" {
+                    if scope.is_empty() || scope.starts_with('$') {
+                        return method;
+                    }
+                    let class = self.resolve_class_name(&scope);
+                    // `parent::` with no known base class stays a bare name.
+                    if class.eq_ignore_ascii_case("parent") {
                         method
                     } else {
-                        format!("{}::{}", scope, method)
+                        method_key(Some(&class), &method)
                     }
                 } else {
                     String::new()
@@ -810,9 +914,14 @@ impl<'a> PhpVisitor<'a> {
             match child.kind() {
                 "function_call_expression"
                 | "member_call_expression"
+                | "nullsafe_member_call_expression"
                 | "scoped_call_expression" => {
                     self.visit_call_expression(child);
                     // Also recurse into arguments for nested calls
+                    self.visit_function_body(child);
+                }
+                "assignment_expression" => {
+                    self.record_assignment(child);
                     self.visit_function_body(child);
                 }
                 _ => {
@@ -831,7 +940,7 @@ impl<'a> PhpVisitor<'a> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "name" || child.kind() == "qualified_name" {
-                let interface_name = self.node_text(child);
+                let interface_name = self.resolve_class_name(&self.node_text(child));
                 implemented_traits.push(interface_name.clone());
                 self.implementations.push(ImplementationRelation {
                     implementor: class_name.to_string(),
@@ -1067,6 +1176,209 @@ impl<'a> PhpVisitor<'a> {
         }
     }
 
+    /// Fully qualified class for a class name as written at this point in the
+    /// file, following PHP's rules: a leading `\` is absolute, an imported
+    /// first segment expands to its import, and anything else is relative to
+    /// the current namespace. `self`/`static`/`parent` resolve to the class
+    /// context; `parent` stays as written when the base class is unknown.
+    fn resolve_class_name(&self, name: &str) -> String {
+        if let Some(absolute) = name.strip_prefix('\\') {
+            return absolute.to_string();
+        }
+        match name.to_ascii_lowercase().as_str() {
+            "self" | "static" => {
+                return self
+                    .current_class
+                    .clone()
+                    .unwrap_or_else(|| name.to_string())
+            }
+            "parent" => {
+                return self
+                    .current_parent_class
+                    .clone()
+                    .unwrap_or_else(|| name.to_string())
+            }
+            _ => {}
+        }
+        let (first, rest) = match name.split_once('\\') {
+            Some((first, rest)) => (first, Some(rest)),
+            None => (name, None),
+        };
+        if let Some(imported) = self.class_aliases.get(first) {
+            return match rest {
+                Some(rest) => format!("{imported}\\{rest}"),
+                None => imported.clone(),
+            };
+        }
+        self.qualify_name(name)
+    }
+
+    /// Fully qualified name of a function called by a qualified name.
+    ///
+    /// `\foo()` and `\A\foo()` are absolute; `A\foo()` is relative to an
+    /// imported namespace `A` or else to the current namespace. Function
+    /// declarations are keyed without a leading `\`, so the call must be too:
+    /// keeping it was why `\helper()` never matched `helper`.
+    fn resolve_function_name(&self, name: &str) -> String {
+        if let Some(absolute) = name.strip_prefix('\\') {
+            return absolute.to_string();
+        }
+        if let Some((first, rest)) = name.split_once('\\') {
+            if let Some(imported) = self.class_aliases.get(first) {
+                return format!("{imported}\\{rest}");
+            }
+        }
+        self.qualify_name(name)
+    }
+
+    /// A class named by a type declaration, if it names exactly one class.
+    fn class_from_type(&self, type_node: Node) -> Option<String> {
+        let text = self.node_text(type_node);
+        let text = text.trim().trim_start_matches('?');
+        if text.is_empty() || text.contains(['|', '&', '(']) {
+            return None;
+        }
+        if NON_CLASS_TYPES.contains(&text.to_ascii_lowercase().as_str()) {
+            return None;
+        }
+        Some(self.resolve_class_name(text))
+    }
+
+    /// The class instantiated by a `new X(...)` expression.
+    fn created_class(&self, creation: Node) -> Option<String> {
+        let mut cursor = creation.walk();
+        let class = creation
+            .named_children(&mut cursor)
+            .find(|c| c.kind() == "name" || c.kind() == "qualified_name")?;
+        Some(self.resolve_class_name(&self.node_text(class)))
+    }
+
+    /// The class of a method call's receiver, when it is certain.
+    fn receiver_class(&self, object: Node) -> Option<String> {
+        match object.kind() {
+            "variable_name" => {
+                let name = self.node_text(object);
+                if name == "$this" {
+                    self.current_class.clone()
+                } else {
+                    self.local_types.get(&name).cloned().flatten()
+                }
+            }
+            "parenthesized_expression" => object
+                .named_child(0)
+                .and_then(|inner| self.receiver_class(inner)),
+            "object_creation_expression" => self.created_class(object),
+            "member_access_expression" | "nullsafe_member_access_expression" => {
+                let owner = object.child_by_field_name("object")?;
+                if owner.kind() != "variable_name" || self.node_text(owner) != "$this" {
+                    return None;
+                }
+                let property = self.node_text(object.child_by_field_name("name")?);
+                self.property_types.get(&property).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    /// Start a function scope whose known variables are its typed parameters.
+    /// Returns the enclosing scope's variables for the caller to restore.
+    fn enter_function_scope(&mut self, node: Node) -> HashMap<String, Option<String>> {
+        let mut locals = HashMap::new();
+        if let Some(params) = node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for param in params.named_children(&mut cursor) {
+                let (Some(name), Some(type_node)) = (
+                    param.child_by_field_name("name"),
+                    param.child_by_field_name("type"),
+                ) else {
+                    continue;
+                };
+                if let Some(class) = self.class_from_type(type_node) {
+                    locals.insert(self.node_text(name), Some(class));
+                }
+            }
+        }
+        std::mem::replace(&mut self.local_types, locals)
+    }
+
+    /// Learn a variable's class from `$x = new X(...)`. A variable assigned
+    /// two different classes in one function has no single receiver class.
+    fn record_assignment(&mut self, node: Node) {
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            return;
+        };
+        if left.kind() != "variable_name" {
+            return;
+        }
+        let variable = self.node_text(left);
+        let class = if right.kind() == "object_creation_expression" {
+            self.created_class(right)
+        } else {
+            None
+        };
+        let merged = match (self.local_types.get(&variable), class) {
+            (None, class) => class,
+            (Some(Some(known)), Some(class)) if *known == class => Some(class),
+            _ => None,
+        };
+        self.local_types.insert(variable, merged);
+    }
+
+    /// Declared types of the class's properties, including promoted
+    /// constructor parameters, so `$this->repo->find()` has a receiver.
+    fn collect_property_types(&mut self, body: Node) {
+        let mut cursor = body.walk();
+        for member in body.named_children(&mut cursor) {
+            match member.kind() {
+                "property_declaration" => {
+                    let Some(class) = member
+                        .child_by_field_name("type")
+                        .and_then(|t| self.class_from_type(t))
+                    else {
+                        continue;
+                    };
+                    let mut elements = member.walk();
+                    for element in member.named_children(&mut elements) {
+                        if element.kind() != "property_element" {
+                            continue;
+                        }
+                        if let Some(var) = element.child_by_field_name("name") {
+                            let name = self.node_text(var);
+                            self.property_types
+                                .insert(name.trim_start_matches('$').to_string(), class.clone());
+                        }
+                    }
+                }
+                "method_declaration" => {
+                    let Some(params) = member.child_by_field_name("parameters") else {
+                        continue;
+                    };
+                    let mut params_cursor = params.walk();
+                    for param in params.named_children(&mut params_cursor) {
+                        if param.kind() != "property_promotion_parameter" {
+                            continue;
+                        }
+                        let (Some(var), Some(type_node)) = (
+                            param.child_by_field_name("name"),
+                            param.child_by_field_name("type"),
+                        ) else {
+                            continue;
+                        };
+                        if let Some(class) = self.class_from_type(type_node) {
+                            let name = self.node_text(var);
+                            self.property_types
+                                .insert(name.trim_start_matches('$').to_string(), class);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn qualify_name(&self, name: &str) -> String {
         if let Some(ref ns) = self.current_namespace {
             format!("{}\\{}", ns, name)
@@ -1074,6 +1386,25 @@ impl<'a> PhpVisitor<'a> {
             name.to_string()
         }
     }
+}
+
+/// Caller key for calls made at file scope; the mapper binds it to the file
+/// node. Not a valid PHP identifier, so it cannot collide with a function.
+pub(crate) const FILE_SCOPE_CALLER: &str = "<file>";
+
+/// The key a method is called and stored by: `Namespace\Class::method`.
+///
+/// Shared with the mapper, which must store methods under exactly the name
+/// calls to them are recorded with.
+pub(crate) fn method_key(class: Option<&str>, method: &str) -> String {
+    match class {
+        Some(class) => format!("{class}::{method}"),
+        None => method.to_string(),
+    }
+}
+
+fn last_segment(name: &str) -> &str {
+    name.rsplit('\\').next().unwrap_or(name)
 }
 
 #[cfg(test)]
@@ -1286,6 +1617,78 @@ function another_func() {}
             .any(|c| c.caller == "caller" && c.callee == "another_func"));
     }
 
+    fn callees_of<'v>(visitor: &'v PhpVisitor<'_>, caller: &str) -> Vec<&'v str> {
+        visitor
+            .calls
+            .iter()
+            .filter(|c| c.caller == caller)
+            .map(|c| c.callee.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn calls_are_named_the_way_php_resolves_them() {
+        let source = br#"<?php
+namespace App\Web;
+use App\Model\{User, Post as Article};
+use function App\Support\format;
+class Page extends Base {
+    public function run(?User $user, int $n) {
+        $article = new Article();
+        $article->save();
+        $user?->refresh();
+        parent::boot();
+        static::make();
+        \strlen('x');
+        \App\Support\slug('x');
+        Util\clean('x');
+        format('x');
+        trim('x');
+        $mixed = new User();
+        $mixed = new Article();
+        $mixed->save();
+    }
+}
+"#;
+        let visitor = parse_and_visit(source);
+        let callees = callees_of(&visitor, "App\\Web\\Page::run");
+        for expected in [
+            "App\\Model\\Post::save",
+            "App\\Model\\User::refresh",
+            "App\\Web\\Base::boot",
+            "App\\Web\\Page::make",
+            "strlen",
+            "App\\Support\\slug",
+            "App\\Web\\Util\\clean",
+            "App\\Support\\format",
+            "trim",
+        ] {
+            assert!(
+                callees.contains(&expected),
+                "{expected} missing from {callees:?}"
+            );
+        }
+        // A variable holding two classes is not a known receiver.
+        assert!(callees.contains(&"save"), "{callees:?}");
+    }
+
+    #[test]
+    fn group_use_imports_keep_their_prefix() {
+        let visitor = parse_and_visit(b"<?php\nuse App\\Model\\{User, Post as Article};\n");
+        let imported: Vec<&str> = visitor
+            .imports
+            .iter()
+            .map(|i| i.imported.as_str())
+            .collect();
+        assert_eq!(imported, ["App\\Model\\User", "App\\Model\\Post"]);
+    }
+
+    #[test]
+    fn file_scope_calls_belong_to_the_file() {
+        let visitor = parse_and_visit(b"<?php\necho helper();\n");
+        assert_eq!(callees_of(&visitor, FILE_SCOPE_CALLER), ["helper"]);
+    }
+
     #[test]
     fn test_visitor_method_call_extraction() {
         let source = b"<?php
@@ -1305,15 +1708,15 @@ class MyClass {
         assert_eq!(visitor.functions.len(), 3);
         assert_eq!(visitor.calls.len(), 2);
 
-        // Check calls: caller -> helper, caller -> process
+        // `$this->` calls are keyed by the declaring class, like the methods.
         assert!(visitor
             .calls
             .iter()
-            .any(|c| c.caller == "caller" && c.callee == "helper"));
+            .any(|c| c.caller == "MyClass::caller" && c.callee == "MyClass::helper"));
         assert!(visitor
             .calls
             .iter()
-            .any(|c| c.caller == "caller" && c.callee == "process"));
+            .any(|c| c.caller == "MyClass::caller" && c.callee == "MyClass::process"));
     }
 
     #[test]
@@ -1332,15 +1735,15 @@ class Calculator {
 
         assert_eq!(visitor.calls.len(), 2);
 
-        // Check calls: calculate -> helper (self::), calculate -> Helper::format
+        // `self::` resolves to the enclosing class.
         assert!(visitor
             .calls
             .iter()
-            .any(|c| c.caller == "calculate" && c.callee == "helper"));
+            .any(|c| c.caller == "Calculator::calculate" && c.callee == "Calculator::helper"));
         assert!(visitor
             .calls
             .iter()
-            .any(|c| c.caller == "calculate" && c.callee == "Helper::format"));
+            .any(|c| c.caller == "Calculator::calculate" && c.callee == "Helper::format"));
     }
 
     #[test]

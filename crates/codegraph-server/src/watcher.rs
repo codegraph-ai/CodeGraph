@@ -389,12 +389,35 @@ impl GraphUpdater {
         // prefer the non-stub version (higher complexity / more lines).
         let mut symbol_map: std::collections::HashMap<String, codegraph::NodeId> =
             std::collections::HashMap::new();
+        // Symbols that say exactly which declaration they are (`qualified_name`,
+        // e.g. PHP's `App\Screen::render`). A call recorded under such a name
+        // means that declaration and no other.
+        let mut qualified_map: std::collections::HashMap<String, codegraph::NodeId> =
+            std::collections::HashMap::new();
+        // Bare names shared by several functions, at least one of them a method.
+        // Methods of different classes are different symbols, so a call by the
+        // bare name alone cannot say which one it reaches.
+        let mut name_counts: std::collections::HashMap<String, (usize, bool)> =
+            std::collections::HashMap::new();
 
         // Index all functions — prefer non-stub implementations over stubs
         if let Ok(functions) = graph.query().node_type(NodeType::Function).execute() {
             for func_id in functions {
                 if let Ok(node) = graph.get_node(func_id) {
+                    if let Some(qualified) = node.properties.get_string("qualified_name") {
+                        let keep = qualified_map.get(qualified).is_none_or(|&existing| {
+                            symbol_weight(graph, func_id) > symbol_weight(graph, existing)
+                        });
+                        if keep {
+                            qualified_map.insert(qualified.to_string(), func_id);
+                        }
+                    }
                     if let Some(name) = node.properties.get_string("name") {
+                        let is_method = node.properties.get_string("parent_class").is_some()
+                            || node.properties.get_string("is_method") == Some("true");
+                        let entry = name_counts.entry(name.to_string()).or_default();
+                        entry.0 += 1;
+                        entry.1 |= is_method;
                         let name = name.to_string();
                         if let Some(&existing_id) = symbol_map.get(&name) {
                             // Prefer the version with higher complexity (non-stub)
@@ -411,12 +434,19 @@ impl GraphUpdater {
             }
         }
 
+        // Where each type looks up methods it does not declare itself.
+        let mut inherits: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
         // Index all classes
         if let Ok(classes) = graph.query().node_type(NodeType::Class).execute() {
             for class_id in classes {
                 if let Ok(node) = graph.get_node(class_id) {
                     if let Some(name) = node.properties.get_string("name") {
                         symbol_map.insert(name.to_string(), class_id);
+                        if let Some(parents) = node.properties.get_string_list_compat("inherits") {
+                            inherits.insert(name.to_string(), parents);
+                        }
                     }
                 }
             }
@@ -432,6 +462,26 @@ impl GraphUpdater {
                 }
             }
         }
+
+        let ambiguous_methods: std::collections::HashSet<String> = name_counts
+            .into_iter()
+            .filter(|(_, (count, any_method))| *count > 1 && *any_method)
+            .map(|(name, _)| name)
+            .collect();
+        let resolve_callee = |callee: &str| -> Option<codegraph::NodeId> {
+            if let Some(&id) = qualified_map.get(callee) {
+                return Some(id);
+            }
+            if let Some((class, method)) = callee.rsplit_once("::") {
+                if let Some(id) = resolve_inherited(&qualified_map, &inherits, class, method) {
+                    return Some(id);
+                }
+            }
+            if ambiguous_methods.contains(callee) {
+                return None;
+            }
+            symbol_map.get(callee).copied()
+        };
 
         // Process each file's outgoing import edges
         let mut edges_to_add: Vec<(codegraph::NodeId, codegraph::NodeId, PropertyMap)> = Vec::new();
@@ -499,35 +549,38 @@ impl GraphUpdater {
         let mut call_edges_to_add: Vec<(codegraph::NodeId, codegraph::NodeId, PropertyMap)> =
             Vec::new();
 
-        if let Ok(functions) = graph.query().node_type(NodeType::Function).execute() {
-            for func_id in functions {
-                if let Ok(node) = graph.get_node(func_id) {
-                    if let Some(unresolved) =
-                        node.properties.get_string_list_compat("unresolved_calls")
-                    {
-                        for callee_name in &unresolved {
-                            let callee_name = callee_name.as_str();
-                            if !callee_name.is_empty() {
-                                if let Some(&callee_id) = symbol_map.get(callee_name) {
-                                    // Check if we already have a call edge
-                                    let already_linked = graph
-                                        .get_edges_between(func_id, callee_id)
-                                        .map(|edges| {
-                                            edges.iter().any(|e| {
-                                                graph
-                                                    .get_edge(*e)
-                                                    .map(|edge| edge.edge_type == EdgeType::Calls)
-                                                    .unwrap_or(false)
-                                            })
+        // Files can call too: PHP records top-level calls (templates) on the
+        // file node.
+        let callers: Vec<_> = [NodeType::Function, NodeType::CodeFile]
+            .into_iter()
+            .flat_map(|t| graph.query().node_type(t).execute().unwrap_or_default())
+            .collect();
+        for func_id in callers {
+            if let Ok(node) = graph.get_node(func_id) {
+                if let Some(unresolved) = node.properties.get_string_list_compat("unresolved_calls")
+                {
+                    for callee_name in &unresolved {
+                        let callee_name = callee_name.as_str();
+                        if !callee_name.is_empty() {
+                            if let Some(callee_id) = resolve_callee(callee_name) {
+                                // Check if we already have a call edge
+                                let already_linked = graph
+                                    .get_edges_between(func_id, callee_id)
+                                    .map(|edges| {
+                                        edges.iter().any(|e| {
+                                            graph
+                                                .get_edge(*e)
+                                                .map(|edge| edge.edge_type == EdgeType::Calls)
+                                                .unwrap_or(false)
                                         })
-                                        .unwrap_or(false);
+                                    })
+                                    .unwrap_or(false);
 
-                                    if !already_linked {
-                                        let props = PropertyMap::new()
-                                            .with("resolved_by", "cross_file_resolution")
-                                            .with("is_direct", "true");
-                                        call_edges_to_add.push((func_id, callee_id, props));
-                                    }
+                                if !already_linked {
+                                    let props = PropertyMap::new()
+                                        .with("resolved_by", "cross_file_resolution")
+                                        .with("is_direct", "true");
+                                    call_edges_to_add.push((func_id, callee_id, props));
                                 }
                             }
                         }
@@ -599,6 +652,43 @@ impl GraphUpdater {
 /// Weight a symbol for deduplication: prefer non-stub implementations.
 /// Returns a score based on complexity and line count — stubs (empty body,
 /// single-line return) get low scores, real implementations get high scores.
+/// The declaration a `Class::method` call reaches when `Class` does not declare
+/// `method` itself: the first ancestor that does, searched breadth-first in
+/// each type's `inherits` order. `None` when no indexed ancestor declares it -
+/// the method may come from a vendor class outside the workspace, and guessing
+/// a same-named method elsewhere is how unrelated classes got linked.
+fn resolve_inherited(
+    qualified_map: &std::collections::HashMap<String, codegraph::NodeId>,
+    inherits: &std::collections::HashMap<String, Vec<String>>,
+    class: &str,
+    method: &str,
+) -> Option<codegraph::NodeId> {
+    const MAX_ANCESTORS: usize = 64;
+    let mut seen = std::collections::HashSet::from([class.to_string()]);
+    let mut queue: std::collections::VecDeque<&str> = inherits
+        .get(class)
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    while let Some(ancestor) = queue.pop_front() {
+        if !seen.insert(ancestor.to_string()) || seen.len() > MAX_ANCESTORS {
+            continue;
+        }
+        if let Some(&id) = qualified_map.get(&format!("{ancestor}::{method}")) {
+            return Some(id);
+        }
+        queue.extend(
+            inherits
+                .get(ancestor)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+        );
+    }
+    None
+}
+
 fn symbol_weight(graph: &codegraph::CodeGraph, node_id: codegraph::NodeId) -> u32 {
     let node = match graph.get_node(node_id) {
         Ok(n) => n,
@@ -1657,5 +1747,156 @@ void helper_func(int x) {
                     .map(|e| e.edge_type == EdgeType::Calls)
                     .unwrap_or(false)
             })
+    }
+
+    /// PHP call resolution across files (#31). Each case parses real source
+    /// through the registered parser and runs the shared resolver.
+    mod php_resolution {
+        use super::*;
+
+        fn resolve(files: &[(&str, &str)]) -> CodeGraph {
+            let parsers = ParserRegistry::new();
+            let mut graph = CodeGraph::in_memory().unwrap();
+            for (path, source) in files {
+                let path = std::path::Path::new(path);
+                let parser = parsers.parser_for_path(path).expect("PHP parser");
+                parser
+                    .parse_source(source, path, &mut graph)
+                    .expect("parse");
+            }
+            GraphUpdater::resolve_cross_file_imports(&mut graph);
+            graph
+        }
+
+        fn by_qualified_name(graph: &CodeGraph, qualified: &str) -> codegraph::NodeId {
+            graph
+                .query()
+                .node_type(codegraph::NodeType::Function)
+                .execute()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|&id| {
+                    graph.get_node(id).ok().and_then(|n| {
+                        n.properties
+                            .get_string("qualified_name")
+                            .map(|q| q == qualified)
+                    }) == Some(true)
+                })
+                .unwrap_or_else(|| panic!("{qualified} not in graph"))
+        }
+
+        fn file_node(graph: &CodeGraph, path: &str) -> codegraph::NodeId {
+            graph
+                .query()
+                .node_type(codegraph::NodeType::CodeFile)
+                .property("path", path.to_string())
+                .execute()
+                .unwrap_or_default()
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("{path} not in graph"))
+        }
+
+        const SCREENS: [(&str, &str); 2] = [
+            (
+                "/ws/Alpha.php",
+                "<?php\nnamespace App\\Alpha;\nfinal class Screen {\n    public function render(): string { return 'a'; }\n}\n",
+            ),
+            (
+                "/ws/Beta.php",
+                "<?php\nnamespace App\\Beta;\nfinal class Screen {\n    public function render(bool $f = true): string {\n        if ($f) { return 'b'; }\n        return 'c';\n    }\n}\n",
+            ),
+        ];
+
+        #[test]
+        fn a_method_call_reaches_the_receivers_own_class() {
+            let caller = (
+                "/ws/CallAlpha.php",
+                "<?php\nnamespace App\\Alpha;\nfinal class Caller {\n    public function run(): string { return (new Screen())->render(); }\n}\n",
+            );
+            let graph = resolve(&[SCREENS[0], SCREENS[1], caller]);
+            let run = by_qualified_name(&graph, "App\\Alpha\\Caller::run");
+            let alpha = by_qualified_name(&graph, "App\\Alpha\\Screen::render");
+            let beta = by_qualified_name(&graph, "App\\Beta\\Screen::render");
+            assert!(has_calls_edge(&graph, run, alpha));
+            assert!(
+                !has_calls_edge(&graph, run, beta),
+                "the heavier same-named method must not win"
+            );
+        }
+
+        #[test]
+        fn typed_parameters_imports_and_properties_name_the_receiver() {
+            let caller = (
+                "/ws/Uses.php",
+                "<?php\nnamespace App\\Web;\nuse App\\Beta\\Screen;\nuse App\\Alpha\\{Screen as AlphaScreen};\nfinal class Page {\n    public function __construct(private AlphaScreen $alpha) {}\n    public function viaParam(Screen $s): string { return $s->render(); }\n    public function viaProperty(): string { return $this->alpha->render(); }\n    public function viaLocal(): string { $x = new AlphaScreen(); return $x->render(); }\n}\n",
+            );
+            let graph = resolve(&[SCREENS[0], SCREENS[1], caller]);
+            let alpha = by_qualified_name(&graph, "App\\Alpha\\Screen::render");
+            let beta = by_qualified_name(&graph, "App\\Beta\\Screen::render");
+            let page = |m: &str| by_qualified_name(&graph, &format!("App\\Web\\Page::{m}"));
+            assert!(has_calls_edge(&graph, page("viaParam"), beta));
+            assert!(has_calls_edge(&graph, page("viaProperty"), alpha));
+            assert!(has_calls_edge(&graph, page("viaLocal"), alpha));
+            assert!(!has_calls_edge(&graph, page("viaParam"), alpha));
+        }
+
+        #[test]
+        fn an_unknown_receiver_is_not_guessed() {
+            let caller = (
+                "/ws/Dynamic.php",
+                "<?php\nnamespace App;\nfunction show($screen): string { return $screen->render(); }\n",
+            );
+            let graph = resolve(&[SCREENS[0], SCREENS[1], caller]);
+            let show = by_qualified_name(&graph, "App\\show");
+            assert_eq!(count_calls_edges_from(&graph, show), 0);
+        }
+
+        #[test]
+        fn an_inherited_method_resolves_to_the_declaring_class() {
+            let base = (
+                "/ws/Base.php",
+                "<?php\nnamespace App\\Core;\nabstract class Base {\n    protected function helper(): int { return 1; }\n}\n",
+            );
+            let child = (
+                "/ws/Child.php",
+                "<?php\nnamespace App\\Web;\nuse App\\Core\\Base;\nfinal class Child extends Base {\n    public function run(): int { return $this->helper() + parent::helper(); }\n}\n",
+            );
+            let graph = resolve(&[base, child]);
+            let run = by_qualified_name(&graph, "App\\Web\\Child::run");
+            let helper = by_qualified_name(&graph, "App\\Core\\Base::helper");
+            assert!(has_calls_edge(&graph, run, helper));
+        }
+
+        #[test]
+        fn an_explicit_global_call_resolves() {
+            let graph = resolve(&[
+                ("/ws/functions.php", "<?php\nfunction helper(): string { return 'g'; }\n"),
+                (
+                    "/ws/callers.php",
+                    "<?php\nnamespace App {\n    function caller(): string { return \\helper(); }\n}\n",
+                ),
+            ]);
+            let caller = by_qualified_name(&graph, "App\\caller");
+            let helper = by_qualified_name(&graph, "helper");
+            assert!(has_calls_edge(&graph, caller, helper));
+        }
+
+        #[test]
+        fn a_file_scope_call_is_made_by_the_file() {
+            let graph = resolve(&[
+                (
+                    "/ws/functions.php",
+                    "<?php\nfunction helper(): string { return 't'; }\n",
+                ),
+                (
+                    "/ws/template.php",
+                    "<?php\nrequire_once __DIR__ . '/functions.php';\necho helper();\n",
+                ),
+            ]);
+            let template = file_node(&graph, "/ws/template.php");
+            let helper = by_qualified_name(&graph, "helper");
+            assert!(has_calls_edge(&graph, template, helper));
+        }
     }
 }
