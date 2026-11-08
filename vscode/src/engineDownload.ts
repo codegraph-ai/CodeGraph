@@ -118,6 +118,30 @@ function engineSwap(lifecycle: EngineLifecycle | undefined) {
     };
 }
 
+/**
+ * Start the engine again once its binary has been replaced.
+ *
+ * The install is already done by this point, so a start failure is an outcome
+ * of its own: reported as a failed update it would hold off this version's
+ * automatic attempt for a day over an engine that is in fact installed, and
+ * reported as a failed download it sends the user to debug a transfer that
+ * worked. Nor may it propagate - the caller still has an installed engine to
+ * record.
+ */
+async function restartAfterInstall(
+    swap: ReturnType<typeof engineSwap>,
+    version: string,
+): Promise<void> {
+    try {
+        await swap.restart();
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        void vscode.window.showWarningMessage(
+            `The CodeGraph engine was updated to ${version} but did not start again: ${message}`,
+        );
+    }
+}
+
 /** The engine asset for this platform, or null when none is published. */
 export function platformBinaryName(): string | null {
     return fetchEngine.platformBinaryName();
@@ -204,8 +228,6 @@ export async function updateEngineIfStale(
     const swap = engineSwap(lifecycle);
     try {
         await downloadEngine(version, { beforeInstall: swap.beforeInstall });
-        await clearUpdateFailure(state);
-        await swap.restart();
     } catch (error) {
         // A failed update must not leave the user without an engine: the
         // binary on disk is still the one that was running.
@@ -232,7 +254,10 @@ export async function updateEngineIfStale(
                     void vscode.commands.executeCommand('codegraph.downloadEngine');
                 }
             });
+        return;
     }
+    await clearUpdateFailure(state);
+    await restartAfterInstall(swap, version);
 }
 
 /** True for the "another process holds the binary" failure `fetch-engine.js` names. */
@@ -289,7 +314,7 @@ export async function installEngine(
             await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempts - 1]));
             continue;
         }
-        await swap.restart();
+        await restartAfterInstall(swap, version);
         return { binary, attempts };
     }
 
