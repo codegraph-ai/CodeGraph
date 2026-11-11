@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { State as ClientState } from 'vscode-languageclient/node';
 
 // Stands alone from `extension.test.ts`, which is quarantined on the lost
 // `@vsforge` harness (see vitest.config.ts): the vscode surface activation
@@ -17,18 +18,31 @@ const mocks = vi.hoisted(() => {
         dispose: vi.fn(),
     };
     return {
+        // vscode-languageclient's public client states. The real module
+        // cannot be imported here (it requires the real `vscode`), so they
+        // are restated - and pinned to the enum itself at compile time
+        // below, because the numbering is not the order it reads.
+        State: { Stopped: 1, Running: 2, Starting: 3 } as const,
         disposable,
         channel,
         // Every event the extension reports, keyed by method name.
         reporterCalls: {} as Record<string, unknown[][]>,
-        // Listeners the extension registers for the language client's state
-        // changes: 1 = Stopped, 2 = Starting, 3 = Running.
+        // Listeners the extension registers for the language client's
+        // state changes.
         stateListeners: [] as ((evt: { oldState: number; newState: number }) => void)[],
         clientStart: vi.fn(async () => { }),
         clientStop: vi.fn(async () => { }),
         updateEngineIfStale: vi.fn(async () => { }),
     };
 });
+
+type AssertTrue<T extends true> = T;
+type _StatesPinnedToClient = [
+    AssertTrue<ClientState.Stopped extends typeof mocks.State.Stopped ? true : false>,
+    AssertTrue<ClientState.Running extends typeof mocks.State.Running ? true : false>,
+    AssertTrue<ClientState.Starting extends typeof mocks.State.Starting ? true : false>,
+];
+const State = mocks.State;
 
 const emitState = (newState: number, oldState: number) => {
     for (const listener of [...mocks.stateListeners]) {
@@ -71,6 +85,7 @@ vi.mock('vscode', () => ({
 }));
 
 vi.mock('vscode-languageclient/node', () => ({
+    State: mocks.State,
     LanguageClient: class {
         start = mocks.clientStart;
         stop = mocks.clientStop;
@@ -197,12 +212,14 @@ describe('engine swap crash telemetry', () => {
         const lifecycle = await activateAndCaptureLifecycle();
 
         await lifecycle.stop();
-        emitState(1, 3);
+        emitState(State.Stopped, State.Running);
 
-        // Both transitions arrive while `client.start()` is still awaited -
-        // the client sets its state before start() settles, either way.
+        // The real sequence: `client.start()` publishes Starting, then - when
+        // the binary will not run - StartFailed, whose public state is
+        // Stopped. Both arrive while start() is still awaited.
         mocks.clientStart.mockImplementationOnce(async () => {
-            emitState(1, 2);
+            emitState(State.Starting, State.Stopped);
+            emitState(State.Stopped, State.Starting);
             throw new Error('exec format error');
         });
         await expect(lifecycle.start()).rejects.toThrow('exec format error');
@@ -215,10 +232,11 @@ describe('engine swap crash telemetry', () => {
         const lifecycle = await activateAndCaptureLifecycle();
 
         await lifecycle.stop();
-        emitState(1, 3);
+        emitState(State.Stopped, State.Running);
 
         mocks.clientStart.mockImplementationOnce(async () => {
-            emitState(3, 2);
+            emitState(State.Starting, State.Stopped);
+            emitState(State.Running, State.Starting);
         });
         await lifecycle.start();
 
@@ -229,8 +247,21 @@ describe('engine swap crash telemetry', () => {
     it('still reports an unexpected stop as a crash', async () => {
         await activateAndCaptureLifecycle();
 
-        emitState(1, 3);
+        emitState(State.Stopped, State.Running);
 
         expect(mocks.reporterCalls.serverCrash ?? []).toHaveLength(1);
+    });
+
+    it('reports a crash restart only once the engine is running again', async () => {
+        await activateAndCaptureLifecycle();
+
+        emitState(State.Stopped, State.Running);
+        emitState(State.Starting, State.Stopped);
+
+        expect(mocks.reporterCalls.serverRestart ?? []).toHaveLength(0);
+
+        emitState(State.Running, State.Starting);
+
+        expect(mocks.reporterCalls.serverRestart ?? []).toEqual([['crash']]);
     });
 });

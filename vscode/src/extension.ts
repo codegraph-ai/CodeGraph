@@ -10,6 +10,7 @@ import {
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
+    State,
 } from 'vscode-languageclient/node';
 import { registerCommands } from './commands';
 import { registerTreeDataProviders } from './views/treeProviders';
@@ -510,8 +511,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Watch for unexpected server state changes — crashes fire here.
     context.subscriptions.push(
         client.onDidChangeState((evt) => {
-            // evt.newState: 1=Stopped, 2=Starting, 3=Running
-            if (evt.newState === 1 && serverUptimeStart > 0) {
+            // `State` is not ordered the way it reads: Stopped=1, Running=2,
+            // Starting=3, and every internal state that is neither Starting
+            // nor Running - StartFailed included - reports as Stopped.
+            if (evt.newState === State.Stopped && serverUptimeStart > 0) {
                 // Intentional stop (crash-loop give-up / deactivate), or an
                 // intentional start that failed - vscode-languageclient's
                 // StartFailed reports its public state as Stopped, so a swap
@@ -572,14 +575,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     return;
                 }
             }
-            if (evt.newState === 3 && serverUptimeStart > 0) {
+            if (evt.newState === State.Running && serverUptimeStart > 0) {
+                serverUptimeStart = Date.now();
                 if (expectedStart) {
-                    expectedStart = false;
-                    serverUptimeStart = Date.now();
                     return;
                 }
                 serverRestartCount += 1;
-                serverUptimeStart = Date.now();
                 reporter.serverRestart('crash');
             }
         }),
