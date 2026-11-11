@@ -52,8 +52,9 @@ let rapidCrashTimestamps: number[] = [];
 // deactivate) so the onDidChangeState→Stopped that follows isn't logged
 // as a crash. Consume-once: the handler resets it after skipping.
 let expectedShutdown = false;
-// Set for an intentional start (the engine swap) so the Running transition that
-// follows isn't counted or reported as a crash restart. Consume-once.
+// Set for an intentional start (the engine swap) so the transition that follows
+// isn't counted or reported as a crash restart - Running when the start
+// succeeds, Stopped when it fails. Consume-once.
 let expectedStart = false;
 
 /**
@@ -511,9 +512,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         client.onDidChangeState((evt) => {
             // evt.newState: 1=Stopped, 2=Starting, 3=Running
             if (evt.newState === 1 && serverUptimeStart > 0) {
-                // Intentional stop (crash-loop give-up / deactivate) — don't
-                // count it as a crash. Consume-once.
-                if (expectedShutdown) {
+                // Intentional stop (crash-loop give-up / deactivate), or an
+                // intentional start that failed - vscode-languageclient's
+                // StartFailed reports its public state as Stopped, so a swap
+                // whose new binary will not run arrives here, not at Running.
+                // Neither is a crash. Consume-once.
+                if (expectedShutdown || expectedStart) {
                     expectedShutdown = false;
                     return;
                 }

@@ -610,6 +610,26 @@ impl QueryEngine {
         *self.vector_engine.write().await = Some(engine);
     }
 
+    /// Take the whole-workspace embedding turn, waiting for a pass already
+    /// running (see the `workspace_embed` field).
+    ///
+    /// A user-initiated reindex that lands mid-build waits for the whole of
+    /// that build, which from the outside is indistinguishable from a hang,
+    /// so the wait and its length are logged rather than left silent.
+    async fn take_embed_turn(&self, pass: &str) -> tokio::sync::MutexGuard<'_, ()> {
+        if let Ok(turn) = self.workspace_embed.try_lock() {
+            return turn;
+        }
+        tracing::info!("[QueryEngine] {pass} is waiting for the embedding pass already running");
+        let since = Instant::now();
+        let turn = self.workspace_embed.lock().await;
+        tracing::info!(
+            "[QueryEngine] {pass} waited {:?} for the previous embedding pass",
+            since.elapsed()
+        );
+        turn
+    }
+
     /// Build symbol embedding vectors for semantic search.
     /// Requires vector_engine to be set first. Embeds name + signature + docstring
     /// for each symbol in batch for efficiency.
@@ -628,7 +648,7 @@ impl QueryEngine {
     ///   [`EMBED_LOW_MEM_MB`] it halves the ONNX batch and forces a
     ///   checkpoint — degrade to slow instead of being OOM-killed.
     pub async fn build_symbol_vectors_checkpointed(&self, slug: Option<&str>) {
-        let _turn = self.workspace_embed.lock().await;
+        let _turn = self.take_embed_turn("build_symbol_vectors").await;
         let engine = match self.vector_engine.read().await.clone() {
             Some(e) => e,
             None => {
@@ -824,7 +844,7 @@ impl QueryEngine {
     /// path after a crash-interrupted embed run: persisted checkpoint vectors
     /// load on startup and this fills in only the remainder.
     pub async fn embed_missing_symbols_checkpointed(&self, slug: Option<&str>) {
-        let _turn = self.workspace_embed.lock().await;
+        let _turn = self.take_embed_turn("embed_missing_symbols").await;
         let engine = match self.vector_engine.read().await.clone() {
             Some(e) => e,
             None => return,

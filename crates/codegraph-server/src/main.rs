@@ -405,13 +405,6 @@ fn main() {
     let args = Args::parse();
     let budget = ThreadBudget::new(args.requested_threads());
     codegraph_memory::set_onnx_threads(budget.compute);
-    if let Some(threads) = budget.rayon {
-        // Fails only if a global pool already exists, which nothing before
-        // this point creates.
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build_global();
-    }
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     if let Some(workers) = budget.tokio {
@@ -426,13 +419,14 @@ fn main() {
     std::thread::Builder::new()
         .name("cg-main".into())
         .stack_size(STACK_SIZE)
-        .spawn(move || rt.block_on(run(args, budget.compute)))
+        .spawn(move || rt.block_on(run(args, budget)))
         .expect("Failed to spawn main worker thread")
         .join()
         .expect("main worker thread panicked");
 }
 
-async fn run(args: Args, compute_threads: usize) {
+async fn run(args: Args, budget: ThreadBudget) {
+    let compute_threads = budget.compute;
     install_crash_handlers();
     codegraph_server::crash_phase::mark("startup");
     // Clean up after processes that were killed before they could clear their
@@ -478,6 +472,21 @@ async fn run(args: Args, compute_threads: usize) {
             std::process::exit(1);
         }
         return;
+    }
+
+    // Rayon's global pool spawns its workers as soon as it is built, so it is
+    // built here - after every path that does no compute work has returned.
+    // The relay above forwards stdio to another engine and `--info` prints
+    // metadata; neither parses, indexes or embeds, and a pool per attached
+    // client is pure overhead. Everything below this point does compute work,
+    // and nothing above it touches rayon, so the pool is always in place
+    // before its first use.
+    if let Some(threads) = budget.rayon {
+        // Fails only if a global pool already exists, which nothing before
+        // this point creates.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global();
     }
 
     // Background watcher daemon. It owns its own signal handling and clean
