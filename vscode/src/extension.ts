@@ -575,8 +575,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     return;
                 }
             }
-            if (evt.newState === State.Running && serverUptimeStart > 0) {
+            if (evt.newState === State.Starting && serverUptimeStart > 0) {
                 serverUptimeStart = Date.now();
+                return;
+            }
+            if (evt.newState === State.Running && serverUptimeStart > 0) {
                 if (expectedStart) {
                     return;
                 }

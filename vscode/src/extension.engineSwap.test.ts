@@ -252,6 +252,29 @@ describe('engine swap crash telemetry', () => {
         expect(mocks.reporterCalls.serverCrash ?? []).toHaveLength(1);
     });
 
+    it('times a crash whose restart never reaches Running from that attempt', async () => {
+        await activateAndCaptureLifecycle();
+
+        let nowMs = Date.now();
+        const clock = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+        try {
+            nowMs += 600_000;
+            emitState(State.Stopped, State.Running);
+
+            // The restart publishes Starting, then fails before Running.
+            emitState(State.Starting, State.Stopped);
+            nowMs += 2_000;
+            emitState(State.Stopped, State.Starting);
+        } finally {
+            clock.mockRestore();
+        }
+
+        const crashes = (mocks.reporterCalls.serverCrash ?? []) as [{ uptimeSeconds: number }][];
+        expect(crashes).toHaveLength(2);
+        expect(crashes[0][0].uptimeSeconds).toBeCloseTo(600, 0);
+        expect(crashes[1][0].uptimeSeconds).toBe(2);
+    });
+
     it('reports a crash restart only once the engine is running again', async () => {
         await activateAndCaptureLifecycle();
 
