@@ -269,8 +269,8 @@ function isEngineInUse(error: unknown): boolean {
 export type EngineInstallFailure = 'unsupported_platform' | 'checksum' | 'in_use' | 'download';
 
 export type EngineInstallResult =
-    | { binary: string; attempts: number }
-    | { failure: EngineInstallFailure; attempts: number };
+    | { binary: string }
+    | { failure: EngineInstallFailure };
 
 /** Waits between attempts; a transient network or proxy hiccup rarely outlasts the second. */
 const RETRY_DELAYS_MS = [2_000, 10_000];
@@ -292,7 +292,7 @@ export async function installEngine(
             `CodeGraph does not publish an engine for ${os.platform()}-${os.arch()}. ` +
             'Point the extension at your own build with the codegraph.serverPath setting.',
         );
-        return { failure: 'unsupported_platform', attempts: 0 };
+        return { failure: 'unsupported_platform' };
     }
 
     const swap = engineSwap(lifecycle);
@@ -315,7 +315,7 @@ export async function installEngine(
             continue;
         }
         await restartAfterInstall(swap, version);
-        return { binary, attempts };
+        return { binary };
     }
 
     const message = lastError instanceof Error ? lastError.message : String(lastError);
@@ -338,7 +338,7 @@ export async function installEngine(
                 void vscode.commands.executeCommand('codegraph.downloadEngine');
             }
         });
-    return { failure, attempts };
+    return { failure };
 }
 
 function isChecksumFailure(error: unknown): boolean {

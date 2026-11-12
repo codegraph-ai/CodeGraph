@@ -155,7 +155,7 @@ describe('an engine that is installed but will not start', () => {
 
         const result = await engineDownload.installEngine('0.21.0', lifecycle);
 
-        expect(result).toEqual({ binary: BINARY, attempts: 1 });
+        expect(result).toEqual({ binary: BINARY });
         expect(mocks.engine.ensureEngine).toHaveBeenCalledOnce();
         expect(mocks.window.showErrorMessage).not.toHaveBeenCalled();
         expect(warnings()).toEqual([

@@ -128,7 +128,7 @@ vi.mock('./telemetry/machineProfile', () => ({
 vi.mock('./engineDownload', () => ({
     clearUpdateFailure: vi.fn(async () => { }),
     engineVersion: () => '0.21.0',
-    installEngine: vi.fn(async () => ({ binary: '/mock/engine', attempts: 1 })),
+    installEngine: vi.fn(async () => ({ binary: '/mock/engine' })),
     managedEnginePath: () => '/mock/engine',
     updateEngineIfStale: mocks.updateEngineIfStale,
 }));
