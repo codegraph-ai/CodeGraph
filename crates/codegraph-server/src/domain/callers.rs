@@ -190,13 +190,32 @@ pub(crate) async fn get_callees(
 /// Find other function nodes with the same name but different node ID.
 /// Used for multi-arch symbol deduplication (e.g. same function in
 /// backdoorGcc32.c and backdoorGcc64.c).
+///
+/// A variant must be the same symbol, not merely share a name: same owning
+/// class (or none) and the same qualified name where one is recorded. Methods
+/// of two unrelated classes are different symbols, and borrowing one's callers
+/// for the other reported calls that never happen.
 fn find_same_name_variants(graph: &CodeGraph, name: &str, exclude_id: NodeId) -> Vec<NodeId> {
+    let identity = |node: &codegraph::Node| {
+        (
+            node.properties
+                .get_string("parent_class")
+                .map(str::to_owned),
+            node.properties
+                .get_string("qualified_name")
+                .map(str::to_owned),
+        )
+    };
+    let Some(target) = graph.get_node(exclude_id).ok().map(identity) else {
+        return Vec::new();
+    };
     graph
         .nodes_iter()
         .filter_map(|(&nid, node)| {
             if nid != exclude_id
                 && node.node_type == codegraph::NodeType::Function
                 && node_props::name(node) == name
+                && identity(node) == target
             {
                 Some(nid)
             } else {
@@ -222,5 +241,41 @@ fn build_fallback(
         )
     } else {
         (None, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codegraph::{NodeType, PropertyMap};
+
+    fn add(graph: &mut CodeGraph, name: &str, parent: Option<&str>) -> NodeId {
+        let mut props = PropertyMap::new().with("name", name);
+        if let Some(parent) = parent {
+            props = props
+                .with("parent_class", parent)
+                .with("qualified_name", format!("{parent}::{name}"));
+        }
+        graph.add_node(NodeType::Function, props).unwrap()
+    }
+
+    #[test]
+    fn copies_of_one_free_function_are_variants() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let gcc32 = add(&mut graph, "backdoor", None);
+        let gcc64 = add(&mut graph, "backdoor", None);
+        assert_eq!(
+            find_same_name_variants(&graph, "backdoor", gcc32),
+            vec![gcc64]
+        );
+    }
+
+    #[test]
+    fn methods_of_different_classes_are_not_variants() {
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let alpha = add(&mut graph, "render", Some("App\\Alpha\\Screen"));
+        add(&mut graph, "render", Some("App\\Beta\\Screen"));
+        add(&mut graph, "render", None);
+        assert!(find_same_name_variants(&graph, "render", alpha).is_empty());
     }
 }

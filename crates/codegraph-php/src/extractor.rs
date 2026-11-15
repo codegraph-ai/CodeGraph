@@ -340,15 +340,15 @@ class MyClass {
         assert!(
             ir.calls
                 .iter()
-                .any(|c| c.caller == "process" && c.callee == "validate"),
-            "Expected process -> validate call"
+                .any(|c| c.caller == "MyClass::process" && c.callee == "MyClass::validate"),
+            "Expected MyClass::process -> MyClass::validate call"
         );
         // process -> helper
         assert!(
             ir.calls
                 .iter()
-                .any(|c| c.caller == "process" && c.callee == "helper"),
-            "Expected process -> helper call"
+                .any(|c| c.caller == "MyClass::process" && c.callee == "helper"),
+            "Expected MyClass::process -> helper call"
         );
     }
 }

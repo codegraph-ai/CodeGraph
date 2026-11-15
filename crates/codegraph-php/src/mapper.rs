@@ -55,74 +55,6 @@ pub fn ir_to_graph(
         id
     };
 
-    // Add functions
-    for func in &ir.functions {
-        let mut props = PropertyMap::new()
-            .with("name", func.name.clone())
-            .with("path", file_path.display().to_string())
-            .with("signature", func.signature.clone())
-            .with("visibility", func.visibility.clone())
-            .with("line_start", func.line_start as i64)
-            .with("line_end", func.line_end as i64)
-            .with("is_async", func.is_async)
-            .with("is_static", func.is_static)
-            .with("is_abstract", func.is_abstract);
-
-        if let Some(ref doc) = func.doc_comment {
-            props = props.with("doc", doc.clone());
-        }
-        if let Some(ref return_type) = func.return_type {
-            props = props.with("return_type", return_type.clone());
-        }
-        if let Some(ref parent) = func.parent_class {
-            props = props.with("parent_class", parent.clone());
-        }
-        if let Some(ref body) = func.body_prefix {
-            props = props.with("body_prefix", body.clone());
-        }
-        if !func.parameters.is_empty() {
-            let param_names: Vec<String> = func.parameters.iter().map(|p| p.name.clone()).collect();
-            props = props.with("parameters", param_names);
-        }
-        if let Some(ref complexity) = func.complexity {
-            props = props
-                .with("complexity", complexity.cyclomatic_complexity as i64)
-                .with("complexity_grade", complexity.grade().to_string())
-                .with("complexity_branches", complexity.branches as i64)
-                .with("complexity_loops", complexity.loops as i64)
-                .with(
-                    "complexity_logical_ops",
-                    complexity.logical_operators as i64,
-                )
-                .with("complexity_nesting", complexity.max_nesting_depth as i64)
-                .with(
-                    "complexity_exceptions",
-                    complexity.exception_handlers as i64,
-                )
-                .with("complexity_early_returns", complexity.early_returns as i64);
-        }
-
-        let func_id = graph
-            .add_node(NodeType::Function, props)
-            .map_err(|e| ParserError::GraphError(e.to_string()))?;
-
-        node_map.insert(func.name.clone(), func_id);
-        function_ids.push(func_id);
-
-        // Link function to file or parent class
-        if let Some(ref parent_class) = func.parent_class {
-            if let Some(&class_id) = node_map.get(parent_class) {
-                graph
-                    .add_edge(class_id, func_id, EdgeType::Contains, PropertyMap::new())
-                    .map_err(|e| ParserError::GraphError(e.to_string()))?;
-            }
-        } else {
-            graph
-                .add_edge(file_id, func_id, EdgeType::Contains, PropertyMap::new())
-                .map_err(|e| ParserError::GraphError(e.to_string()))?;
-        }
-    }
-
     // Add classes
     for class in &ir.classes {
         let mut props = PropertyMap::new()
@@ -141,6 +73,20 @@ pub fn ir_to_graph(
         }
         if let Some(ref body) = class.body_prefix {
             props = props.with("body_prefix", body.clone());
+        }
+        // Where an inherited method is looked up, in PHP's order: used traits,
+        // then the parent class, then interfaces. Lets the cross-file resolver
+        // follow `$this->inherited()` to the class that declares it.
+        let traits = ir.implementations.iter().filter(|i| {
+            i.implementor == class.name && !class.implemented_traits.contains(&i.trait_name)
+        });
+        let inherits: Vec<String> = traits
+            .map(|i| i.trait_name.clone())
+            .chain(class.base_classes.iter().cloned())
+            .chain(class.implemented_traits.iter().cloned())
+            .collect();
+        if !inherits.is_empty() {
+            props = props.with("inherits", inherits);
         }
 
         let class_id = graph
@@ -177,7 +123,8 @@ pub fn ir_to_graph(
 
             // Convention-based HTTP handler detection for Laravel/Symfony:
             // Public methods in Controller classes are HTTP handlers.
-            if method.visibility == "public" && is_php_controller_class(&class.name)
+            if method.visibility == "public"
+                && is_php_controller_class(&class.name)
                 && !is_php_lifecycle_method(&method.name)
             {
                 method_props = method_props
@@ -231,6 +178,79 @@ pub fn ir_to_graph(
         // Link interface/trait to file
         graph
             .add_edge(file_id, trait_id, EdgeType::Contains, PropertyMap::new())
+            .map_err(|e| ParserError::GraphError(e.to_string()))?;
+    }
+
+    // Calls made outside any function belong to the file.
+    node_map.insert(crate::visitor::FILE_SCOPE_CALLER.to_string(), file_id);
+
+    // Add functions and methods. After classes, interfaces and traits, so a
+    // method can be linked to the type that declares it.
+    for func in &ir.functions {
+        // A method is called by `Class::method`; the display name stays bare.
+        let key = crate::visitor::method_key(func.parent_class.as_deref(), &func.name);
+        let mut props = PropertyMap::new()
+            .with("name", func.name.clone())
+            .with("path", file_path.display().to_string())
+            .with("signature", func.signature.clone())
+            .with("visibility", func.visibility.clone())
+            .with("line_start", func.line_start as i64)
+            .with("line_end", func.line_end as i64)
+            .with("is_async", func.is_async)
+            .with("is_static", func.is_static)
+            .with("is_abstract", func.is_abstract);
+
+        if let Some(ref doc) = func.doc_comment {
+            props = props.with("doc", doc.clone());
+        }
+        if let Some(ref return_type) = func.return_type {
+            props = props.with("return_type", return_type.clone());
+        }
+        if let Some(ref parent) = func.parent_class {
+            props = props
+                .with("parent_class", parent.clone())
+                .with("qualified_name", key.clone());
+        }
+        if let Some(ref body) = func.body_prefix {
+            props = props.with("body_prefix", body.clone());
+        }
+        if !func.parameters.is_empty() {
+            let param_names: Vec<String> = func.parameters.iter().map(|p| p.name.clone()).collect();
+            props = props.with("parameters", param_names);
+        }
+        if let Some(ref complexity) = func.complexity {
+            props = props
+                .with("complexity", complexity.cyclomatic_complexity as i64)
+                .with("complexity_grade", complexity.grade().to_string())
+                .with("complexity_branches", complexity.branches as i64)
+                .with("complexity_loops", complexity.loops as i64)
+                .with(
+                    "complexity_logical_ops",
+                    complexity.logical_operators as i64,
+                )
+                .with("complexity_nesting", complexity.max_nesting_depth as i64)
+                .with(
+                    "complexity_exceptions",
+                    complexity.exception_handlers as i64,
+                )
+                .with("complexity_early_returns", complexity.early_returns as i64);
+        }
+
+        let func_id = graph
+            .add_node(NodeType::Function, props)
+            .map_err(|e| ParserError::GraphError(e.to_string()))?;
+
+        node_map.insert(key, func_id);
+        function_ids.push(func_id);
+
+        // Link the function to its declaring type, or else to the file
+        let owner = func
+            .parent_class
+            .as_ref()
+            .and_then(|parent| node_map.get(parent).copied())
+            .unwrap_or(file_id);
+        graph
+            .add_edge(owner, func_id, EdgeType::Contains, PropertyMap::new())
             .map_err(|e| ParserError::GraphError(e.to_string()))?;
     }
 
