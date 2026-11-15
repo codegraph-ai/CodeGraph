@@ -197,7 +197,63 @@ function requiredAssets(platform = os.platform(), arch = os.arch()) {
   return PLATFORM_MAP[platform] === "win32" ? [binary, WINDOWS_SIDECAR] : [binary];
 }
 
-function download(url, destination, { redirects = 5 } = {}) {
+/**
+ * How long a request may go without making progress before it is abandoned.
+ *
+ * Neither transport gives up on its own. A request that never gets a socket - a
+ * proxy resolver that never answers, which VS Code's patched agent can do - or
+ * a transfer whose server stops sending mid-body waits forever, and with the
+ * download now automatic that is an engine update that silently never finishes
+ * and never retries. The socket's own timeout cannot cover the first case,
+ * because it is armed only once a socket connects.
+ *
+ * This bounds silence, not total time: the engine is ~120 MB and a slow link
+ * that keeps delivering bytes must be allowed to finish.
+ */
+const STALL_TIMEOUT_MS = 60_000;
+
+/**
+ * Abort `request` with `fail` once it has gone `ms` without `touch()`.
+ *
+ * Settling latches the guard, because the body does not stop arriving just
+ * because the caller is done with it: a settle that only cleared the timer
+ * would see the next chunk arm a fresh one and hold an otherwise finished
+ * process alive for another `ms`. `stop()` settles a transfer whose bytes the
+ * caller already has; `abort()` settles one that failed, and hangs up so the
+ * rest of the body stops arriving at all.
+ */
+function stallGuard(url, ms, fail) {
+  let timer = null;
+  let request = null;
+  let settled = false;
+  const settle = (hangUp) => {
+    settled = true;
+    clearTimeout(timer);
+    if (hangUp && request) request.destroy();
+  };
+  const touch = () => {
+    if (settled) return;
+    clearTimeout(timer);
+    timer = setTimeout(
+      () => fail(new Error(`no progress for ${ms / 1000}s fetching ${url}`)),
+      ms
+    );
+  };
+  return {
+    watch(req) {
+      request = req;
+      touch();
+      return req;
+    },
+    touch,
+    stop: () => settle(false),
+    abort: () => settle(true),
+  };
+}
+
+function download(url, destination, options = {}) {
+  const redirects = options.redirects === undefined ? 5 : options.redirects;
+  const stallMs = options.stallTimeoutMs || STALL_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     if (redirects < 0) return reject(new Error(`too many redirects for ${url}`));
     let file = null;
@@ -210,62 +266,91 @@ function download(url, destination, { redirects = 5 } = {}) {
      * file with a live handle on it cannot be unlinked on Windows.
      */
     const fail = (error) => {
+      guard.abort();
       if (file) file.destroy();
       reject(error);
     };
-    transportFor(url)
-      .get(url, { headers: { "User-Agent": "codegraph-installer" } }, (res) => {
-        // GitHub release assets always redirect to object storage.
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          let next;
-          try {
-            next = redirectTarget(url, res.headers.location);
-          } catch (error) {
-            return fail(error);
+    const done = (value) => {
+      guard.stop();
+      resolve(value);
+    };
+    const guard = stallGuard(url, stallMs, fail);
+    guard.watch(
+      transportFor(url)
+        .get(url, { headers: { "User-Agent": "codegraph-installer" } }, (res) => {
+          guard.touch();
+          // GitHub release assets always redirect to object storage.
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            let next;
+            try {
+              next = redirectTarget(url, res.headers.location);
+            } catch (error) {
+              return fail(error);
+            }
+            guard.abort();
+            return resolve(
+              download(next, destination, { ...options, redirects: redirects - 1 })
+            );
           }
-          return resolve(download(next, destination, { redirects: redirects - 1 }));
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        }
-        file = fs.createWriteStream(destination);
-        res.on("error", fail);
-        file.on("error", fail);
-        file.on("finish", () => file.close(resolve));
-        res.pipe(file);
-      })
-      .on("error", fail);
+          if (res.statusCode !== 200) {
+            res.resume();
+            return fail(new Error(`HTTP ${res.statusCode} for ${url}`));
+          }
+          file = fs.createWriteStream(destination);
+          res.on("data", guard.touch);
+          res.on("error", fail);
+          file.on("error", fail);
+          file.on("finish", () => file.close(() => done()));
+          res.pipe(file);
+        })
+        .on("error", fail)
+    );
   });
 }
 
 function readText(url, options = {}) {
   const redirects = options.redirects === undefined ? 5 : options.redirects;
+  const stallMs = options.stallTimeoutMs || STALL_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     if (redirects < 0) return reject(new Error(`too many redirects for ${url}`));
-    transportFor(url)
-      .get(url, { headers: { "User-Agent": "codegraph-installer" } }, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          let next;
-          try {
-            next = redirectTarget(url, res.headers.location);
-          } catch (error) {
-            return reject(error);
+    const fail = (error) => {
+      guard.abort();
+      reject(error);
+    };
+    const done = (value) => {
+      guard.stop();
+      resolve(value);
+    };
+    const guard = stallGuard(url, stallMs, fail);
+    guard.watch(
+      transportFor(url)
+        .get(url, { headers: { "User-Agent": "codegraph-installer" } }, (res) => {
+          guard.touch();
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            let next;
+            try {
+              next = redirectTarget(url, res.headers.location);
+            } catch (error) {
+              return fail(error);
+            }
+            guard.abort();
+            return resolve(readText(next, { ...options, redirects: redirects - 1 }));
           }
-          return resolve(readText(next, { redirects: redirects - 1 }));
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        }
-        let body = "";
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => (body += chunk));
-        res.on("end", () => resolve(body));
-      })
-      .on("error", reject);
+          if (res.statusCode !== 200) {
+            res.resume();
+            return fail(new Error(`HTTP ${res.statusCode} for ${url}`));
+          }
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => {
+            guard.touch();
+            body += chunk;
+          });
+          res.on("error", fail);
+          res.on("end", () => done(body));
+        })
+        .on("error", fail)
+    );
   });
 }
 
@@ -291,14 +376,23 @@ function sha256(file) {
  * `.partial` file, producing a spurious checksum failure or - worse - promoting
  * a half-written engine into place.
  */
-async function stageVerified(asset, version, targetDir, { baseUrl = RELEASE_BASE } = {}) {
+async function stageVerified(
+  asset,
+  version,
+  targetDir,
+  { baseUrl = RELEASE_BASE, stallTimeoutMs } = {}
+) {
   const assetUrl = `${baseUrl}/v${version}/${asset}`;
-  const expected = (await readText(`${assetUrl}.sha256`)).trim().split(/\s+/)[0].toLowerCase();
+  const transfer = { stallTimeoutMs };
+  const expected = (await readText(`${assetUrl}.sha256`, transfer))
+    .trim()
+    .split(/\s+/)[0]
+    .toLowerCase();
 
   const stamp = `${process.pid}.${crypto.randomBytes(6).toString("hex")}`;
   const staged = path.join(targetDir, `.${asset}.${stamp}.partial`);
   try {
-    await download(assetUrl, staged);
+    await download(assetUrl, staged, transfer);
     const actual = await sha256(staged);
     if (actual.toLowerCase() !== expected) {
       throw new Error(

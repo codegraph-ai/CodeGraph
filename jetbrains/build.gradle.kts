@@ -60,7 +60,7 @@ kotlin {
 intellijPlatform {
     pluginConfiguration {
         id = "ai.codegraph.jetbrains"
-        name = "CodeGraph"
+        name = "CodeGraph AI"
         version = providers.gradleProperty("pluginVersion")
         vendor {
             name = "Andrey Vasilevsky"

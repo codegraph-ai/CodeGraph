@@ -152,6 +152,57 @@ struct Args {
     /// (default: ~/.codegraph/cg-engine.sock).
     #[arg(long)]
     socket: Option<PathBuf>,
+
+    /// Most threads the engine computes on: the embedding model's thread
+    /// pool, the pool tokenizing for it, and the async runtime's workers.
+    /// 0 or unset means half the logical CPUs. Also read from
+    /// `CODEGRAPH_MAX_THREADS` when the flag is not given.
+    #[arg(long)]
+    max_threads: Option<usize>,
+}
+
+impl Args {
+    /// The thread cap the user asked for, if any: `--max-threads`, else
+    /// `CODEGRAPH_MAX_THREADS`. Zero and unparsable values mean "not set".
+    fn requested_threads(&self) -> Option<usize> {
+        self.max_threads
+            .or_else(|| {
+                std::env::var("CODEGRAPH_MAX_THREADS")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+            })
+            .filter(|&n| n > 0)
+    }
+}
+
+/// How many threads each pool gets, decided once before any pool exists.
+///
+/// Without a requested cap every pool is sized to [`default_thread_budget`]
+/// (half the CPUs), except that `RAYON_NUM_THREADS` and
+/// `TOKIO_WORKER_THREADS`, which the pools read themselves, still apply:
+/// they were the only cap before this one existed. A requested cap
+/// overrides them.
+///
+/// The async runtime keeps at least two workers. Embedding runs inside a
+/// task and holds its worker until a batch finishes; with one worker, every
+/// request would wait behind it. Idle workers cost no CPU.
+struct ThreadBudget {
+    compute: usize,
+    rayon: Option<usize>,
+    tokio: Option<usize>,
+}
+
+impl ThreadBudget {
+    fn new(requested: Option<usize>) -> Self {
+        let compute = requested.unwrap_or_else(codegraph_memory::default_thread_budget);
+        let unless_env =
+            |var: &str| (requested.is_some() || std::env::var_os(var).is_none()).then_some(compute);
+        Self {
+            compute,
+            rayon: unless_env("RAYON_NUM_THREADS"),
+            tokio: unless_env("TOKIO_WORKER_THREADS").map(|n| n.max(2)),
+        }
+    }
 }
 
 /// The settings an auto-spawned engine is started with.
@@ -184,6 +235,10 @@ fn engine_args(args: &Args) -> Vec<std::ffi::OsString> {
     }
     if args.graph_only {
         out.push("--graph-only".into());
+    }
+    if let Some(threads) = args.requested_threads() {
+        out.push("--max-threads".into());
+        out.push(threads.to_string().into());
     }
     out.push(format!("--full-body-embedding={}", args.full_body_embedding).into());
     out.push(format!("--split-identifiers={}", args.split_identifiers).into());
@@ -345,7 +400,17 @@ fn main() {
     // index can't overflow the OS main thread either.
     const STACK_SIZE: usize = 32 * 1024 * 1024;
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    // Parsed before any thread pool exists, because the pools are sized from
+    // it (issue #29). `--help` and argument errors exit here.
+    let args = Args::parse();
+    let budget = ThreadBudget::new(args.requested_threads());
+    codegraph_memory::set_onnx_threads(budget.compute);
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if let Some(workers) = budget.tokio {
+        builder.worker_threads(workers);
+    }
+    let rt = builder
         .enable_all()
         .thread_stack_size(STACK_SIZE)
         .build()
@@ -354,21 +419,20 @@ fn main() {
     std::thread::Builder::new()
         .name("cg-main".into())
         .stack_size(STACK_SIZE)
-        .spawn(move || rt.block_on(run()))
+        .spawn(move || rt.block_on(run(args, budget)))
         .expect("Failed to spawn main worker thread")
         .join()
         .expect("main worker thread panicked");
 }
 
-async fn run() {
+async fn run(args: Args, budget: ThreadBudget) {
+    let compute_threads = budget.compute;
     install_crash_handlers();
     codegraph_server::crash_phase::mark("startup");
     // Clean up after processes that were killed before they could clear their
     // own marker, which is every engine a client force-kills. Runs after our
     // own mark so this process's marker is never a candidate.
     codegraph_server::crash_phase::sweep_orphans();
-
-    let args = Args::parse();
 
     if args.info {
         codegraph_server::metadata::print_metadata();
@@ -390,6 +454,7 @@ async fn run() {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
+    tracing::info!("Compute threads: {compute_threads}");
 
     // Thin MCP client (Model B): relay this process's stdio to a running engine.
     // No indexing, no model. Handled before the global signal hook; it exits
@@ -407,6 +472,21 @@ async fn run() {
             std::process::exit(1);
         }
         return;
+    }
+
+    // Rayon's global pool spawns its workers as soon as it is built, so it is
+    // built here - after every path that does no compute work has returned.
+    // The relay above forwards stdio to another engine and `--info` prints
+    // metadata; neither parses, indexes or embeds, and a pool per attached
+    // client is pure overhead. Everything below this point does compute work,
+    // and nothing above it touches rayon, so the pool is always in place
+    // before its first use.
+    if let Some(threads) = budget.rayon {
+        // Fails only if a global pool already exists, which nothing before
+        // this point creates.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global();
     }
 
     // Background watcher daemon. It owns its own signal handling and clean
@@ -711,6 +791,14 @@ mod engine_args_tests {
         assert_eq!(excludes, ["cache", "generated"]);
     }
 
+    /// A thread cap set on the client must bound the engine it starts, since
+    /// that engine is where the embedding work runs (issue #29).
+    #[test]
+    fn a_requested_thread_cap_reaches_an_auto_spawned_engine() {
+        let got = forwarded(&["--connect", "--max-threads", "3"]);
+        assert!(got.chunks(2).any(|p| p == ["--max-threads", "3"]));
+    }
+
     /// Both settings are part of the vector stamp. An engine started without
     /// them would stamp its vectors differently from the client that started
     /// it, and that client would then load none of them.
@@ -736,5 +824,36 @@ mod engine_args_tests {
         assert!(!got.iter().any(|a| a == "--profile" || a == "core"));
         // And graph-only is not forced on when the client did not ask for it.
         assert!(!got.iter().any(|a| a == "--graph-only"));
+    }
+}
+
+#[cfg(test)]
+mod thread_budget_tests {
+    use super::ThreadBudget;
+
+    #[test]
+    fn a_requested_cap_sizes_every_pool() {
+        let budget = ThreadBudget::new(Some(3));
+        assert_eq!(budget.compute, 3);
+        assert_eq!(budget.rayon, Some(3));
+        assert_eq!(budget.tokio, Some(3));
+    }
+
+    /// Embedding holds a runtime worker for a whole batch; with only one,
+    /// every request would wait behind it.
+    #[test]
+    fn the_runtime_keeps_two_workers_under_a_cap_of_one() {
+        let budget = ThreadBudget::new(Some(1));
+        assert_eq!(budget.compute, 1);
+        assert_eq!(budget.rayon, Some(1));
+        assert_eq!(budget.tokio, Some(2));
+    }
+
+    #[test]
+    fn without_a_cap_compute_uses_the_default_budget() {
+        assert_eq!(
+            ThreadBudget::new(None).compute,
+            codegraph_memory::default_thread_budget()
+        );
     }
 }

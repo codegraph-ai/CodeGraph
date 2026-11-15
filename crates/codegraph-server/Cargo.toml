@@ -89,6 +89,10 @@ codegraph-memory.workspace = true
 # CLI
 clap.workspace = true
 
+# Sizes the global pool the tokenizer runs on (issue #29); already in the
+# build through the parsers and tokenizers.
+rayon = "1.10"
+
 [features]
 # Off by default → the community binary omits these heavy, unused grammars.
 # Pro / full builds opt in with `--features extra-languages`.

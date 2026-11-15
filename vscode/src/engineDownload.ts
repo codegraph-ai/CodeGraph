@@ -57,8 +57,93 @@ export interface EngineLifecycle {
     start(): Promise<void>;
 }
 
-/** globalState key holding the engine version whose update offer was declined. */
-const UPDATE_DECLINED_KEY = 'codegraph.engineUpdateDeclined';
+/** globalState key holding the last failed automatic update, as an `UpdateFailure`. */
+const UPDATE_FAILURE_KEY = 'codegraph.engineUpdateFailure';
+
+/** How long a failed automatic update of one engine version holds off the next attempt. */
+export const UPDATE_RETRY_BACKOFF_MS = 24 * 60 * 60 * 1000;
+
+/** The engine version an automatic update last failed to install, and when. */
+export interface UpdateFailure {
+    version: string;
+    at: number;
+}
+
+/**
+ * Whether the automatic update to [version] should wait out an earlier failure.
+ *
+ * Each attempt is a full ~120 MB transfer plus an engine stop and restart, and
+ * the commonest failure - another window or an MCP client holding the binary -
+ * outlasts many window activations. Only a failure of the same version counts:
+ * a newer release deserves its own attempt straight away.
+ */
+export function shouldSkipAutomaticUpdate(
+    failure: UpdateFailure | undefined,
+    version: string,
+    now: number,
+): boolean {
+    return failure?.version === version && now - failure.at < UPDATE_RETRY_BACKOFF_MS;
+}
+
+/** Forget a failed automatic update, once the engine has been installed some other way. */
+export async function clearUpdateFailure(state: vscode.Memento): Promise<void> {
+    if (state.get<UpdateFailure>(UPDATE_FAILURE_KEY)) {
+        await state.update(UPDATE_FAILURE_KEY, undefined);
+    }
+}
+
+/**
+ * Stops a running engine at the last moment before its binary is replaced, and
+ * restarts it afterwards whichever way the install ended.
+ *
+ * The engine holds its own binary open, so it is stopped once every asset is
+ * downloaded and verified - stopping it for the length of a transfer that may
+ * fail costs the user a working engine for nothing.
+ */
+function engineSwap(lifecycle: EngineLifecycle | undefined) {
+    let stopped = false;
+    return {
+        beforeInstall: async () => {
+            if (!stopped && lifecycle?.isRunning()) {
+                stopped = true;
+                await lifecycle.stop();
+            }
+        },
+        restart: async () => {
+            if (stopped && lifecycle) {
+                stopped = false;
+                await lifecycle.start();
+            }
+        },
+    };
+}
+
+/**
+ * Start the engine again once its binary has been replaced.
+ *
+ * The install is already done by this point, so a start failure is an outcome
+ * of its own: reported as a failed update it would hold off this version's
+ * automatic attempt for a day over an engine that is in fact installed, and
+ * reported as a failed download it sends the user to debug a transfer that
+ * worked. Nor may it propagate - the caller still has an installed engine to
+ * record. Returns true when the engine was replaced but will not run, so the
+ * caller does not also report the install as a plain success.
+ */
+async function restartAfterInstall(
+    swap: ReturnType<typeof engineSwap>,
+    version: string,
+): Promise<boolean> {
+    try {
+        await swap.restart();
+        return false;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        void vscode.window.showWarningMessage(
+            `The CodeGraph engine was updated to ${version} but did not start again: ${message}`,
+        );
+        return true;
+    }
+}
 
 /** The engine asset for this platform, or null when none is published. */
 export function platformBinaryName(): string | null {
@@ -75,9 +160,11 @@ export function managedEnginePath(): string | null {
  * Download the engine for [version], reporting progress in the notification
  * area.
  *
- * Offered rather than automatic: this pulls a native binary that runs with the
- * user's permissions, and doing that unasked on first activation is not the
- * extension's decision to make.
+ * Automatic, not offered. 0.21.0 asked first, and 73% of the users it reached by
+ * auto-update from 0.19.1 - which bundled the engine - ended without one: the
+ * prompt is a toast, and a toast that is dismissed or never seen reads as "no".
+ * Installing the extension is the consent; the binary comes from this project's
+ * own release and is checksum-verified, exactly as the npm postinstall does.
  */
 export async function downloadEngine(
     version: string,
@@ -100,29 +187,31 @@ export async function downloadEngine(
 }
 
 /**
- * Offer to replace a managed engine that predates this extension release.
+ * Replace a managed engine that predates this extension release.
  *
  * The managed engine is resolved by filename, so without this an engine left
  * behind by a previous release is found and reused indefinitely and a client
  * built against a newer engine keeps talking to the old one.
  *
- * Offered rather than done, for the same reason `downloadEngine` is: this is
- * ~120 MB of native binary that will run with the user's permissions. It is also
- * deliberately not awaited by the caller - the engine on disk still works, so
- * blocking activation behind a transfer would cost every surface the extension
- * provides for an update that is not urgent.
+ * Automatic, like the first download (see `downloadEngine`), and deliberately
+ * not awaited by the caller: the engine on disk still works, so blocking
+ * activation behind a transfer would cost every surface the extension provides
+ * for an update that is not urgent.
  *
  * Only an *older* engine counts. `~/.codegraph/bin` is shared with the CLI and
  * the JetBrains plugin, which ship on their own schedules; treating a newer
  * engine as a mismatch would have the two clients reinstall over each other on
  * every launch.
  *
- * A decline is remembered. Activation happens once per window, so without that
- * a user with three windows open gets three toasts for the same drift, on every
- * launch until they give in; recording the version they declined lets the offer
- * come back on the next engine release and not before.
+ * A failure is reported once per engine version and holds off further
+ * automatic attempts at that version for a day (see
+ * `shouldSkipAutomaticUpdate`). Activation happens once per window, and the
+ * commonest failure - another window or an MCP client still running the old
+ * binary - repeats until those close, so warning or re-downloading on every
+ * window would be noise. The warning's Update Now action runs the
+ * `codegraph.downloadEngine` command, which is not held off.
  */
-export async function offerEngineUpdateIfStale(
+export async function updateEngineIfStale(
     version: string,
     state: vscode.Memento,
     lifecycle?: EngineLifecycle,
@@ -134,62 +223,44 @@ export async function offerEngineUpdateIfStale(
     if (!fetchEngine.isStale(managedInstallDir(), version)) {
         return;
     }
-    if (state.get<string>(UPDATE_DECLINED_KEY) === version) {
+    const previousFailure = state.get<UpdateFailure>(UPDATE_FAILURE_KEY);
+    if (shouldSkipAutomaticUpdate(previousFailure, version, Date.now())) {
         return;
     }
 
-    const installed = fetchEngine.installedVersion(managedInstallDir()) ?? 'an unknown version';
-    const choice = await vscode.window.showInformationMessage(
-        `The installed CodeGraph engine (${installed}) predates the one this extension ships ` +
-        `against (${version}). They ship together, so features this build expects may be missing.`,
-        'Update',
-        'Not Now',
-    );
-    if (choice !== 'Update') {
-        await state.update(UPDATE_DECLINED_KEY, version);
-        return;
-    }
-
-    // The engine holds its own binary open, so it is stopped once every asset
-    // is downloaded and verified - the last possible moment, since stopping it
-    // for the length of a transfer that may fail costs the user a working
-    // engine for nothing - and started again whichever way the install ends.
-    let stopped = false;
-    const beforeInstall = async () => {
-        if (lifecycle?.isRunning()) {
-            stopped = true;
-            await lifecycle.stop();
-        }
-    };
-
+    const swap = engineSwap(lifecycle);
     try {
-        await downloadEngine(version, { beforeInstall });
-        if (stopped && lifecycle) {
-            await lifecycle.start();
-        }
-        vscode.window.showInformationMessage(
-            stopped
-                ? `CodeGraph engine ${version} installed and restarted.`
-                : `CodeGraph engine ${version} installed. It takes effect the next time the engine starts.`,
-        );
+        await downloadEngine(version, { beforeInstall: swap.beforeInstall });
     } catch (error) {
-        if (stopped && lifecycle) {
-            // A failed update must not leave the user without an engine: the
-            // binary on disk is still the one that was running.
-            await lifecycle.start().catch(() => { });
+        // A failed update must not leave the user without an engine: the
+        // binary on disk is still the one that was running.
+        await swap.restart().catch(() => { });
+        await state.update(UPDATE_FAILURE_KEY, { version, at: Date.now() } satisfies UpdateFailure);
+        if (previousFailure?.version === version) {
+            return;
         }
         const message = error instanceof Error ? error.message : String(error);
         // Not fatal: the engine already on disk still runs, and losing a working
         // install over one version of drift is worse than the drift. "In use"
         // gets its own wording because it is the one failure the user can act
         // on, and reading it as a network problem sends them somewhere useless.
-        vscode.window.showWarningMessage(
-            isEngineInUse(error)
-                ? `The CodeGraph engine could not be replaced because it is still running. ` +
-                  `Close other windows or editors using it, then reload this window to try again.`
-                : `Could not update the CodeGraph engine to ${version}: ${message}`,
-        );
+        void vscode.window
+            .showWarningMessage(
+                isEngineInUse(error)
+                    ? 'The CodeGraph engine could not be updated because it is still running. ' +
+                      'Close other windows or editors using it, then choose Update Now.'
+                    : `Could not update the CodeGraph engine to ${version}: ${message}`,
+                'Update Now',
+            )
+            .then((choice) => {
+                if (choice === 'Update Now') {
+                    void vscode.commands.executeCommand('codegraph.downloadEngine');
+                }
+            });
+        return;
     }
+    await clearUpdateFailure(state);
+    await restartAfterInstall(swap, version);
 }
 
 /** True for the "another process holds the binary" failure `fetch-engine.js` names. */
@@ -197,44 +268,82 @@ function isEngineInUse(error: unknown): boolean {
     return error instanceof Error && error.name === 'EngineInUseError';
 }
 
+/** Why the engine could not be installed; reported as `engine_<reason>` in telemetry. */
+export type EngineInstallFailure = 'unsupported_platform' | 'checksum' | 'in_use' | 'download';
+
+export type EngineInstallResult =
+    | { binary: string; startFailed: boolean }
+    | { failure: EngineInstallFailure };
+
+/** Waits between attempts; a transient network or proxy hiccup rarely outlasts the second. */
+const RETRY_DELAYS_MS = [2_000, 10_000];
+
 /**
- * Ask whether to download, then do it.
+ * Install the engine for this platform, retrying transient failures.
  *
- * Returns the engine path, or null if the user declined or it failed - callers
- * treat that as "no engine", which is the same state they already handle.
+ * Never prompts first (see `downloadEngine`). A failure is shown with a Retry
+ * button but not awaited, so activation reports it and moves on instead of
+ * waiting on a toast the user may never answer. When [lifecycle] is given, an
+ * engine this window is running is stopped for the swap and started again.
  */
-export async function offerEngineDownload(version: string): Promise<string | null> {
+export async function installEngine(
+    version: string,
+    lifecycle?: EngineLifecycle,
+): Promise<EngineInstallResult> {
     if (!platformBinaryName()) {
-        vscode.window.showErrorMessage(
+        void vscode.window.showErrorMessage(
             `CodeGraph does not publish an engine for ${os.platform()}-${os.arch()}. ` +
             'Point the extension at your own build with the codegraph.serverPath setting.',
         );
-        return null;
+        return { failure: 'unsupported_platform' };
     }
 
-    const choice = await vscode.window.showInformationMessage(
-        'CodeGraph needs its analysis engine, which is downloaded separately for your platform.',
-        'Download',
-        'Not Now',
-    );
-    if (choice !== 'Download') {
-        return null;
+    const swap = engineSwap(lifecycle);
+    let attempts = 0;
+    let lastError: unknown;
+    for (;;) {
+        attempts++;
+        let binary: string;
+        try {
+            binary = await downloadEngine(version, { beforeInstall: swap.beforeInstall });
+        } catch (error) {
+            await swap.restart().catch(() => { });
+            lastError = error;
+            // Retrying cannot fix bytes that fail verification or a binary
+            // another process holds open.
+            if (isChecksumFailure(error) || isEngineInUse(error) || attempts > RETRY_DELAYS_MS.length) {
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempts - 1]));
+            continue;
+        }
+        const startFailed = await restartAfterInstall(swap, version);
+        return { binary, startFailed };
     }
 
-    try {
-        const binary = await downloadEngine(version);
-        vscode.window.showInformationMessage('CodeGraph engine installed.');
-        return binary;
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // A checksum failure is not a network failure, and saying so matters:
-        // one is worth retrying, the other means something served the wrong
-        // bytes.
-        vscode.window.showErrorMessage(
-            /checksum/i.test(message)
-                ? `The downloaded engine failed verification and was discarded: ${message}`
+    const message = lastError instanceof Error ? lastError.message : String(lastError);
+    const failure: EngineInstallFailure = isChecksumFailure(lastError)
+        ? 'checksum'
+        : isEngineInUse(lastError)
+          ? 'in_use'
+          : 'download';
+    // A checksum failure is not a network failure, and saying so matters: one is
+    // worth retrying, the other means something served the wrong bytes.
+    void vscode.window
+        .showErrorMessage(
+            failure === 'checksum'
+                ? `The downloaded CodeGraph engine failed verification and was discarded: ${message}`
                 : `Could not download the CodeGraph engine: ${message}`,
-        );
-        return null;
-    }
+            'Retry',
+        )
+        .then((choice) => {
+            if (choice === 'Retry') {
+                void vscode.commands.executeCommand('codegraph.downloadEngine');
+            }
+        });
+    return { failure };
+}
+
+function isChecksumFailure(error: unknown): boolean {
+    return error instanceof Error && /checksum/i.test(error.message);
 }

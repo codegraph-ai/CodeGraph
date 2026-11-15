@@ -52,6 +52,13 @@ tokenizers = "0.21"
 safetensors = "0.4"
 half = "2"
 
+# The ONNX session is built here, not by fastembed, so its thread pool can be
+# sized and its spin-waiting turned off (issue #29). Both crates are already
+# in the build through fastembed; these must stay at its versions, and the
+# platform features (static binaries vs. a loaded DLL) come from its features.
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray"] }
+ndarray = { version = "0.16", default-features = false }
+
 # Embeddings - fastembed with BGE-Small-EN-v1.5
 # macOS/Linux: static link ONNX Runtime (ort-download-binaries)
 # Windows: load onnxruntime DLL at runtime (ort-load-dynamic, avoids CRT /MT vs /MD mismatch)

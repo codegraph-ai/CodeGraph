@@ -12,7 +12,7 @@ vi.mock('vscode', () => ({}));
 import { engineSpawnEnv } from './server';
 
 /** Stands in for a `WorkspaceConfiguration` over the given settings. */
-function config(settings: Record<string, string | undefined>) {
+function config(settings: Record<string, string | number | undefined>) {
     return { get: <T>(key: string) => settings[key] as T | undefined };
 }
 
@@ -57,5 +57,25 @@ describe('engineSpawnEnv', () => {
         });
 
         expect(env.CODEGRAPH_STATIC_MODEL).toBe('/from/the/users/shell');
+    });
+
+    it('caps the engine threads when codegraph.maxThreads is set', () => {
+        const env = engineSpawnEnv(config({ maxThreads: 4 }), {});
+
+        expect(env.CODEGRAPH_MAX_THREADS).toBe('4');
+    });
+
+    it('leaves the engine default, or the users own cap, when maxThreads is 0', () => {
+        expect(engineSpawnEnv(config({ maxThreads: 0 }), {}).CODEGRAPH_MAX_THREADS).toBeUndefined();
+        expect(
+            engineSpawnEnv(config({ maxThreads: 0 }), { CODEGRAPH_MAX_THREADS: '3' })
+                .CODEGRAPH_MAX_THREADS,
+        ).toBe('3');
+    });
+
+    it('lets the setting override an inherited CODEGRAPH_MAX_THREADS', () => {
+        const env = engineSpawnEnv(config({ maxThreads: 2 }), { CODEGRAPH_MAX_THREADS: '8' });
+
+        expect(env.CODEGRAPH_MAX_THREADS).toBe('2');
     });
 });

@@ -30,12 +30,13 @@ The server indexes the current working directory automatically.
 Install from the marketplace, or sideload the VSIX:
 
 ```bash
-code --install-extension codegraph-0.21.0.vsix
+code --install-extension codegraph-0.21.1.vsix
 ```
 
 One VSIX serves every platform.
-The analysis engine is not bundled: on first activation the extension offers to download the engine built for your platform, verifies it against the published checksum, and installs it into `~/.codegraph/bin`.
-The download is offered rather than performed automatically, because it is a native binary that runs with your permissions - decline it and run **CodeGraph: Download Analysis Engine** from the command palette whenever you are ready.
+The analysis engine is not bundled: on first activation the extension downloads the engine built for your platform from this project's GitHub release, verifies it against the published checksum, and installs it into `~/.codegraph/bin`.
+When the installed engine is older than the release the extension expects, it is updated the same way, and a failed automatic update is not retried for that version for a day.
+If a download fails, run **CodeGraph: Download Analysis Engine** from the command palette to try again.
 
 Once an engine is present, the extension starts it automatically and registers all tools as Language Model Tools for Copilot.
 CodeGraph's Symbols and Memories views live in the CodeGraph activity-bar container, and inline CodeLens above each function reports callers, related tests and complexity (`codegraph.codeLens.enabled` / `codegraph.hover.enabled` turn those off).
@@ -58,6 +59,7 @@ The engine's command-line flags (`--workspace`, `--exclude`, `--embedding-model`
   "codegraph.embeddingModel": "bge-small",        // or "static" for ~100× faster indexing
   "codegraph.staticModelPath": "",                // only to override the default model2vec model dir
   "codegraph.maxFileSizeKB": 1024,
+  "codegraph.maxThreads": 0,                      // CPU threads for indexing and embeddings; 0 = half the CPUs
   "codegraph.codeLens.enabled": true,             // caller / test / complexity counts above functions
   "codegraph.hover.enabled": true,                // the same stats on hover
   "codegraph.debug": false
