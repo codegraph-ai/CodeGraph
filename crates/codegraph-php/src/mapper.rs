@@ -191,7 +191,6 @@ pub fn ir_to_graph(
         let key = crate::visitor::method_key(func.parent_class.as_deref(), &func.name);
         let mut props = PropertyMap::new()
             .with("name", func.name.clone())
-            .with("qualified_name", key.clone())
             .with("path", file_path.display().to_string())
             .with("signature", func.signature.clone())
             .with("visibility", func.visibility.clone())
@@ -208,7 +207,9 @@ pub fn ir_to_graph(
             props = props.with("return_type", return_type.clone());
         }
         if let Some(ref parent) = func.parent_class {
-            props = props.with("parent_class", parent.clone());
+            props = props
+                .with("parent_class", parent.clone())
+                .with("qualified_name", key.clone());
         }
         if let Some(ref body) = func.body_prefix {
             props = props.with("body_prefix", body.clone());

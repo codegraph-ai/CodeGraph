@@ -649,9 +649,6 @@ impl GraphUpdater {
     }
 }
 
-/// Weight a symbol for deduplication: prefer non-stub implementations.
-/// Returns a score based on complexity and line count — stubs (empty body,
-/// single-line return) get low scores, real implementations get high scores.
 /// The declaration a `Class::method` call reaches when `Class` does not declare
 /// `method` itself: the first ancestor that does, searched breadth-first in
 /// each type's `inherits` order. `None` when no indexed ancestor declares it -
@@ -689,6 +686,9 @@ fn resolve_inherited(
     None
 }
 
+/// Weight a symbol for deduplication: prefer non-stub implementations.
+/// Returns a score based on complexity and line count — stubs (empty body,
+/// single-line return) get low scores, real implementations get high scores.
 fn symbol_weight(graph: &codegraph::CodeGraph, node_id: codegraph::NodeId) -> u32 {
     let node = match graph.get_node(node_id) {
         Ok(n) => n,
@@ -1769,19 +1769,19 @@ void helper_func(int x) {
         }
 
         fn by_qualified_name(graph: &CodeGraph, qualified: &str) -> codegraph::NodeId {
+            let key = |n: &codegraph::Node| {
+                n.properties
+                    .get_string("qualified_name")
+                    .or_else(|| n.properties.get_string("name"))
+                    .map(str::to_string)
+            };
             graph
                 .query()
                 .node_type(codegraph::NodeType::Function)
                 .execute()
                 .unwrap_or_default()
                 .into_iter()
-                .find(|&id| {
-                    graph.get_node(id).ok().and_then(|n| {
-                        n.properties
-                            .get_string("qualified_name")
-                            .map(|q| q == qualified)
-                    }) == Some(true)
-                })
+                .find(|&id| graph.get_node(id).ok().and_then(key).as_deref() == Some(qualified))
                 .unwrap_or_else(|| panic!("{qualified} not in graph"))
         }
 
@@ -1849,6 +1849,25 @@ void helper_func(int x) {
             );
             let graph = resolve(&[SCREENS[0], SCREENS[1], caller]);
             let show = by_qualified_name(&graph, "App\\show");
+            assert_eq!(count_calls_edges_from(&graph, show), 0);
+        }
+
+        #[test]
+        fn an_unknown_receiver_does_not_bind_a_same_named_global_function() {
+            let graph = resolve(&[
+                (
+                    "/ws/functions.php",
+                    "<?php\nfunction render(): string { return 'g'; }\n",
+                ),
+                SCREENS[0],
+                (
+                    "/ws/Dynamic.php",
+                    "<?php\nfunction show($screen): string { return $screen->render(); }\n",
+                ),
+            ]);
+            let show = by_qualified_name(&graph, "show");
+            let global = by_qualified_name(&graph, "render");
+            assert!(!has_calls_edge(&graph, show, global));
             assert_eq!(count_calls_edges_from(&graph, show), 0);
         }
 
