@@ -281,14 +281,14 @@ function download(url, destination, options = {}) {
           guard.touch();
           // GitHub release assets always redirect to object storage.
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume();
             let next;
             try {
               next = redirectTarget(url, res.headers.location);
             } catch (error) {
               return fail(error);
             }
-            return done(
+            guard.abort();
+            return resolve(
               download(next, destination, { ...options, redirects: redirects - 1 })
             );
           }
@@ -327,14 +327,14 @@ function readText(url, options = {}) {
         .get(url, { headers: { "User-Agent": "codegraph-installer" } }, (res) => {
           guard.touch();
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume();
             let next;
             try {
               next = redirectTarget(url, res.headers.location);
             } catch (error) {
               return fail(error);
             }
-            return done(readText(next, { ...options, redirects: redirects - 1 }));
+            guard.abort();
+            return resolve(readText(next, { ...options, redirects: redirects - 1 }));
           }
           if (res.statusCode !== 200) {
             res.resume();

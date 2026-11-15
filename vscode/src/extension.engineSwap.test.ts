@@ -33,6 +33,10 @@ const mocks = vi.hoisted(() => {
         clientStart: vi.fn(async () => { }),
         clientStop: vi.fn(async () => { }),
         updateEngineIfStale: vi.fn(async () => { }),
+        installEngine: vi.fn(async () => ({ binary: '/mock/engine', startFailed: false })),
+        showInformationMessage: vi.fn(async (..._args: unknown[]) => undefined),
+        // Command handlers the extension registers, keyed by command id.
+        commandHandlers: {} as Record<string, () => Promise<void>>,
     };
 });
 
@@ -69,13 +73,16 @@ vi.mock('vscode', () => ({
             hide: vi.fn(),
             dispose: vi.fn(),
         }),
-        showInformationMessage: vi.fn(async () => undefined),
+        showInformationMessage: mocks.showInformationMessage,
         showWarningMessage: vi.fn(async () => undefined),
         showErrorMessage: vi.fn(async () => undefined),
         withProgress: vi.fn(async (_opts: unknown, task: () => Promise<unknown>) => task()),
     },
     commands: {
-        registerCommand: () => mocks.disposable,
+        registerCommand: (id: string, handler: () => Promise<void>) => {
+            mocks.commandHandlers[id] = handler;
+            return mocks.disposable;
+        },
         executeCommand: vi.fn(async () => undefined),
     },
     extensions: { getExtension: () => undefined },
@@ -128,7 +135,7 @@ vi.mock('./telemetry/machineProfile', () => ({
 vi.mock('./engineDownload', () => ({
     clearUpdateFailure: vi.fn(async () => { }),
     engineVersion: () => '0.21.0',
-    installEngine: vi.fn(async () => ({ binary: '/mock/engine' })),
+    installEngine: mocks.installEngine,
     managedEnginePath: () => '/mock/engine',
     updateEngineIfStale: mocks.updateEngineIfStale,
 }));
@@ -189,25 +196,33 @@ async function activateAndCaptureLifecycle() {
     return lifecycle as { stop: () => Promise<void>; start: () => Promise<void> };
 }
 
+const infoMessages = (): string[] =>
+    mocks.showInformationMessage.mock.calls.map((call) => String(call[0]));
+
+beforeEach(() => {
+    vi.clearAllMocks();
+    context.subscriptions = [];
+    mocks.stateListeners = [];
+    mocks.clientStart.mockImplementation(async () => { });
+    mocks.clientStop.mockImplementation(async () => { });
+    mocks.installEngine.mockImplementation(async () => ({
+        binary: '/mock/engine',
+        startFailed: false,
+    }));
+    for (const key of Object.keys(mocks.commandHandlers)) delete mocks.commandHandlers[key];
+    for (const key of Object.keys(mocks.reporterCalls)) delete mocks.reporterCalls[key];
+});
+
+afterEach(() => {
+    vi.resetModules();
+});
+
 // An engine swap stops the running engine, installs the new binary and starts
 // it again. None of that is a crash, so none of it may be reported as one -
 // including the case the engine actually hits: the replacement binary will not
 // run. vscode-languageclient reports a failed start as the public state
 // Stopped, the very transition a real crash produces.
 describe('engine swap crash telemetry', () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        context.subscriptions = [];
-        mocks.stateListeners = [];
-        mocks.clientStart.mockImplementation(async () => { });
-        mocks.clientStop.mockImplementation(async () => { });
-        for (const key of Object.keys(mocks.reporterCalls)) delete mocks.reporterCalls[key];
-    });
-
-    afterEach(() => {
-        vi.resetModules();
-    });
-
     it('reports no crash when the swapped-in engine fails to start', async () => {
         const lifecycle = await activateAndCaptureLifecycle();
 
@@ -286,5 +301,31 @@ describe('engine swap crash telemetry', () => {
         emitState(State.Running, State.Starting);
 
         expect(mocks.reporterCalls.serverRestart ?? []).toEqual([['crash']]);
+    });
+});
+
+// The install and the restart are two outcomes. An engine that was replaced
+// but will not run has already been warned about, and confirming the install
+// after that warning is the difference between reloading the window and
+// assuming all is well.
+describe('codegraph.downloadEngine reporting', () => {
+    it('does not confirm an install whose engine failed to start', async () => {
+        await activateAndCaptureLifecycle();
+        mocks.installEngine.mockImplementation(async () => ({
+            binary: '/mock/engine',
+            startFailed: true,
+        }));
+
+        await mocks.commandHandlers['codegraph.downloadEngine']();
+
+        expect(infoMessages()).not.toContain('CodeGraph engine installed.');
+    });
+
+    it('confirms an install whose engine started', async () => {
+        await activateAndCaptureLifecycle();
+
+        await mocks.commandHandlers['codegraph.downloadEngine']();
+
+        expect(infoMessages()).toContain('CodeGraph engine installed.');
     });
 });

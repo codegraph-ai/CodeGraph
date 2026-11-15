@@ -443,6 +443,63 @@ async function run() {
     }
   }
 
+  // --- a redirect hangs up too ------------------------------------------
+  // A redirect's own body is never read, but it still arrives. Settling the
+  // redirect without hanging up leaves a response open with nothing watching
+  // it, which keeps an npm postinstall alive after a successful install.
+  {
+    const dir = scratch();
+    const name = platformBinaryName();
+    const stallTimeoutMs = 300;
+    const digest = crypto.createHash("sha256").update("engine").digest("hex");
+    let redirectsOpen = 0;
+    const server = http.createServer((req, res) => {
+      if (req.url.startsWith("/objects")) {
+        const body = req.url.endsWith(".sha256") ? `${digest}  ${name}\n` : "engine";
+        res.writeHead(200, { "Content-Length": Buffer.byteLength(body) });
+        res.end(body);
+        return;
+      }
+      // Promise a redirect body far larger than it ever delivers: only the
+      // client hanging up can end this response.
+      res.writeHead(302, {
+        Location: `/objects${req.url}`,
+        "Content-Length": 1 << 20,
+      });
+      redirectsOpen++;
+      const tick = setInterval(() => res.write("redirect"), stallTimeoutMs / 10);
+      res.on("close", () => {
+        clearInterval(tick);
+        redirectsOpen--;
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    try {
+      let threw = null;
+      await ensureEngine(VERSION, dir, {
+        baseUrl,
+        stallTimeoutMs,
+        platform: "linux",
+        arch: "x64",
+      }).catch((e) => (threw = e));
+      check(threw === null, "an install behind a stalling redirect still completes");
+      const installedAt = Date.now();
+      const deadline = installedAt + stallTimeoutMs * 3;
+      while (redirectsOpen > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      check(
+        redirectsOpen === 0 && Date.now() - installedAt < stallTimeoutMs,
+        `a followed redirect hangs up at once (${redirectsOpen} left open)`
+      );
+    } finally {
+      server.closeAllConnections();
+      server.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   // --- nothing is installed until everything is verified ----------------
   // Installing each asset as its download finishes is how a Windows install
   // ends up with a new engine beside the old onnxruntime.dll: that combination

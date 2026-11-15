@@ -310,12 +310,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(
         vscode.commands.registerCommand('codegraph.downloadEngine', async () => {
             const activationStopped = !client;
-            if (!('binary' in (await installEngine(engineVersion(), engineLifecycle)))) {
+            const result = await installEngine(engineVersion(), engineLifecycle);
+            if (!('binary' in result)) {
                 return;
             }
             await clearUpdateFailure(context.globalState);
             if (!activationStopped) {
-                void vscode.window.showInformationMessage('CodeGraph engine installed.');
+                if (!result.startFailed) {
+                    void vscode.window.showInformationMessage('CodeGraph engine installed.');
+                }
                 return;
             }
             const choice = await vscode.window.showInformationMessage(

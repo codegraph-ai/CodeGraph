@@ -126,19 +126,22 @@ function engineSwap(lifecycle: EngineLifecycle | undefined) {
  * automatic attempt for a day over an engine that is in fact installed, and
  * reported as a failed download it sends the user to debug a transfer that
  * worked. Nor may it propagate - the caller still has an installed engine to
- * record.
+ * record. Returns true when the engine was replaced but will not run, so the
+ * caller does not also report the install as a plain success.
  */
 async function restartAfterInstall(
     swap: ReturnType<typeof engineSwap>,
     version: string,
-): Promise<void> {
+): Promise<boolean> {
     try {
         await swap.restart();
+        return false;
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         void vscode.window.showWarningMessage(
             `The CodeGraph engine was updated to ${version} but did not start again: ${message}`,
         );
+        return true;
     }
 }
 
@@ -269,7 +272,7 @@ function isEngineInUse(error: unknown): boolean {
 export type EngineInstallFailure = 'unsupported_platform' | 'checksum' | 'in_use' | 'download';
 
 export type EngineInstallResult =
-    | { binary: string }
+    | { binary: string; startFailed: boolean }
     | { failure: EngineInstallFailure };
 
 /** Waits between attempts; a transient network or proxy hiccup rarely outlasts the second. */
@@ -314,8 +317,8 @@ export async function installEngine(
             await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempts - 1]));
             continue;
         }
-        await restartAfterInstall(swap, version);
-        return { binary };
+        const startFailed = await restartAfterInstall(swap, version);
+        return { binary, startFailed };
     }
 
     const message = lastError instanceof Error ? lastError.message : String(lastError);

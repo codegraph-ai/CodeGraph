@@ -155,12 +155,21 @@ describe('an engine that is installed but will not start', () => {
 
         const result = await engineDownload.installEngine('0.21.0', lifecycle);
 
-        expect(result).toEqual({ binary: BINARY });
+        expect(result).toEqual({ binary: BINARY, startFailed: true });
         expect(mocks.engine.ensureEngine).toHaveBeenCalledOnce();
         expect(mocks.window.showErrorMessage).not.toHaveBeenCalled();
         expect(warnings()).toEqual([
             'The CodeGraph engine was updated to 0.21.0 but did not start again: exited with code 127',
         ]);
+    });
+
+    it('reports a clean swap as an install that started', async () => {
+        const lifecycle = fakeLifecycle(async () => { });
+
+        const result = await engineDownload.installEngine('0.21.0', lifecycle);
+
+        expect(result).toEqual({ binary: BINARY, startFailed: false });
+        expect(warnings()).toEqual([]);
     });
 
     it('leaves a real download failure reported and backed off', async () => {
