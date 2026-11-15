@@ -30,13 +30,12 @@ The server indexes the current working directory automatically.
 Install the VSIX:
 
 ```bash
-code --install-extension codegraph-0.21.0.vsix
+code --install-extension codegraph-0.21.1.vsix
 ```
 
 One VSIX serves every platform.
-The analysis engine is not bundled: on first activation the extension offers to download the engine built for your platform, verifies it against the published checksum, and installs it into `~/.codegraph/bin` - the same location the JetBrains plugin uses, so one download serves both.
-The download is offered rather than performed automatically, because it is a native binary that runs with your permissions.
-Decline it and run **CodeGraph: Download Analysis Engine** from the command palette whenever you are ready.
+The analysis engine is not bundled: on first activation the extension downloads the engine built for your platform, verifies it against the published checksum, and installs it into `~/.codegraph/bin` - the same location the JetBrains plugin uses, so one download serves both.
+If the download fails, run **CodeGraph: Download Analysis Engine** from the command palette to try again.
 
 Once an engine is present, the extension starts it automatically and registers all tools as Language Model Tools for Copilot.
 
