@@ -438,6 +438,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 excludePatterns: latestConfig.get<string[]>('excludePatterns'),
                 indexPaths: latestConfig.get<string[]>('indexPaths'),
                 maxFileSizeKB: latestConfig.get<number>('maxFileSizeKB'),
+                maxFiles: latestConfig.get<number>('maxFiles'),
                 embeddingModel: latestConfig.get<string>('embeddingModel'),
                 staticModelPath: latestConfig.get<string>('staticModelPath'),
                 fullBodyEmbedding: latestConfig.get<boolean>('fullBodyEmbedding'),
@@ -701,6 +702,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     excludePatterns: updated.get<string[]>('excludePatterns'),
                     indexPaths: updated.get<string[]>('indexPaths'),
                     maxFileSizeKB: updated.get<number>('maxFileSizeKB'),
+                    maxFiles: updated.get<number>('maxFiles'),
                     embedOnOpen: updated.get<boolean>('embedOnOpen'),
                 };
                 try {

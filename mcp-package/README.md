@@ -76,10 +76,10 @@ whatever the client passes rather than forwarded twice.
 | `--workspace <path>` | current dir | Directories to index (repeatable) |
 | `--exclude <dir>` | — | Directories to skip (repeatable) |
 | `--embedding-model <model>` | `bge-small` | `bge-small`, `jina-code-v2`, `granite-97m` (32K, multilingual), or `static` (model2vec, ~100× faster indexing, ~90% of BGE quality; needs a local model dir - this install downloads one to `~/.codegraph/static_models/jina-code-static-256`, or point `CODEGRAPH_STATIC_MODEL` elsewhere) |
-| `--max-files <n>` | 5000 | Maximum files to index |
+| `--max-files <n>` | 5000 | Maximum files to index (in LSP mode, a positive `codegraph.maxFiles` setting wins) |
 | `--max-threads <n>` | half the CPUs | Most threads the engine computes on (embedding model, tokenizer, async runtime). Also read from `CODEGRAPH_MAX_THREADS` |
 | `--profile <name>` | `all` | Scope tool surface: `core` (8), `graph` (17), `memory` (14), `security` (pro), `all` (42) |
-| `--graph-only` | off | Skip embeddings — graph + structural tools only. No ONNX model load, 10-50× faster indexing. For CI / one-shot graph queries. |
+| `--graph-only` | off | Skip embeddings — graph + structural tools only. No ONNX model load, 10-50× faster indexing. For CI / one-shot graph queries. Not applied in LSP mode. |
 | `--run-tool <name>` | — | One-shot: index, run a single tool, print result, exit. No MCP handshake. Pair with `--tool-args '<json>'`. |
 
 ### Troubleshooting: embeddings disabled / "Memory manager not initialized"

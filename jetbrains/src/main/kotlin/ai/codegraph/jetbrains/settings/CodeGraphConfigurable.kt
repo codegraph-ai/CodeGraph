@@ -70,6 +70,11 @@ class CodeGraphConfigurable(private val project: Project) : BoundConfigurable(DI
                 intTextField(range = MIN_FILE_SIZE_KB..MAX_FILE_SIZE_KB)
                     .bindIntText(state::maxFileSizeKB)
             }
+            row("Maximum files to index:") {
+                intTextField(range = 0..MAX_FILES)
+                    .bindIntText(state::maxFiles)
+                    .comment("0 uses the engine's limit (5000 unless started with --max-files)")
+            }
         }
 
         group("Embeddings") {
@@ -154,6 +159,7 @@ class CodeGraphConfigurable(private val project: Project) : BoundConfigurable(DI
             "excludePatterns" to state.excludePatterns.toList(),
             "indexPaths" to state.indexPaths.toList(),
             "maxFileSizeKB" to state.maxFileSizeKB,
+            "maxFiles" to state.maxFiles,
             "embedOnOpen" to state.embedOnOpen,
         )
         client.execute(CodeGraphCommand.UPDATE_CONFIGURATION, updated)
@@ -171,6 +177,7 @@ class CodeGraphConfigurable(private val project: Project) : BoundConfigurable(DI
         const val COLUMNS_WIDE = 40
         const val MIN_FILE_SIZE_KB = 1
         const val MAX_FILE_SIZE_KB = 1024 * 64
+        const val MAX_FILES = 10_000_000
         const val DEFAULT_EMBEDDING_MODEL = "bge-small"
 
         val EMBEDDING_MODELS = listOf("bge-small", "granite-97m", "static")

@@ -48,8 +48,9 @@ struct Args {
     #[arg(long, short)]
     exclude: Vec<String>,
 
-    /// Maximum number of files to index (default: 5000)
-    #[arg(long, default_value = "5000")]
+    /// Maximum number of files to index (default: 5000). In LSP mode a
+    /// positive `maxFiles` from the client takes precedence.
+    #[arg(long, default_value_t = codegraph_server::indexer::IndexConfig::DEFAULT_MAX_FILES)]
     max_files: usize,
 
     /// Embedding model: bge-small (384d, 512 ctx, fast — default),
@@ -110,6 +111,7 @@ struct Args {
     /// tools only. The ONNX model is never loaded (faster startup, lower
     /// memory, ~10-50× faster indexing). Semantic search and similarity
     /// tools are unavailable. Ideal for CI / one-shot graph queries.
+    /// Not applied in LSP mode, where the client's settings decide embedding.
     #[arg(long)]
     graph_only: bool,
 
@@ -504,6 +506,7 @@ async fn run(args: Args, budget: ThreadBudget) {
             embedding_model: Some(args.embedding_model.clone()),
             full_body_embedding: args.full_body_embedding,
             split_identifiers: args.split_identifiers,
+            max_files: args.max_files,
         };
         if let Err(e) = codegraph_server::daemon::run(config).await {
             eprintln!("daemon error: {e}");
@@ -634,11 +637,22 @@ async fn run(args: Args, budget: ThreadBudget) {
         use tower_lsp::{LspService, Server};
 
         tracing::info!("Starting CodeGraph LSP server");
+        if args.graph_only {
+            tracing::warn!(
+                "--graph-only is not applied in LSP mode; the client's settings decide embedding"
+            );
+        }
 
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
 
-        let (service, socket) = LspService::new(CodeGraphBackend::new);
+        let launch = codegraph_server::LaunchOptions {
+            max_files: args.max_files,
+            exclude_dirs: args.exclude.clone(),
+        };
+        let (service, socket) = LspService::new(move |client| {
+            CodeGraphBackend::new(client).with_launch_options(launch.clone())
+        });
 
         codegraph_server::crash_phase::mark("serving");
         // Race the serve loop against the exit signal: tower-lsp will not

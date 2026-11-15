@@ -185,6 +185,8 @@ pub struct DaemonConfig {
     /// Whether to split run-together identifiers into words when embedding.
     /// Carried for the same reason as [`Self::full_body_embedding`].
     pub split_identifiers: bool,
+    /// Files indexed per scan (`--max-files`).
+    pub max_files: usize,
 }
 
 /// Run the watcher daemon for a workspace until a termination signal arrives.
@@ -219,6 +221,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         "fullBodyEmbedding": config.full_body_embedding,
         "splitIdentifiers": config.split_identifiers,
         "embedOnOpen": true,
+        "maxFiles": config.max_files,
     });
     let uri = Url::from_file_path(&workspace)
         .map_err(|_| format!("invalid workspace path: {workspace:?}"))?;

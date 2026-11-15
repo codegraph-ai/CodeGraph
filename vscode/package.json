@@ -229,6 +229,13 @@
                     "scope": "resource",
                     "description": "Maximum file size to index (KB)"
                 },
+                "codegraph.maxFiles": {
+                    "type": "integer",
+                    "default": 0,
+                    "minimum": 0,
+                    "scope": "resource",
+                    "markdownDescription": "Maximum number of files to index per workspace. `0` uses the engine's `--max-files` (5000 unless the engine was started with another value). Takes effect on the next index."
+                },
                 "codegraph.excludePatterns": {
                     "type": "array",
                     "items": {

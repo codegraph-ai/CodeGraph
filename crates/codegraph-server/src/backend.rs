@@ -41,6 +41,34 @@ pub struct CodeGraphConfig {
     /// stays current. When false, embeddings refresh only on save / reindex.
     #[serde(default = "default_embed_on_open")]
     pub embed_on_open: bool,
+    /// Files indexed per workspace scan, from `codegraph.maxFiles`. Zero means
+    /// the client has no opinion and the engine's `--max-files` applies.
+    #[serde(default)]
+    pub max_files: usize,
+}
+
+/// Indexing limits fixed when the engine starts, from its command line.
+///
+/// Kept apart from [`CodeGraphConfig`] because that is replaced wholesale
+/// whenever the client pushes settings, and a value the client never sends must
+/// survive that. LSP mode used to ignore `--max-files` and `--exclude`
+/// entirely, so an engine started with a raised limit - the usual way to run
+/// it in a container - still stopped at 5,000 files.
+#[derive(Debug, Clone)]
+pub struct LaunchOptions {
+    /// `--max-files`.
+    pub max_files: usize,
+    /// `--exclude`: directory names skipped on top of the defaults.
+    pub exclude_dirs: Vec<String>,
+}
+
+impl Default for LaunchOptions {
+    fn default() -> Self {
+        Self {
+            max_files: crate::indexer::IndexConfig::DEFAULT_MAX_FILES,
+            exclude_dirs: Vec::new(),
+        }
+    }
 }
 
 fn default_max_file_size_kb() -> u64 {
@@ -59,6 +87,7 @@ impl Default for CodeGraphConfig {
             index_paths: Vec::new(),
             max_file_size_kb: 1024,
             embed_on_open: true,
+            max_files: 0,
         }
     }
 }
@@ -147,6 +176,9 @@ pub struct CodeGraphBackend {
     /// Indexing configuration from VS Code settings.
     pub config: Arc<RwLock<CodeGraphConfig>>,
 
+    /// Indexing limits from the engine's command line.
+    launch: LaunchOptions,
+
     /// Extension point for pro LSP commands (community uses NoopProCommandProvider).
     pub pro_commands: Arc<dyn crate::lsp_pro_hooks::ProCommandProvider>,
 
@@ -193,12 +225,20 @@ impl CodeGraphBackend {
             file_watcher: Arc::new(Mutex::new(None)),
             branch_watcher: Arc::new(Mutex::new(None)),
             config: Arc::new(RwLock::new(CodeGraphConfig::default())),
+            launch: LaunchOptions::default(),
             pro_commands: Arc::new(crate::lsp_pro_hooks::NoopProCommandProvider),
             command_prefix: "codegraph".to_string(),
             index_state,
             indexer,
             embed_queue,
         }
+    }
+
+    /// Apply the engine's command-line indexing limits.
+    #[must_use]
+    pub fn with_launch_options(mut self, launch: LaunchOptions) -> Self {
+        self.launch = launch;
+        self
     }
 
     /// Create a backend with a custom pro command provider for LSP.
@@ -246,6 +286,7 @@ impl CodeGraphBackend {
             file_watcher: Arc::new(Mutex::new(None)),
             branch_watcher: Arc::new(Mutex::new(None)),
             config: Arc::new(RwLock::new(CodeGraphConfig::default())),
+            launch: LaunchOptions::default(),
             pro_commands: Arc::new(crate::lsp_pro_hooks::NoopProCommandProvider),
             command_prefix: "codegraph".to_string(),
             index_state,
@@ -465,7 +506,12 @@ impl CodeGraphBackend {
 
     /// Build an [`IndexConfig`](crate::indexer::IndexConfig) from the current
     /// LSP configuration.
-    fn index_config_from_lsp(config: &CodeGraphConfig) -> crate::indexer::IndexConfig {
+    ///
+    /// The client's `maxFiles` wins when it sets one; otherwise `--max-files`.
+    fn index_config_from_lsp(
+        config: &CodeGraphConfig,
+        launch: &LaunchOptions,
+    ) -> crate::indexer::IndexConfig {
         // Merge user-provided exclude patterns with the hardcoded defaults
         // rather than replacing them. The defaults cover binary archives,
         // secret files, package artifacts, and vendored parser sources.
@@ -477,10 +523,21 @@ impl CodeGraphBackend {
                 patterns.push(p.clone());
             }
         }
+        let mut exclude_dirs = crate::indexer::IndexConfig::default_exclude_dirs();
+        for d in &launch.exclude_dirs {
+            if !exclude_dirs.contains(d) {
+                exclude_dirs.push(d.clone());
+            }
+        }
         crate::indexer::IndexConfig {
-            exclude_dirs: crate::indexer::IndexConfig::default_exclude_dirs(),
+            exclude_dirs,
             exclude_patterns: patterns,
             max_file_size_bytes: config.max_file_size_kb * 1024,
+            max_files: if config.max_files > 0 {
+                config.max_files
+            } else {
+                launch.max_files
+            },
             ..crate::indexer::IndexConfig::default()
         }
     }
@@ -575,7 +632,7 @@ impl CodeGraphBackend {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send + 'a>> {
         Box::pin(async move {
             let config = self.config.read().await.clone();
-            let idx_config = Self::index_config_from_lsp(&config);
+            let idx_config = Self::index_config_from_lsp(&config, &self.launch);
             let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let (total, _parsed, _skipped, _by_lang, _errors) = self
                 .indexer
@@ -962,9 +1019,14 @@ impl LanguageServer for CodeGraphBackend {
                     .get("embedOnOpen")
                     .and_then(|v| v.as_bool())
                     .unwrap_or_else(default_embed_on_open),
+                max_files: opts
+                    .get("maxFiles")
+                    .and_then(|v| v.as_u64())
+                    .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX)),
             };
-            tracing::info!("CodeGraph config: index_on_startup={}, exclude_patterns={:?}, index_paths={:?}, max_file_size_kb={}, embed_on_open={}",
-                config.index_on_startup, config.exclude_patterns, config.index_paths, config.max_file_size_kb, config.embed_on_open);
+            tracing::info!("CodeGraph config: index_on_startup={}, exclude_patterns={:?}, index_paths={:?}, max_file_size_kb={}, embed_on_open={}, max_files={}",
+                config.index_on_startup, config.exclude_patterns, config.index_paths, config.max_file_size_kb, config.embed_on_open,
+                Self::index_config_from_lsp(&config, &self.launch).max_files);
             *self.config.write().await = config;
         }
 
@@ -1245,7 +1307,7 @@ impl LanguageServer for CodeGraphBackend {
                     .collect()
             };
 
-            let idx_config = Self::index_config_from_lsp(&config);
+            let idx_config = Self::index_config_from_lsp(&config, &self.launch);
             let result = self
                 .indexer
                 .index_workspace(&self.graph, &paths_to_index, &idx_config)
@@ -1531,7 +1593,7 @@ impl LanguageServer for CodeGraphBackend {
         let config = self.config.read().await.clone();
 
         // Skip files matching exclude patterns (binary archives, vendored sources, secrets…).
-        let exclude_set = Self::index_config_from_lsp(&config).build_exclude_set();
+        let exclude_set = Self::index_config_from_lsp(&config, &self.launch).build_exclude_set();
         if exclude_set.is_match(path.to_string_lossy().as_ref()) {
             tracing::info!("Skipping did_open for {:?}: matched exclude pattern", path);
             return;
@@ -2024,7 +2086,7 @@ impl LanguageServer for CodeGraphBackend {
                         .collect()
                 };
 
-                let idx_config = Self::index_config_from_lsp(&config);
+                let idx_config = Self::index_config_from_lsp(&config, &self.launch);
                 let started_at = std::time::Instant::now();
                 let result = self
                     .indexer
@@ -2492,7 +2554,7 @@ impl LanguageServer for CodeGraphBackend {
                 }
 
                 let lsp_config = self.config.read().await.clone();
-                let config = Self::index_config_from_lsp(&lsp_config);
+                let config = Self::index_config_from_lsp(&lsp_config, &self.launch);
                 let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let (total, _parsed, _skipped, _by_lang, _errors) = self
                     .indexer
@@ -4163,6 +4225,68 @@ mod tests {
     use codegraph::{NodeType, PropertyMap};
     use std::path::Path;
     use tempfile::TempDir;
+
+    mod launch_options {
+        use super::*;
+
+        fn launch(max_files: usize) -> LaunchOptions {
+            LaunchOptions {
+                max_files,
+                exclude_dirs: vec!["generated".into()],
+            }
+        }
+
+        #[test]
+        fn the_engine_flag_sets_the_limit_when_the_client_has_none() {
+            let config = CodeGraphConfig::default();
+            let idx = CodeGraphBackend::index_config_from_lsp(&config, &launch(30_000));
+            assert_eq!(idx.max_files, 30_000);
+        }
+
+        #[test]
+        fn a_client_limit_wins_over_the_engine_flag() {
+            let config = CodeGraphConfig {
+                max_files: 12_000,
+                ..CodeGraphConfig::default()
+            };
+            let idx = CodeGraphBackend::index_config_from_lsp(&config, &launch(30_000));
+            assert_eq!(idx.max_files, 12_000);
+        }
+
+        #[test]
+        fn engine_excludes_add_to_the_defaults() {
+            let idx =
+                CodeGraphBackend::index_config_from_lsp(&CodeGraphConfig::default(), &launch(1));
+            assert!(idx.exclude_dirs.iter().any(|d| d == "generated"));
+            assert!(idx.exclude_dirs.iter().any(|d| d == "node_modules"));
+        }
+
+        #[test]
+        fn a_settings_push_keeps_the_engine_flag() {
+            // The client replaces the whole config on every settings change,
+            // and older clients never send maxFiles at all.
+            let pushed: CodeGraphConfig =
+                serde_json::from_value(serde_json::json!({"indexOnStartup": true})).unwrap();
+            let idx = CodeGraphBackend::index_config_from_lsp(&pushed, &launch(30_000));
+            assert_eq!(idx.max_files, 30_000);
+        }
+
+        #[tokio::test]
+        async fn initialize_reads_max_files_from_the_client() {
+            let (service, _socket) = tower_lsp::LspService::new(|client| {
+                CodeGraphBackend::new(client).with_launch_options(launch(30_000))
+            });
+            let backend = service.inner();
+            let params = InitializeParams {
+                initialization_options: Some(serde_json::json!({"maxFiles": 9_000})),
+                ..Default::default()
+            };
+            backend.initialize(params).await.unwrap();
+            let config = backend.config.read().await.clone();
+            let idx = CodeGraphBackend::index_config_from_lsp(&config, &backend.launch);
+            assert_eq!(idx.max_files, 9_000);
+        }
+    }
 
     mod workspace_paths {
         use super::*;
