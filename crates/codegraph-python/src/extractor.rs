@@ -610,7 +610,18 @@ fn extract_callee_name(source: &[u8], node: Node) -> String {
         "identifier" => node.utf8_text(source).unwrap_or("").to_string(),
         "attribute" => {
             // Handle obj.method() or self.method()
-            node.utf8_text(source).unwrap_or("").to_string()
+            //
+            // Keep only the trailing method name. The receiver (`self`,
+            // `self.simulator`, `np`, ...) is not part of the callee's identity,
+            // and keeping it produced callee keys like "self.simulator.partial_close"
+            // that matched no symbol in the graph — so every method call silently
+            // lost its edge. Mirrors codegraph-rust's `field_expression` handling,
+            // which keeps just the field name.
+            let full = node.utf8_text(source).unwrap_or("");
+            match full.rsplit_once('.') {
+                Some((_, method)) => method.to_string(),
+                None => full.to_string(),
+            }
         }
         _ => String::new(),
     }
@@ -939,6 +950,62 @@ def greet(name):
 
         assert_eq!(ir.functions.len(), 2);
         assert!(ir.calls.len() >= 2, "Should find at least 2 calls");
+    }
+
+    #[test]
+    fn test_method_call_callee_names() {
+        // Method calls must be recorded with the bare method name so they can
+        // be matched against the symbol map; the receiver (`self`,
+        // `self.simulator`) is not part of the callee's identity.
+        let source = r#"
+class TradingEngine:
+    def run_tick(self):
+        self.simulator.close_position("BTC", 1.0)
+        self._emit_ops("x")
+        self._pool_ranks(alt_dfs)
+
+    def _emit_ops(self, x):
+        pass
+
+    def _pool_ranks(self, alt_dfs):
+        pass
+"#;
+        let path = Path::new("test.py");
+        let config = ParserConfig::default();
+        let ir = extract(source, path, &config).unwrap();
+
+        let calls: Vec<(&str, &str)> = ir
+            .calls
+            .iter()
+            .map(|c| (c.caller.as_str(), c.callee.as_str()))
+            .collect();
+        println!("extracted calls: {calls:?}");
+
+        println!(
+            "module-level functions: {:?}",
+            ir.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        for class in &ir.classes {
+            println!(
+                "CLASS {:?} methods: {:?}",
+                class.name,
+                class.methods.iter().map(|m| &m.name).collect::<Vec<_>>()
+            );
+        }
+
+        // Every call inside a method is attributed to the qualified method name.
+        assert!(
+            calls.iter().all(|(caller, _)| *caller == "TradingEngine.run_tick"),
+            "all calls should be attributed to TradingEngine.run_tick, got {calls:?}"
+        );
+
+        // The receiver is stripped; only the method name survives.
+        for expected in ["close_position", "_emit_ops", "_pool_ranks"] {
+            assert!(
+                calls.iter().any(|(_, callee)| *callee == expected),
+                "expected a call to {expected}, got {calls:?}"
+            );
+        }
     }
 
     #[test]

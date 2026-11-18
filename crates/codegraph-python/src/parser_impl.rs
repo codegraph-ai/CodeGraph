@@ -201,6 +201,12 @@ impl PythonParser {
                     graph
                         .add_edge(class_id, method_id, EdgeType::Contains, PropertyMap::new())
                         .map_err(|e| ParserError::GraphError(e.to_string()))?;
+                    // Also index the method under its qualified name. The
+                    // extractor attributes calls made inside a method to
+                    // "Class.method", while node_map is keyed by bare names —
+                    // without this entry every method call failed to resolve
+                    // and its edge was silently dropped.
+                    node_map.insert(format!("{}.{}", class.name, method.name), method_id);
                 }
             }
         }
@@ -554,6 +560,74 @@ fn extract_first_string_arg(attr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegraph::{EdgeType, NodeType};
+
+    #[test]
+    fn test_method_call_edge_is_created() {
+        // End-to-end over the same path the server uses (parse_source ->
+        // ir_to_graph). A call made inside a method must produce a Calls edge.
+        let source = r#"
+class Probe:
+    def probe_method(self):
+        return 1
+
+    def probe_method_caller(self):
+        return self.probe_method()
+
+
+def probe_free_fn():
+    return 1
+
+
+def probe_free_caller():
+    return probe_free_fn()
+"#;
+        let mut graph = CodeGraph::in_memory().unwrap();
+        let parser = PythonParser::new();
+        parser
+            .parse_source(source, std::path::Path::new("probe.py"), &mut graph)
+            .expect("parse source");
+
+        let funcs = graph
+            .query()
+            .node_type(NodeType::Function)
+            .execute()
+            .expect("query functions");
+
+        let find = |name: &str| {
+            funcs
+                .iter()
+                .find(|id| {
+                    graph
+                        .get_node(**id)
+                        .ok()
+                        .and_then(|n| n.properties.get_string("name").map(|n| n == name))
+                        .unwrap_or(false)
+                })
+                .copied()
+                .expect("node for function")
+        };
+
+        for (caller_name, callee_name) in [
+            ("probe_method_caller", "probe_method"),
+            ("probe_free_caller", "probe_free_fn"),
+        ] {
+            let caller = find(caller_name);
+            let callee = find(callee_name);
+            let edges = graph
+                .get_edges_between(caller, callee)
+                .expect("edges between caller and callee");
+            assert!(
+                edges.iter().any(|e| {
+                    graph
+                        .get_edge(*e)
+                        .map(|edge| edge.edge_type == EdgeType::Calls)
+                        .unwrap_or(false)
+                }),
+                "expected a Calls edge from {caller_name} to {callee_name}"
+            );
+        }
+    }
 
     #[test]
     fn test_python_parser_new() {
